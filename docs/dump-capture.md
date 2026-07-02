@@ -16,6 +16,16 @@ edgepad replay bug.ev
 
 Stop capture with `Ctrl+C` after reproducing the gesture. The output format is the same text fixture format used by replay tests, so a useful bug capture can later be copied into `tests/fixtures/` and turned into a regression test.
 
+The capture header includes real device capabilities when evdev exposes them:
+
+```text
+# slots: 0..=4
+# x: 10..=1210
+# y: 20..=820
+```
+
+`edgepad replay` reads this header and runs the engine with those ranges instead of temporary defaults.
+
 ## Safety
 
 Current `dump` behavior is read-only:
@@ -34,7 +44,6 @@ Reading `/dev/input/event*` may require `sudo`, group `input`, or seat/logind AC
 
 - No automatic touchpad selection yet; use `edgepad devices` first.
 - No duration/frame limit yet; use `Ctrl+C` to stop.
-- No capture metadata header beyond the source path.
-- No real device capability injection into `replay` yet, so replay still uses temporary fixture defaults.
+- No richer capture metadata beyond source path and core capabilities.
 
-These are intentional boundaries. This commit is about making `.ev` files easy to obtain without touching dangerous passthrough/uinput behavior.
+These are intentional boundaries. This commit is about making `.ev` files easy to obtain and replay with real device ranges without touching dangerous passthrough/uinput behavior.

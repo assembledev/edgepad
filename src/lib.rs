@@ -415,7 +415,7 @@ pub mod core {
 }
 
 pub mod replay {
-    use crate::core::{Engine, Event, FrameOutput, SlotError};
+    use crate::core::{AxisRange, Capabilities, Engine, Event, FrameOutput, SlotError};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum ReplayError {
@@ -432,6 +432,27 @@ pub mod replay {
             name: String,
             value: String,
         },
+        InvalidMetadata {
+            line: usize,
+            name: String,
+            value: String,
+        },
+        MissingMetadataField {
+            field: &'static str,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ReplayFile {
+        pub capabilities: Option<Capabilities>,
+        pub frames: Vec<Vec<Event>>,
+    }
+
+    pub fn parse_replay_file(input: &str) -> Result<ReplayFile, ReplayError> {
+        Ok(ReplayFile {
+            capabilities: parse_capabilities_metadata(input)?,
+            frames: parse_frames(input)?,
+        })
     }
 
     pub fn parse_frames(input: &str) -> Result<Vec<Vec<Event>>, ReplayError> {
@@ -496,6 +517,99 @@ pub mod replay {
         }
 
         Ok(frames)
+    }
+
+    #[derive(Default)]
+    struct CapabilityMetadata {
+        slots: Option<AxisRange>,
+        x: Option<AxisRange>,
+        y: Option<AxisRange>,
+        saw_any: bool,
+    }
+
+    fn parse_capabilities_metadata(input: &str) -> Result<Option<Capabilities>, ReplayError> {
+        let mut metadata = CapabilityMetadata::default();
+
+        for (index, raw_line) in input.lines().enumerate() {
+            let line_number = index + 1;
+            let Some(comment) = raw_line.trim_start().strip_prefix('#') else {
+                continue;
+            };
+            let Some((name, value)) = comment.trim().split_once(':') else {
+                continue;
+            };
+            let name = name.trim();
+            let value = value.trim();
+
+            match name {
+                "slots" => {
+                    metadata.saw_any = true;
+                    metadata.slots = Some(parse_metadata_range(line_number, name, value)?);
+                }
+                "x" => {
+                    metadata.saw_any = true;
+                    metadata.x = Some(parse_metadata_range(line_number, name, value)?);
+                }
+                "y" => {
+                    metadata.saw_any = true;
+                    metadata.y = Some(parse_metadata_range(line_number, name, value)?);
+                }
+                _ => {}
+            }
+        }
+
+        if !metadata.saw_any {
+            return Ok(None);
+        }
+
+        let slots = metadata
+            .slots
+            .ok_or(ReplayError::MissingMetadataField { field: "slots" })?;
+        let x = metadata
+            .x
+            .ok_or(ReplayError::MissingMetadataField { field: "x" })?;
+        let y = metadata
+            .y
+            .ok_or(ReplayError::MissingMetadataField { field: "y" })?;
+
+        Ok(Some(Capabilities {
+            slot_min: slots.min,
+            slot_max: slots.max,
+            x,
+            y,
+        }))
+    }
+
+    fn parse_metadata_range(
+        line: usize,
+        name: &str,
+        value: &str,
+    ) -> Result<AxisRange, ReplayError> {
+        let Some((min, max)) = value.split_once("..=") else {
+            return Err(invalid_metadata(line, name, value));
+        };
+        let min = min
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| invalid_metadata(line, name, value))?;
+        let max = max
+            .trim()
+            .parse::<i32>()
+            .map_err(|_| invalid_metadata(line, name, value))?;
+
+        if min > max {
+            return Err(invalid_metadata(line, name, value));
+        }
+
+        Ok(AxisRange { min, max })
+    }
+
+    fn invalid_metadata(line: usize, name: &str, value: &str) -> ReplayError {
+        ReplayError::InvalidMetadata {
+            line,
+            name: name.to_string(),
+            value: value.to_string(),
+        }
     }
 
     pub fn run_frames(

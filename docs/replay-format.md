@@ -6,7 +6,7 @@ They are for tests and debugging, not user configuration.
 
 ## Syntax
 
-Each non-empty line is one event:
+Each non-empty non-comment line is one event:
 
 ```text
 ABS_MT_SLOT <slot>
@@ -27,6 +27,30 @@ ABS_MT_SLOT 0 # inline comment
 `SYN_REPORT` ends the current frame. Events before the next `SYN_REPORT` are processed together.
 
 `SYN_DROPPED` creates a standalone frame that tells the engine to clear local touch state and require resync.
+
+## Metadata header
+
+Real captures can include capability metadata in comments:
+
+```text
+# edgepad .ev dump
+# device: /dev/input/event5
+# slots: 0..=4
+# x: 10..=1210
+# y: 20..=820
+```
+
+`edgepad replay` uses this metadata when present instead of fixture defaults. Edge-zone decisions use the real touchpad coordinate range and slot range.
+
+Old handwritten fixtures without metadata still work; replay falls back to temporary defaults:
+
+```text
+slots: 0..=9
+x: 0..=1000
+y: 0..=700
+```
+
+If any of `slots`, `x`, or `y` is present, all three must be present. Partial metadata is rejected so broken captures do not silently run with fake defaults.
 
 ## Example: left-edge swipe right
 

@@ -1,13 +1,13 @@
 use std::env;
 use std::fs::{self, File};
-use std::io::{LineWriter, Write};
+use std::io::LineWriter;
 use std::path::{Path, PathBuf};
 use std::process;
 
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_devices, format_device_line};
-use edgepad::dump::write_fixture_event;
-use edgepad::replay::{parse_frames, run_frames};
+use edgepad::dump::{capabilities_from_raw_device, write_capture_header, write_fixture_event};
+use edgepad::replay::{parse_replay_file, run_frames};
 use evdev::raw_stream::RawDevice;
 
 const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] | edgepad dump --device <event-node> --out <file.ev>";
@@ -101,12 +101,9 @@ fn dump(device_path: &Path, out_path: &Path) -> Result<(), String> {
     let file = File::create(out_path)
         .map_err(|err| format!("failed to create {}: {err}", out_path.display()))?;
     let mut writer = LineWriter::new(file);
-
-    writeln!(writer, "# edgepad .ev dump")
+    let capabilities = capabilities_from_raw_device(&device);
+    write_capture_header(&mut writer, device_path, capabilities)
         .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
-    writeln!(writer, "# device: {}", device_path.display())
-        .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
-    writeln!(writer).map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
 
     loop {
         let events = device.fetch_events().map_err(|err| {
@@ -122,25 +119,28 @@ fn dump(device_path: &Path, out_path: &Path) -> Result<(), String> {
     }
 }
 
+fn default_capabilities() -> Capabilities {
+    Capabilities {
+        slot_min: 0,
+        slot_max: 9,
+        x: AxisRange { min: 0, max: 1000 },
+        y: AxisRange { min: 0, max: 700 },
+    }
+}
+
 fn replay(path: &Path) -> Result<(), String> {
     let input = fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    let frames = parse_frames(&input).map_err(|err| format!("parse failed: {err:?}"))?;
+    let replay = parse_replay_file(&input).map_err(|err| format!("parse failed: {err:?}"))?;
 
-    // Temporary fixture defaults. Real dump/capture support will put device capabilities
-    // in the capture path instead of pretending every touchpad is 1000x700.
-    let mut engine = Engine::new(
-        Capabilities {
-            slot_min: 0,
-            slot_max: 9,
-            x: AxisRange { min: 0, max: 1000 },
-            y: AxisRange { min: 0, max: 700 },
-        },
-        EdgeWidths::all(0.10),
-    );
+    let (capability_source, capabilities) = match replay.capabilities {
+        Some(capabilities) => ("metadata", capabilities),
+        None => ("defaults", default_capabilities()),
+    };
+    let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
 
     let outputs =
-        run_frames(&mut engine, &frames).map_err(|err| format!("replay failed: {err:?}"))?;
+        run_frames(&mut engine, &replay.frames).map_err(|err| format!("replay failed: {err:?}"))?;
     let passthrough_events = outputs
         .iter()
         .map(|output| output.passthrough.len())
@@ -151,7 +151,16 @@ fn replay(path: &Path) -> Result<(), String> {
         .collect::<Vec<_>>();
     let resync_required = outputs.iter().any(|output| output.resync_required);
 
-    println!("frames: {}", frames.len());
+    println!(
+        "capabilities: {capability_source} slots={}..={} x={}..={} y={}..={}",
+        capabilities.slot_min,
+        capabilities.slot_max,
+        capabilities.x.min,
+        capabilities.x.max,
+        capabilities.y.min,
+        capabilities.y.max
+    );
+    println!("frames: {}", replay.frames.len());
     println!("passthrough_events: {passthrough_events}");
     println!("gestures: {}", gestures.len());
     for gesture in gestures {

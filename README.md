@@ -27,7 +27,8 @@ Implemented:
 - regression fixtures for left-edge swipe, center passthrough, mixed claimed/passthrough slots, duplicate tracking IDs, and `SYN_DROPPED` reset;
 - minimal `edgepad replay <fixture.ev>` CLI for inspecting fixture behavior;
 - read-only `edgepad devices` discovery foundation using `evdev`;
-- read-only `edgepad dump --device <event-node> --out <file.ev>` capture skeleton for real `.ev` bug reports.
+- read-only `edgepad dump --device <event-node> --out <file.ev>` capture skeleton for real `.ev` bug reports;
+- `.ev` capability metadata header parsed by replay and written by dump.
 
 Docs:
 

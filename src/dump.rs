@@ -1,6 +1,61 @@
 use std::io::{self, Write};
+use std::path::Path;
 
+use crate::core::{AxisRange, Capabilities};
+use evdev::raw_stream::RawDevice;
 use evdev::{AbsoluteAxisCode, EventSummary, InputEvent, SynchronizationCode};
+
+pub fn write_capture_header(
+    mut writer: impl Write,
+    device_path: &Path,
+    capabilities: Option<Capabilities>,
+) -> io::Result<()> {
+    writeln!(writer, "# edgepad .ev dump")?;
+    writeln!(writer, "# device: {}", device_path.display())?;
+    if let Some(capabilities) = capabilities {
+        writeln!(
+            writer,
+            "# slots: {}..={}",
+            capabilities.slot_min, capabilities.slot_max
+        )?;
+        writeln!(
+            writer,
+            "# x: {}..={}",
+            capabilities.x.min, capabilities.x.max
+        )?;
+        writeln!(
+            writer,
+            "# y: {}..={}",
+            capabilities.y.min, capabilities.y.max
+        )?;
+    } else {
+        writeln!(writer, "# capabilities: unavailable")?;
+    }
+    writeln!(writer)?;
+    Ok(())
+}
+
+pub fn capabilities_from_raw_device(device: &RawDevice) -> Option<Capabilities> {
+    let slot = axis_info(device, AbsoluteAxisCode::ABS_MT_SLOT)?;
+    let x = axis_info(device, AbsoluteAxisCode::ABS_MT_POSITION_X)?;
+    let y = axis_info(device, AbsoluteAxisCode::ABS_MT_POSITION_Y)?;
+
+    Some(Capabilities {
+        slot_min: slot.min,
+        slot_max: slot.max,
+        x,
+        y,
+    })
+}
+
+fn axis_info(device: &RawDevice, wanted: AbsoluteAxisCode) -> Option<AxisRange> {
+    device.get_absinfo().ok()?.find_map(|(axis, info)| {
+        (axis == wanted).then_some(AxisRange {
+            min: info.minimum(),
+            max: info.maximum(),
+        })
+    })
+}
 
 pub fn fixture_line_for_event(event: InputEvent) -> Option<String> {
     match event.destructure() {

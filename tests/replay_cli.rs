@@ -1,3 +1,4 @@
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -44,6 +45,43 @@ fn replay_cli_prints_summary_for_valid_fixture() {
 }
 
 #[test]
+fn replay_cli_uses_metadata_capabilities_when_present() {
+    let path = unique_temp_path("edgepad-replay-metadata-slot-range.ev");
+    fs::write(
+        &path,
+        r#"
+# slots: 0..=0
+# x: 0..=1000
+# y: 0..=700
+
+ABS_MT_SLOT 1
+ABS_MT_TRACKING_ID 123
+ABS_MT_POSITION_X 500
+ABS_MT_POSITION_Y 300
+SYN_REPORT
+"#,
+    )
+    .expect("metadata fixture should be written");
+
+    let output = edgepad()
+        .arg("replay")
+        .arg(&path)
+        .output()
+        .expect("edgepad binary should run");
+
+    fs::remove_file(&path).expect("metadata fixture should be removed");
+
+    assert!(
+        !output.status.success(),
+        "replay should fail because metadata limits slots to 0..=0"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("SlotOutOfRange"), "stderr was: {stderr}");
+    assert!(stderr.contains("min: 0"), "stderr was: {stderr}");
+    assert!(stderr.contains("max: 0"), "stderr was: {stderr}");
+}
+
+#[test]
 fn replay_cli_returns_nonzero_for_engine_error() {
     let output = edgepad()
         .arg("replay")
@@ -59,4 +97,8 @@ fn replay_cli_returns_nonzero_for_engine_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("replay failed"), "stderr was: {stderr}");
     assert!(stderr.contains("SlotAlreadyActive"), "stderr was: {stderr}");
+}
+
+fn unique_temp_path(prefix: &str) -> PathBuf {
+    std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()))
 }
