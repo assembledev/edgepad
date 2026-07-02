@@ -67,6 +67,26 @@ tests/fixtures/syn-dropped-reset.ev
 
 These cover the minimum lifecycle cases before real device I/O: claimed edge contact, normal passthrough contact, mixed claimed/passthrough slots in one stream, duplicate tracking ID rejection, and `SYN_DROPPED` recovery.
 
+## Inspecting a fixture manually
+
+The minimal CLI can run a fixture through the current engine and print a summary:
+
+```bash
+cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
+```
+
+Expected shape:
+
+```text
+frames: 3
+passthrough_events: 0
+gestures: 1
+gesture slot=0 tracking_id=123 zone=left direction=right
+resync_required: false
+```
+
+This is a debug/demo helper, not a replacement for `cargo test`. The CLI currently uses temporary fixture defaults: slots `0..=9`, X range `0..1000`, Y range `0..700`, edge width `10%`. Real device capabilities belong in the later dump/capture path.
+
 ## Rationale
 
 Input daemons fail in ugly ways when slot lifecycle is wrong: ghost fingers, stuck touches, shifted finger counts, or compositor gestures needing one extra finger. Fixtures let us turn every such bug into a regression test before touching real `/dev/input` or `uinput`.
