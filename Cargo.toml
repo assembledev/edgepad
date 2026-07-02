@@ -2,6 +2,7 @@
 name = "edgepad"
 version = "0.1.0"
 edition = "2021"
+license = "MIT OR Apache-2.0"
 description = "Correctness-first Wayland touchpad edge gesture daemon"
 repository = "https://github.com/assembledev/edgepad"
 

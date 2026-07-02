@@ -80,3 +80,12 @@ Replace `/dev/input/eventX` with the touchpad event node reported by `edgepad de
 - [`docs/device-discovery.md`](docs/device-discovery.md)
 - [`docs/dump-capture.md`](docs/dump-capture.md)
 - [`docs/nix.md`](docs/nix.md)
+
+## License
+
+Licensed under either of:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT license ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.

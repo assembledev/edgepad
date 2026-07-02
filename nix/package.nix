@@ -29,6 +29,10 @@ rustPlatform.buildRustPackage {
   meta = {
     description = "Correctness-first Linux touchpad edge gesture daemon";
     homepage = "https://github.com/assembledev/edgepad";
+    license = with lib.licenses; [
+      asl20
+      mit
+    ];
     mainProgram = "edgepad";
     platforms = lib.platforms.linux;
   };
