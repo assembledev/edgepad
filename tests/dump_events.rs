@@ -155,10 +155,12 @@ fn write_fixture_events_with_limit_stops_after_requested_sync_boundaries() {
     ];
     let mut remaining_frames = Some(2);
 
-    let reached_limit = write_fixture_events_with_limit(&mut out, events, &mut remaining_frames)
+    let result = write_fixture_events_with_limit(&mut out, events, &mut remaining_frames)
         .expect("events should write");
 
-    assert!(reached_limit);
+    assert!(result.reached_limit);
+    assert_eq!(result.events_written, 4);
+    assert_eq!(result.frame_boundaries_written, 2);
     assert_eq!(remaining_frames, Some(0));
     assert_eq!(
         String::from_utf8(out).expect("fixture output should be utf8"),

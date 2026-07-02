@@ -9,12 +9,13 @@ edgepad dump --device /dev/input/event5 --out bug.ev
 Workflow:
 
 ```bash
-edgepad devices
+edgepad devices              # touchpad candidates only
+edgepad devices --all        # optional full device list
 edgepad dump --device /dev/input/event5 --out bug.ev --frames 60
 edgepad replay bug.ev
 ```
 
-With `--frames N`, capture stops automatically after N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`). Without `--frames`, stop capture manually with `Ctrl+C` after reproducing the gesture.
+With `--frames N`, capture stops automatically after N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`) and prints a short summary: output path, device path, captured capabilities, written frame boundaries, written replay-relevant events, and the next replay command. Without `--frames`, stop capture manually with `Ctrl+C` after reproducing the gesture.
 
 The output format is the same text fixture format used by replay tests, so a useful bug capture can later be copied into `tests/fixtures/` and turned into a regression test.
 

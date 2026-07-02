@@ -104,11 +104,15 @@ Expected shape:
 ```text
 capabilities: defaults slots=0..=9 x=0..=1000 y=0..=700
 frames: 3
+events: total=9 slot=3 tracking_start=1 tracking_end=1 x=2 y=2 syn_dropped=0
+contacts: started=1 ended=1
 passthrough_events: 0
 gestures: 1
 gesture slot=0 tracking_id=123 zone=left direction=right
 resync_required: false
 ```
+
+The summary also prints lightweight capture diagnostics. For example, if a real `.ev` file contains movement events but no `ABS_MT_TRACKING_ID` start, replay reports that no contact starts were found and suggests starting capture before touching the pad and lifting before capture stops.
 
 This is a debug/demo helper, not a replacement for `cargo test`. Fixtures without metadata use default ranges; captures produced by `edgepad dump` include real device ranges and replay uses those instead.
 

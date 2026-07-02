@@ -42,6 +42,13 @@ pub struct DeviceSummary {
     pub y_range: Option<AxisInfo>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveryReport {
+    pub summaries: Vec<DeviceSummary>,
+    pub event_node_count: usize,
+    pub unreadable_count: usize,
+}
+
 pub fn classify_device(caps: &EventDeviceCapabilities) -> DeviceKind {
     let has_type_b_multitouch = caps.has_mt_slot
         && caps.has_mt_tracking_id
@@ -78,16 +85,34 @@ pub fn event_device_paths(input_root: &Path) -> io::Result<Vec<PathBuf>> {
 }
 
 pub fn discover_devices(input_root: &Path) -> io::Result<Vec<DeviceSummary>> {
-    let mut summaries = Vec::new();
+    Ok(discover_device_report(input_root)?.summaries)
+}
 
-    for path in event_device_paths(input_root)? {
-        let Ok(device) = Device::open(&path) else {
-            continue;
-        };
-        summaries.push(summary_from_device(path, &device));
+pub fn discover_device_report(input_root: &Path) -> io::Result<DiscoveryReport> {
+    let paths = event_device_paths(input_root)?;
+    let event_node_count = paths.len();
+    let mut summaries = Vec::new();
+    let mut unreadable_count = 0;
+
+    for path in paths {
+        match Device::open(&path) {
+            Ok(device) => summaries.push(summary_from_device(path, &device)),
+            Err(_) => unreadable_count += 1,
+        }
     }
 
-    Ok(summaries)
+    Ok(DiscoveryReport {
+        summaries,
+        event_node_count,
+        unreadable_count,
+    })
+}
+
+pub fn touchpad_candidates(summaries: &[DeviceSummary]) -> Vec<&DeviceSummary> {
+    summaries
+        .iter()
+        .filter(|summary| summary.kind == DeviceKind::Touchpad)
+        .collect()
 }
 
 pub fn format_device_line(summary: &DeviceSummary) -> String {

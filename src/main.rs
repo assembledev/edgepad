@@ -5,14 +5,15 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
-use edgepad::device::{discover_devices, format_device_line};
+use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
 use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
+    WriteFixtureEventsResult,
 };
-use edgepad::replay::{parse_replay_file, run_frames};
+use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] | edgepad dump --device <event-node> --out <file.ev> [--frames N]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N]";
 const DUMP_USAGE: &str = "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N]";
 
 fn main() {
@@ -34,8 +35,8 @@ fn run() -> Result<(), String> {
             replay(Path::new(&path))
         }
         Some("devices") => {
-            let root = parse_devices_root(args)?;
-            devices(&root)
+            let args = parse_devices_args(args)?;
+            devices(&args.root, args.show_all)
         }
         Some("dump") => {
             let args = parse_dump_args(args)?;
@@ -45,23 +46,30 @@ fn run() -> Result<(), String> {
     }
 }
 
+struct DeviceArgs {
+    root: PathBuf,
+    show_all: bool,
+}
+
 struct DumpArgs {
     device: PathBuf,
     out: PathBuf,
     frames: Option<usize>,
 }
 
-fn parse_devices_root(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
+fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceArgs, String> {
     let mut root = PathBuf::from("/dev/input");
+    let mut show_all = false;
 
     while let Some(arg) = args.next() {
-        if arg != "--root" {
-            return Err(USAGE.to_string());
+        match arg.as_str() {
+            "--root" => root = args.next().ok_or_else(|| USAGE.to_string())?.into(),
+            "--all" => show_all = true,
+            _ => return Err(USAGE.to_string()),
         }
-        root = args.next().ok_or_else(|| USAGE.to_string())?.into();
     }
 
-    Ok(root)
+    Ok(DeviceArgs { root, show_all })
 }
 
 fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, String> {
@@ -94,20 +102,54 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
     })
 }
 
-fn devices(root: &Path) -> Result<(), String> {
-    let summaries = discover_devices(root)
+fn devices(root: &Path, show_all: bool) -> Result<(), String> {
+    let report = discover_device_report(root)
         .map_err(|err| format!("failed to list {}: {err}", root.display()))?;
 
-    if summaries.is_empty() {
-        println!("no readable event devices found under {}", root.display());
+    if report.event_node_count == 0 {
+        println!("no event devices found under {}", root.display());
         return Ok(());
     }
 
-    for summary in summaries {
-        println!("{}", format_device_line(&summary));
+    if report.summaries.is_empty() {
+        println!(
+            "no readable event devices found under {} ({}; try sudo, group input, or seat/logind ACLs)",
+            root.display(),
+            event_node_count_text(report.event_node_count)
+        );
+        return Ok(());
+    }
+
+    if show_all {
+        for summary in &report.summaries {
+            println!("{}", format_device_line(summary));
+        }
+        return Ok(());
+    }
+
+    let candidates = touchpad_candidates(&report.summaries);
+    if candidates.is_empty() {
+        println!("no touchpad candidates found under {}", root.display());
+        println!(
+            "readable non-touchpad devices: {} (use --all to inspect)",
+            report.summaries.len()
+        );
+        return Ok(());
+    }
+
+    for summary in candidates {
+        println!("{}", format_device_line(summary));
     }
 
     Ok(())
+}
+
+fn event_node_count_text(count: usize) -> String {
+    if count == 1 {
+        "1 event node was present but could not be opened".to_string()
+    } else {
+        format!("{count} event nodes were present but could not be opened")
+    }
 }
 
 fn dump(
@@ -115,6 +157,7 @@ fn dump(
     out_path: &Path,
     mut remaining_frames: Option<usize>,
 ) -> Result<(), String> {
+    let requested_frames = remaining_frames;
     let mut device = RawDevice::open(device_path)
         .map_err(|err| format!("failed to open device {}: {err}", device_path.display()))?;
     let file = File::create(out_path)
@@ -123,6 +166,7 @@ fn dump(
     let capabilities = capabilities_from_raw_device(&device);
     write_capture_header(&mut writer, device_path, capabilities)
         .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+    let mut total = WriteFixtureEventsResult::default();
 
     loop {
         let events = device.fetch_events().map_err(|err| {
@@ -131,12 +175,47 @@ fn dump(
                 device_path.display()
             )
         })?;
-        if write_fixture_events_with_limit(&mut writer, events, &mut remaining_frames)
-            .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?
-        {
+        let result = write_fixture_events_with_limit(&mut writer, events, &mut remaining_frames)
+            .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+        total.add(result);
+        if total.reached_limit {
+            print_dump_summary(device_path, out_path, capabilities, requested_frames, total);
             return Ok(());
         }
     }
+}
+
+fn print_dump_summary(
+    device_path: &Path,
+    out_path: &Path,
+    capabilities: Option<Capabilities>,
+    requested_frames: Option<usize>,
+    stats: WriteFixtureEventsResult,
+) {
+    println!("wrote: {}", out_path.display());
+    println!("device: {}", device_path.display());
+    if let Some(capabilities) = capabilities {
+        println!(
+            "capabilities: slots={}..={} x={}..={} y={}..={}",
+            capabilities.slot_min,
+            capabilities.slot_max,
+            capabilities.x.min,
+            capabilities.x.max,
+            capabilities.y.min,
+            capabilities.y.max
+        );
+    } else {
+        println!("capabilities: unavailable");
+    }
+    if let Some(requested_frames) = requested_frames {
+        println!("requested_frame_boundaries: {requested_frames}");
+    }
+    println!(
+        "written_frame_boundaries: {}",
+        stats.frame_boundaries_written
+    );
+    println!("written_events: {}", stats.events_written);
+    println!("next: edgepad replay {}", out_path.display());
 }
 
 fn default_capabilities() -> Capabilities {
@@ -159,6 +238,7 @@ fn replay(path: &Path) -> Result<(), String> {
     };
     let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
 
+    let stats = replay_stats(&replay.frames);
     let outputs =
         run_frames(&mut engine, &replay.frames).map_err(|err| format!("replay failed: {err:?}"))?;
     let passthrough_events = outputs
@@ -181,8 +261,23 @@ fn replay(path: &Path) -> Result<(), String> {
         capabilities.y.max
     );
     println!("frames: {}", replay.frames.len());
+    println!(
+        "events: total={} slot={} tracking_start={} tracking_end={} x={} y={} syn_dropped={}",
+        stats.total_events,
+        stats.slot_events,
+        stats.tracking_starts,
+        stats.tracking_ends,
+        stats.x_events,
+        stats.y_events,
+        stats.syn_dropped_events
+    );
+    println!(
+        "contacts: started={} ended={}",
+        stats.tracking_starts, stats.tracking_ends
+    );
     println!("passthrough_events: {passthrough_events}");
-    println!("gestures: {}", gestures.len());
+    let gesture_count = gestures.len();
+    println!("gestures: {gesture_count}");
     for gesture in gestures {
         println!(
             "gesture slot={} tracking_id={} zone={} direction={}",
@@ -193,8 +288,34 @@ fn replay(path: &Path) -> Result<(), String> {
         );
     }
     println!("resync_required: {resync_required}");
+    print_replay_diagnosis(&stats, passthrough_events, gesture_count);
 
     Ok(())
+}
+
+fn print_replay_diagnosis(
+    stats: &edgepad::replay::ReplayStats,
+    passthrough_events: usize,
+    gestures: usize,
+) {
+    if stats.tracking_starts == 0 && (stats.x_events > 0 || stats.y_events > 0) {
+        println!(
+            "diagnosis: no contact starts found; capture likely began after a finger was already down or no new touch started"
+        );
+        println!(
+            "diagnosis_hint: start dump before touching the pad, perform one gesture, lift the finger before capture stops, or increase --frames"
+        );
+    } else if stats.tracking_starts > stats.tracking_ends {
+        println!(
+            "diagnosis: capture ended with active contact(s); lift fingers before capture stops or increase --frames"
+        );
+    } else if stats.tracking_starts == 0 && stats.total_events == 0 {
+        println!("diagnosis: no replay-relevant touch events found");
+    } else if passthrough_events == 0 && gestures == 0 {
+        println!(
+            "diagnosis: complete contacts were parsed, but current recognizer produced no passthrough events or gestures"
+        );
+    }
 }
 
 fn zone_name(zone: Zone) -> &'static str {

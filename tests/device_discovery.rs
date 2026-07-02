@@ -2,8 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 
 use edgepad::device::{
-    classify_device, event_device_paths, format_device_line, AxisInfo, DeviceKind, DeviceSummary,
-    EventDeviceCapabilities,
+    classify_device, event_device_paths, format_device_line, touchpad_candidates, AxisInfo,
+    DeviceKind, DeviceSummary, EventDeviceCapabilities,
 };
 
 #[test]
@@ -65,22 +65,51 @@ fn event_device_paths_only_returns_event_number_nodes_sorted_numerically() {
 }
 
 #[test]
+fn touchpad_candidates_filter_out_noise_devices() {
+    let summaries = vec![
+        device_summary("/dev/input/event0", "Keyboard", DeviceKind::Other),
+        device_summary(
+            "/dev/input/event7",
+            "Example Touchpad",
+            DeviceKind::Touchpad,
+        ),
+        device_summary("/dev/input/event9", "Touchscreen", DeviceKind::Touchscreen),
+    ];
+
+    let candidates = touchpad_candidates(&summaries);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].path, PathBuf::from("/dev/input/event7"));
+}
+
+#[test]
 fn format_device_line_prints_stable_debug_summary() {
-    let summary = DeviceSummary {
-        path: PathBuf::from("/dev/input/event5"),
-        name: "Example Touchpad".to_string(),
-        vendor: 0x1234,
-        product: 0x5678,
-        kind: DeviceKind::Touchpad,
-        slot_range: Some(AxisInfo { min: 0, max: 4 }),
-        x_range: Some(AxisInfo { min: 0, max: 1000 }),
-        y_range: Some(AxisInfo { min: 0, max: 700 }),
-    };
+    let summary = device_summary(
+        "/dev/input/event5",
+        "Example Touchpad",
+        DeviceKind::Touchpad,
+    );
 
     assert_eq!(
         format_device_line(&summary),
         "/dev/input/event5 kind=touchpad name=\"Example Touchpad\" id=1234:5678 slots=0..=4 x=0..=1000 y=0..=700"
     );
+}
+
+fn device_summary(path: &str, name: &str, kind: DeviceKind) -> DeviceSummary {
+    DeviceSummary {
+        path: PathBuf::from(path),
+        name: name.to_string(),
+        vendor: 0x1234,
+        product: 0x5678,
+        kind,
+        slot_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen)
+            .then_some(AxisInfo { min: 0, max: 4 }),
+        x_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen)
+            .then_some(AxisInfo { min: 0, max: 1000 }),
+        y_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen)
+            .then_some(AxisInfo { min: 0, max: 700 }),
+    }
 }
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {

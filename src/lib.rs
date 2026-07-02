@@ -448,6 +448,35 @@ pub mod replay {
         pub frames: Vec<Vec<Event>>,
     }
 
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct ReplayStats {
+        pub total_events: usize,
+        pub slot_events: usize,
+        pub tracking_starts: usize,
+        pub tracking_ends: usize,
+        pub x_events: usize,
+        pub y_events: usize,
+        pub syn_dropped_events: usize,
+    }
+
+    pub fn replay_stats(frames: &[Vec<Event>]) -> ReplayStats {
+        let mut stats = ReplayStats::default();
+
+        for event in frames.iter().flatten() {
+            stats.total_events += 1;
+            match event {
+                Event::Slot(_) => stats.slot_events += 1,
+                Event::TrackingId(id) if *id >= 0 => stats.tracking_starts += 1,
+                Event::TrackingId(_) => stats.tracking_ends += 1,
+                Event::X(_) => stats.x_events += 1,
+                Event::Y(_) => stats.y_events += 1,
+                Event::SynDropped => stats.syn_dropped_events += 1,
+            }
+        }
+
+        stats
+    }
+
     pub fn parse_replay_file(input: &str) -> Result<ReplayFile, ReplayError> {
         Ok(ReplayFile {
             capabilities: parse_capabilities_metadata(input)?,

@@ -82,6 +82,48 @@ SYN_REPORT
 }
 
 #[test]
+fn replay_cli_explains_capture_without_contact_start() {
+    let path = unique_temp_path("edgepad-replay-midstream-capture.ev");
+    fs::write(
+        &path,
+        r#"
+# slots: 0..=4
+# x: 0..=4000
+# y: 0..=2500
+
+ABS_MT_POSITION_X 1200
+ABS_MT_POSITION_Y 900
+SYN_REPORT
+"#,
+    )
+    .expect("midstream fixture should be written");
+
+    let output = edgepad()
+        .arg("replay")
+        .arg(&path)
+        .output()
+        .expect("edgepad binary should run");
+
+    fs::remove_file(&path).expect("midstream fixture should be removed");
+
+    assert!(
+        output.status.success(),
+        "expected replay command to succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("events: total=2"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("contacts: started=0 ended=0"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("diagnosis: no contact starts found"),
+        "stdout was: {stdout}"
+    );
+}
+
+#[test]
 fn replay_cli_returns_nonzero_for_engine_error() {
     let output = edgepad()
         .arg("replay")

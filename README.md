@@ -66,7 +66,8 @@ cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
 `dump` is read-only. It does not grab devices, suppress input, or create a virtual device.
 
 ```bash
-edgepad devices
+edgepad devices              # touchpad candidates only
+edgepad devices --all        # full /dev/input list for debugging
 sudo edgepad dump --device /dev/input/eventX --out bug.ev --frames 60
 edgepad replay bug.ev
 ```

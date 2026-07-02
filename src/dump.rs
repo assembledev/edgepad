@@ -90,13 +90,31 @@ pub fn write_fixture_event(mut writer: impl Write, event: InputEvent) -> io::Res
     Ok(true)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WriteFixtureEventsResult {
+    pub reached_limit: bool,
+    pub events_written: usize,
+    pub frame_boundaries_written: usize,
+}
+
+impl WriteFixtureEventsResult {
+    pub fn add(&mut self, other: Self) {
+        self.reached_limit |= other.reached_limit;
+        self.events_written += other.events_written;
+        self.frame_boundaries_written += other.frame_boundaries_written;
+    }
+}
+
 pub fn write_fixture_events_with_limit(
     mut writer: impl Write,
     events: impl IntoIterator<Item = InputEvent>,
     remaining_frames: &mut Option<usize>,
-) -> io::Result<bool> {
+) -> io::Result<WriteFixtureEventsResult> {
+    let mut result = WriteFixtureEventsResult::default();
+
     if matches!(remaining_frames, Some(0)) {
-        return Ok(true);
+        result.reached_limit = true;
+        return Ok(result);
     }
 
     for event in events {
@@ -105,18 +123,21 @@ pub fn write_fixture_events_with_limit(
         };
         let is_sync_boundary = is_sync_boundary(&line);
         write_fixture_line(&mut writer, &line)?;
+        result.events_written += 1;
 
         if is_sync_boundary {
+            result.frame_boundaries_written += 1;
             if let Some(remaining) = remaining_frames.as_mut() {
                 *remaining = remaining.saturating_sub(1);
                 if *remaining == 0 {
-                    return Ok(true);
+                    result.reached_limit = true;
+                    return Ok(result);
                 }
             }
         }
     }
 
-    Ok(false)
+    Ok(result)
 }
 
 fn write_fixture_line(mut writer: impl Write, line: &str) -> io::Result<()> {

@@ -1,24 +1,41 @@
-# Device Discovery
+# Device discovery
 
-`edgepad devices` is the first read-only bridge from replay fixtures toward real hardware.
-
-It lists readable `/dev/input/event*` devices and classifies Type-B multitouch pointer devices as touchpad candidates.
+`edgepad devices` lists touchpad candidates from `/dev/input/event*`.
 
 ```bash
 edgepad devices
 ```
 
-Output shape:
+Default output is intentionally filtered. A typical laptop has keyboards, lid switches, audio jacks, hotkeys, touchscreens, and other event nodes; for edge gestures the useful default is the touchpad candidate list.
+
+Example:
 
 ```text
-/dev/input/event5 kind=touchpad name="Example Touchpad" id=1234:5678 slots=0..=4 x=0..=1000 y=0..=700
+/dev/input/event7 kind=touchpad name="Example Touchpad" id=1234:5678 slots=0..=4 x=0..=4000 y=0..=2500
 ```
 
-For tests/debugging, a root can be overridden:
+For the full raw list:
+
+```bash
+edgepad devices --all
+```
+
+For tests/debugging, the input root can be overridden:
 
 ```bash
 edgepad devices --root /tmp/fake-input-root
+edgepad devices --root /tmp/fake-input-root --all
 ```
+
+## Permissions
+
+Without permission to open event nodes, Linux may expose `/dev/input/event*` paths while denying reads. In that case `edgepad devices` prints a permission hint instead of pretending no hardware exists.
+
+Typical options:
+
+- run the discovery command with `sudo`;
+- use the `input` group if that matches the system policy;
+- rely on seat/logind ACLs from an active graphical session.
 
 ## Safety
 
@@ -29,8 +46,6 @@ This command is read-only:
 - no event forwarding;
 - no daemon loop;
 - no command dispatch.
-
-If no event devices are readable, it prints a no-devices message. On a real machine, reading `/dev/input/event*` may require `sudo`, group `input`, or seat/logind ACLs.
 
 ## Rationale
 
