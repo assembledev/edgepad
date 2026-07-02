@@ -1,13 +1,17 @@
 use std::env;
-use std::fs;
-use std::path::Path;
+use std::fs::{self, File};
+use std::io::{LineWriter, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_devices, format_device_line};
+use edgepad::dump::write_fixture_event;
 use edgepad::replay::{parse_frames, run_frames};
+use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] | edgepad dump --device <event-node> --out <file.ev>";
+const DUMP_USAGE: &str = "usage: edgepad dump --device <event-node> --out <file.ev>";
 
 fn main() {
     if let Err(err) = run() {
@@ -31,14 +35,21 @@ fn run() -> Result<(), String> {
             let root = parse_devices_root(args)?;
             devices(&root)
         }
+        Some("dump") => {
+            let args = parse_dump_args(args)?;
+            dump(&args.device, &args.out)
+        }
         _ => Err(USAGE.to_string()),
     }
 }
 
-fn parse_devices_root(
-    mut args: impl Iterator<Item = String>,
-) -> Result<std::path::PathBuf, String> {
-    let mut root = std::path::PathBuf::from("/dev/input");
+struct DumpArgs {
+    device: PathBuf,
+    out: PathBuf,
+}
+
+fn parse_devices_root(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
+    let mut root = PathBuf::from("/dev/input");
 
     while let Some(arg) = args.next() {
         if arg != "--root" {
@@ -48,6 +59,24 @@ fn parse_devices_root(
     }
 
     Ok(root)
+}
+
+fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, String> {
+    let mut device = None;
+    let mut out = None;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device" => device = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
+            "--out" => out = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
+            _ => return Err(DUMP_USAGE.to_string()),
+        }
+    }
+
+    Ok(DumpArgs {
+        device: device.ok_or_else(|| DUMP_USAGE.to_string())?,
+        out: out.ok_or_else(|| DUMP_USAGE.to_string())?,
+    })
 }
 
 fn devices(root: &Path) -> Result<(), String> {
@@ -64,6 +93,33 @@ fn devices(root: &Path) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn dump(device_path: &Path, out_path: &Path) -> Result<(), String> {
+    let mut device = RawDevice::open(device_path)
+        .map_err(|err| format!("failed to open device {}: {err}", device_path.display()))?;
+    let file = File::create(out_path)
+        .map_err(|err| format!("failed to create {}: {err}", out_path.display()))?;
+    let mut writer = LineWriter::new(file);
+
+    writeln!(writer, "# edgepad .ev dump")
+        .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+    writeln!(writer, "# device: {}", device_path.display())
+        .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+    writeln!(writer).map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+
+    loop {
+        let events = device.fetch_events().map_err(|err| {
+            format!(
+                "failed to read events from {}: {err}",
+                device_path.display()
+            )
+        })?;
+        for event in events {
+            write_fixture_event(&mut writer, event)
+                .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+        }
+    }
 }
 
 fn replay(path: &Path) -> Result<(), String> {

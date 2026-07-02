@@ -4,6 +4,7 @@
 //! multi-touch slot lifecycle and edge ownership invariants.
 
 pub mod device;
+pub mod dump;
 
 pub mod core {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
