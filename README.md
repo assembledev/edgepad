@@ -24,7 +24,7 @@ Implemented:
 
 - pure Type-B multitouch core invariants;
 - replay fixture parser/runner;
-- regression fixture for left-edge swipe-right.
+- regression fixtures for left-edge swipe, center passthrough, mixed claimed/passthrough slots, duplicate tracking IDs, and `SYN_DROPPED` reset.
 
 Docs:
 

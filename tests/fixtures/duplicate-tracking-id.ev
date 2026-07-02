@@ -1,0 +1,10 @@
+# Starting the same slot twice without release should be rejected.
+ABS_MT_SLOT 0
+ABS_MT_TRACKING_ID 300
+ABS_MT_POSITION_X 500
+ABS_MT_POSITION_Y 300
+SYN_REPORT
+
+ABS_MT_SLOT 0
+ABS_MT_TRACKING_ID 301
+SYN_REPORT

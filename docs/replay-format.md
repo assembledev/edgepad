@@ -55,6 +55,18 @@ Human translation:
 
 For a device with X range `0..1000` and a left edge width of `10%`, this fixture produces a left-zone swipe-right gesture and emits no passthrough events.
 
+## Current regression fixtures
+
+```text
+tests/fixtures/left-edge-swipe-right.ev
+tests/fixtures/center-touch-passthrough.ev
+tests/fixtures/mixed-edge-and-center.ev
+tests/fixtures/duplicate-tracking-id.ev
+tests/fixtures/syn-dropped-reset.ev
+```
+
+These cover the minimum lifecycle cases before real device I/O: claimed edge contact, normal passthrough contact, mixed claimed/passthrough slots in one stream, duplicate tracking ID rejection, and `SYN_DROPPED` recovery.
+
 ## Rationale
 
 Input daemons fail in ugly ways when slot lifecycle is wrong: ghost fingers, stuck touches, shifted finger counts, or compositor gestures needing one extra finger. Fixtures let us turn every such bug into a regression test before touching real `/dev/input` or `uinput`.
