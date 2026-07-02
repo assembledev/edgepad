@@ -2,6 +2,8 @@
 
 `edgepad` provides a project flake so Nix/NixOS users can build and run it without relying on binaries built on another distribution.
 
+The flake uses `rust-overlay` for an explicit Rust toolchain, reads the package version from `Cargo.toml`, and keeps the package definition in `nix/package.nix`.
+
 ## Build
 
 ```bash
@@ -16,6 +18,7 @@ nix build .#edgepad
 ```bash
 nix run .#edgepad -- replay tests/fixtures/left-edge-swipe-right.ev
 nix run .#edgepad -- devices
+nix run .#edgepad -- devices --all
 ```
 
 For read-only capture from `/dev/input/event*`, permissions may require `sudo`, membership in the `input` group, or active seat/logind ACLs:
@@ -36,7 +39,21 @@ cargo test
 cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
 ```
 
-Or run a single command inside the shell:
+The dev shell includes:
+
+- stable Rust from `rust-overlay`;
+- `rust-src` and `rust-analyzer`;
+- `clippy` and `rustfmt`;
+- `evtest` and `libinput` for manual input-device debugging.
+
+To load the dev environment through direnv:
+
+```bash
+echo 'use flake' > .envrc
+direnv allow
+```
+
+Or run one command without entering a shell:
 
 ```bash
 nix develop -c cargo test
