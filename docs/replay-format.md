@@ -102,6 +102,7 @@ cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
 Expected shape:
 
 ```text
+capabilities: defaults slots=0..=9 x=0..=1000 y=0..=700
 frames: 3
 passthrough_events: 0
 gestures: 1
@@ -109,7 +110,7 @@ gesture slot=0 tracking_id=123 zone=left direction=right
 resync_required: false
 ```
 
-This is a debug/demo helper, not a replacement for `cargo test`. The CLI currently uses temporary fixture defaults: slots `0..=9`, X range `0..1000`, Y range `0..700`, edge width `10%`. Real device capabilities belong in the later dump/capture path.
+This is a debug/demo helper, not a replacement for `cargo test`. Fixtures without metadata use default ranges; captures produced by `edgepad dump` include real device ranges and replay uses those instead.
 
 ## Rationale
 

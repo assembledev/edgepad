@@ -1,38 +1,81 @@
 # edgepad
 
-Correctness-first Wayland touchpad edge gesture daemon.
+Correctness-first touchpad edge gestures for Linux/Wayland.
 
-## Goal
+`edgepad` is a small input daemon in progress. The goal is to turn physical touchpad edge zones into command surfaces while preserving normal touchpad behavior through a virtual input device.
 
-`edgepad` turns physical touchpad edge zones into command surfaces while preserving normal touchpad behavior through a virtual uinput device.
+The project focuses on input correctness: no leaked finger-down events, no stuck contacts, no broken multitouch state, and explicit recovery after `SYN_DROPPED`.
 
-This project exists because the hard part is not dispatching `hyprctl`; the hard part is not corrupting the input stream.
-
-## Foundation rules
-
-- Rust implementation.
-- Type-B evdev multi-touch slot lifecycle first.
-- Replay tests before real-device polish.
-- No hardcoded slot count; derive slot range from device capabilities.
-- Claimed edge touches must not leak partial down events into passthrough.
-- `SYN_DROPPED` must enter explicit resync handling.
-- NixOS/Home Manager support, but after the input core has tests.
-
-## Current status
+## Status
 
 Implemented:
 
-- pure Type-B multitouch core invariants;
-- replay fixture parser/runner;
-- regression fixtures for left-edge swipe, center passthrough, mixed claimed/passthrough slots, duplicate tracking IDs, and `SYN_DROPPED` reset;
-- minimal `edgepad replay <fixture.ev>` CLI for inspecting fixture behavior;
-- read-only `edgepad devices` discovery foundation using `evdev`;
-- read-only `edgepad dump --device <event-node> --out <file.ev>` capture skeleton for real `.ev` bug reports;
-- `.ev` capability metadata header parsed by replay and written by dump;
-- bounded dump capture via `--frames N`.
+- Type-B multitouch slot lifecycle model;
+- replay fixture parser and runner;
+- regression fixtures for edge claiming, normal passthrough, mixed slots, duplicate tracking IDs, and `SYN_DROPPED` recovery;
+- `edgepad replay <fixture.ev>` for inspecting fixture/capture behavior;
+- `edgepad devices` for read-only `/dev/input/event*` discovery;
+- `edgepad dump --device <event-node> --out <file.ev> [--frames N]` for read-only capture;
+- `.ev` metadata headers with real slot/X/Y ranges;
+- Nix flake for `nix build`, `nix run`, and `nix develop`.
 
-Docs:
+Not implemented yet:
+
+- virtual-device passthrough via `uinput`;
+- device grabbing;
+- daemon/service mode;
+- gesture/action configuration;
+- NixOS/Home Manager service module.
+
+## Quick start
+
+### Nix
+
+```bash
+nix build .#edgepad
+./result/bin/edgepad replay tests/fixtures/left-edge-swipe-right.ev
+```
+
+Run without installing:
+
+```bash
+nix run .#edgepad -- replay tests/fixtures/left-edge-swipe-right.ev
+nix run .#edgepad -- devices
+```
+
+Development shell:
+
+```bash
+nix develop
+cargo test
+```
+
+See [`docs/nix.md`](docs/nix.md).
+
+### Cargo
+
+```bash
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo test
+cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
+```
+
+## Capturing a real touchpad sample
+
+`dump` is read-only. It does not grab devices, suppress input, or create a virtual device.
+
+```bash
+edgepad devices
+sudo edgepad dump --device /dev/input/eventX --out bug.ev --frames 60
+edgepad replay bug.ev
+```
+
+Replace `/dev/input/eventX` with the touchpad event node reported by `edgepad devices`.
+
+## Docs
 
 - [`docs/replay-format.md`](docs/replay-format.md)
 - [`docs/device-discovery.md`](docs/device-discovery.md)
 - [`docs/dump-capture.md`](docs/dump-capture.md)
+- [`docs/nix.md`](docs/nix.md)

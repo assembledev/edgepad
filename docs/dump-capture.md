@@ -48,4 +48,4 @@ Reading `/dev/input/event*` may require `sudo`, group `input`, or seat/logind AC
 - No duration/time limit yet; use `--frames N` or `Ctrl+C`.
 - No richer capture metadata beyond source path and core capabilities.
 
-These are intentional boundaries. This commit is about making `.ev` files easy to obtain and replay with real device ranges without touching dangerous passthrough/uinput behavior.
+The capture path stays read-only so samples can be collected before device grabbing or virtual input are implemented.
