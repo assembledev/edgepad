@@ -1,0 +1,18 @@
+[package]
+name = "edgepad"
+version = "0.1.0"
+edition = "2021"
+description = "Correctness-first Wayland touchpad edge gesture daemon"
+repository = "https://github.com/assembledev/edgepad"
+
+[lib]
+name = "edgepad"
+path = "src/lib.rs"
+
+[[bin]]
+name = "edgepad"
+path = "src/main.rs"
+
+[dependencies]
+
+[dev-dependencies]
