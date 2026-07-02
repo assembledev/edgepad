@@ -3,6 +3,8 @@
 //! The first production surface is built test-first around Type-B
 //! multi-touch slot lifecycle and edge ownership invariants.
 
+pub mod device;
+
 pub mod core {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct AxisRange {

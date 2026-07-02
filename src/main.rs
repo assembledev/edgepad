@@ -4,7 +4,10 @@ use std::path::Path;
 use std::process;
 
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
+use edgepad::device::{discover_devices, format_device_line};
 use edgepad::replay::{parse_frames, run_frames};
+
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>]";
 
 fn main() {
     if let Err(err) = run() {
@@ -18,16 +21,49 @@ fn run() -> Result<(), String> {
 
     match args.next().as_deref() {
         Some("replay") => {
-            let path = args
-                .next()
-                .ok_or_else(|| "usage: edgepad replay <fixture.ev>".to_string())?;
+            let path = args.next().ok_or_else(|| USAGE.to_string())?;
             if args.next().is_some() {
-                return Err("usage: edgepad replay <fixture.ev>".to_string());
+                return Err(USAGE.to_string());
             }
             replay(Path::new(&path))
         }
-        _ => Err("usage: edgepad replay <fixture.ev>".to_string()),
+        Some("devices") => {
+            let root = parse_devices_root(args)?;
+            devices(&root)
+        }
+        _ => Err(USAGE.to_string()),
     }
+}
+
+fn parse_devices_root(
+    mut args: impl Iterator<Item = String>,
+) -> Result<std::path::PathBuf, String> {
+    let mut root = std::path::PathBuf::from("/dev/input");
+
+    while let Some(arg) = args.next() {
+        if arg != "--root" {
+            return Err(USAGE.to_string());
+        }
+        root = args.next().ok_or_else(|| USAGE.to_string())?.into();
+    }
+
+    Ok(root)
+}
+
+fn devices(root: &Path) -> Result<(), String> {
+    let summaries = discover_devices(root)
+        .map_err(|err| format!("failed to list {}: {err}", root.display()))?;
+
+    if summaries.is_empty() {
+        println!("no readable event devices found under {}", root.display());
+        return Ok(());
+    }
+
+    for summary in summaries {
+        println!("{}", format_device_line(&summary));
+    }
+
+    Ok(())
 }
 
 fn replay(path: &Path) -> Result<(), String> {
