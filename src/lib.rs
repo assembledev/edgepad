@@ -410,3 +410,111 @@ pub mod core {
         })
     }
 }
+
+pub mod replay {
+    use crate::core::{Engine, Event, FrameOutput, SlotError};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ReplayError {
+        UnknownEvent {
+            line: usize,
+            name: String,
+        },
+        MissingValue {
+            line: usize,
+            name: String,
+        },
+        InvalidValue {
+            line: usize,
+            name: String,
+            value: String,
+        },
+    }
+
+    pub fn parse_frames(input: &str) -> Result<Vec<Vec<Event>>, ReplayError> {
+        let mut frames = Vec::new();
+        let mut current = Vec::new();
+
+        for (index, raw_line) in input.lines().enumerate() {
+            let line_number = index + 1;
+            let line = raw_line
+                .split_once('#')
+                .map_or(raw_line, |(before_comment, _)| before_comment)
+                .trim();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let mut parts = line.split_whitespace();
+            let name = parts.next().expect("non-empty line has first token");
+
+            match name {
+                "SYN_REPORT" => {
+                    if !current.is_empty() {
+                        frames.push(std::mem::take(&mut current));
+                    }
+                }
+                "SYN_DROPPED" => {
+                    if !current.is_empty() {
+                        frames.push(std::mem::take(&mut current));
+                    }
+                    frames.push(vec![Event::syn_dropped()]);
+                }
+                "ABS_MT_SLOT" => current.push(Event::slot(parse_i32_value(
+                    line_number,
+                    name,
+                    parts.next(),
+                )?)),
+                "ABS_MT_TRACKING_ID" => {
+                    current.push(Event::tracking_id(parse_i32_value(
+                        line_number,
+                        name,
+                        parts.next(),
+                    )?));
+                }
+                "ABS_MT_POSITION_X" => {
+                    current.push(Event::x(parse_i32_value(line_number, name, parts.next())?))
+                }
+                "ABS_MT_POSITION_Y" => {
+                    current.push(Event::y(parse_i32_value(line_number, name, parts.next())?))
+                }
+                _ => {
+                    return Err(ReplayError::UnknownEvent {
+                        line: line_number,
+                        name: name.to_string(),
+                    });
+                }
+            }
+        }
+
+        if !current.is_empty() {
+            frames.push(current);
+        }
+
+        Ok(frames)
+    }
+
+    pub fn run_frames(
+        engine: &mut Engine,
+        frames: &[Vec<Event>],
+    ) -> Result<Vec<FrameOutput>, SlotError> {
+        frames
+            .iter()
+            .map(|frame| engine.process_frame(frame))
+            .collect()
+    }
+
+    fn parse_i32_value(line: usize, name: &str, value: Option<&str>) -> Result<i32, ReplayError> {
+        let value = value.ok_or_else(|| ReplayError::MissingValue {
+            line,
+            name: name.to_string(),
+        })?;
+
+        value.parse::<i32>().map_err(|_| ReplayError::InvalidValue {
+            line,
+            name: name.to_string(),
+            value: value.to_string(),
+        })
+    }
+}

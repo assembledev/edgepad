@@ -19,3 +19,13 @@ This project exists because the hard part is not dispatching `hyprctl`; the hard
 - NixOS/Home Manager support, but after the input core has tests.
 
 ## Current status
+
+Implemented:
+
+- pure Type-B multitouch core invariants;
+- replay fixture parser/runner;
+- regression fixture for left-edge swipe-right.
+
+Docs:
+
+- [`docs/replay-format.md`](docs/replay-format.md)
