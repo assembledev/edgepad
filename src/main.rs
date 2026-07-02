@@ -6,12 +6,14 @@ use std::process;
 
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_devices, format_device_line};
-use edgepad::dump::{capabilities_from_raw_device, write_capture_header, write_fixture_event};
+use edgepad::dump::{
+    capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
+};
 use edgepad::replay::{parse_replay_file, run_frames};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] | edgepad dump --device <event-node> --out <file.ev>";
-const DUMP_USAGE: &str = "usage: edgepad dump --device <event-node> --out <file.ev>";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] | edgepad dump --device <event-node> --out <file.ev> [--frames N]";
+const DUMP_USAGE: &str = "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N]";
 
 fn main() {
     if let Err(err) = run() {
@@ -37,7 +39,7 @@ fn run() -> Result<(), String> {
         }
         Some("dump") => {
             let args = parse_dump_args(args)?;
-            dump(&args.device, &args.out)
+            dump(&args.device, &args.out, args.frames)
         }
         _ => Err(USAGE.to_string()),
     }
@@ -46,6 +48,7 @@ fn run() -> Result<(), String> {
 struct DumpArgs {
     device: PathBuf,
     out: PathBuf,
+    frames: Option<usize>,
 }
 
 fn parse_devices_root(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
@@ -64,11 +67,22 @@ fn parse_devices_root(mut args: impl Iterator<Item = String>) -> Result<PathBuf,
 fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, String> {
     let mut device = None;
     let mut out = None;
+    let mut frames = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--device" => device = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
             "--out" => out = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
+            "--frames" => {
+                let raw = args.next().ok_or_else(|| DUMP_USAGE.to_string())?;
+                let parsed = raw
+                    .parse::<usize>()
+                    .map_err(|_| "--frames must be a positive integer".to_string())?;
+                if parsed == 0 {
+                    return Err("--frames must be a positive integer".to_string());
+                }
+                frames = Some(parsed);
+            }
             _ => return Err(DUMP_USAGE.to_string()),
         }
     }
@@ -76,6 +90,7 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
     Ok(DumpArgs {
         device: device.ok_or_else(|| DUMP_USAGE.to_string())?,
         out: out.ok_or_else(|| DUMP_USAGE.to_string())?,
+        frames,
     })
 }
 
@@ -95,7 +110,11 @@ fn devices(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn dump(device_path: &Path, out_path: &Path) -> Result<(), String> {
+fn dump(
+    device_path: &Path,
+    out_path: &Path,
+    mut remaining_frames: Option<usize>,
+) -> Result<(), String> {
     let mut device = RawDevice::open(device_path)
         .map_err(|err| format!("failed to open device {}: {err}", device_path.display()))?;
     let file = File::create(out_path)
@@ -112,9 +131,10 @@ fn dump(device_path: &Path, out_path: &Path) -> Result<(), String> {
                 device_path.display()
             )
         })?;
-        for event in events {
-            write_fixture_event(&mut writer, event)
-                .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+        if write_fixture_events_with_limit(&mut writer, events, &mut remaining_frames)
+            .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?
+        {
+            return Ok(());
         }
     }
 }

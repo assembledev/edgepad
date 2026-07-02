@@ -28,7 +28,8 @@ Implemented:
 - minimal `edgepad replay <fixture.ev>` CLI for inspecting fixture behavior;
 - read-only `edgepad devices` discovery foundation using `evdev`;
 - read-only `edgepad dump --device <event-node> --out <file.ev>` capture skeleton for real `.ev` bug reports;
-- `.ev` capability metadata header parsed by replay and written by dump.
+- `.ev` capability metadata header parsed by replay and written by dump;
+- bounded dump capture via `--frames N`.
 
 Docs:
 

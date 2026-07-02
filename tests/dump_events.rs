@@ -1,5 +1,8 @@
 use edgepad::core::{AxisRange, Capabilities};
-use edgepad::dump::{fixture_line_for_event, write_capture_header, write_fixture_event};
+use edgepad::dump::{
+    fixture_line_for_event, write_capture_header, write_fixture_event,
+    write_fixture_events_with_limit,
+};
 use evdev::{AbsoluteAxisCode, EventType, InputEvent, SynchronizationCode};
 
 #[test]
@@ -99,7 +102,7 @@ fn write_fixture_event_adds_blank_line_after_sync_boundaries() {
         InputEvent::new(
             EventType::SYNCHRONIZATION.0,
             SynchronizationCode::SYN_REPORT.0,
-            0
+            0,
         ),
     )
     .expect("write should succeed"));
@@ -108,7 +111,7 @@ fn write_fixture_event_adds_blank_line_after_sync_boundaries() {
         InputEvent::new(
             EventType::SYNCHRONIZATION.0,
             SynchronizationCode::SYN_DROPPED.0,
-            0
+            0,
         ),
     )
     .expect("write should succeed"));
@@ -116,5 +119,49 @@ fn write_fixture_event_adds_blank_line_after_sync_boundaries() {
     assert_eq!(
         String::from_utf8(out).expect("fixture output should be utf8"),
         "ABS_MT_SLOT 0\nSYN_REPORT\n\nSYN_DROPPED\n\n"
+    );
+}
+
+#[test]
+fn write_fixture_events_with_limit_stops_after_requested_sync_boundaries() {
+    let mut out = Vec::new();
+    let events = vec![
+        InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_MT_SLOT.0, 0),
+        InputEvent::new(
+            EventType::SYNCHRONIZATION.0,
+            SynchronizationCode::SYN_REPORT.0,
+            0,
+        ),
+        InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_MT_POSITION_X.0,
+            42,
+        ),
+        InputEvent::new(
+            EventType::SYNCHRONIZATION.0,
+            SynchronizationCode::SYN_DROPPED.0,
+            0,
+        ),
+        InputEvent::new(
+            EventType::ABSOLUTE.0,
+            AbsoluteAxisCode::ABS_MT_POSITION_Y.0,
+            99,
+        ),
+        InputEvent::new(
+            EventType::SYNCHRONIZATION.0,
+            SynchronizationCode::SYN_REPORT.0,
+            0,
+        ),
+    ];
+    let mut remaining_frames = Some(2);
+
+    let reached_limit = write_fixture_events_with_limit(&mut out, events, &mut remaining_frames)
+        .expect("events should write");
+
+    assert!(reached_limit);
+    assert_eq!(remaining_frames, Some(0));
+    assert_eq!(
+        String::from_utf8(out).expect("fixture output should be utf8"),
+        "ABS_MT_SLOT 0\nSYN_REPORT\n\nABS_MT_POSITION_X 42\nSYN_DROPPED\n\n"
     );
 }

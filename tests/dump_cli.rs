@@ -17,8 +17,71 @@ fn dump_cli_requires_device_and_out_arguments() {
     assert!(!output.status.success(), "dump without --out should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("edgepad dump --device <event-node> --out <file.ev>"),
+        stderr.contains("edgepad dump --device <event-node> --out <file.ev> [--frames N]"),
         "stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn dump_cli_accepts_positive_frames_argument_before_device_open() {
+    let missing_device = unique_temp_path("edgepad-missing-device-with-frame-limit");
+    let out_path = unique_temp_path("edgepad-missing-device-with-frame-limit-output.ev");
+    let _ = std::fs::remove_file(&missing_device);
+    let _ = std::fs::remove_file(&out_path);
+
+    let output = edgepad()
+        .arg("dump")
+        .arg("--device")
+        .arg(&missing_device)
+        .arg("--out")
+        .arg(&out_path)
+        .arg("--frames")
+        .arg("2")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(
+        !output.status.success(),
+        "dump should still fail for missing device"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to open device"),
+        "--frames should parse before device open, stderr was: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "dump should open the input device before creating the output file"
+    );
+}
+
+#[test]
+fn dump_cli_rejects_zero_frame_limit_before_device_open() {
+    let missing_device = unique_temp_path("edgepad-missing-device-zero-frame-limit");
+    let out_path = unique_temp_path("edgepad-missing-device-zero-frame-limit-output.ev");
+    let _ = std::fs::remove_file(&missing_device);
+    let _ = std::fs::remove_file(&out_path);
+
+    let output = edgepad()
+        .arg("dump")
+        .arg("--device")
+        .arg(&missing_device)
+        .arg("--out")
+        .arg(&out_path)
+        .arg("--frames")
+        .arg("0")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(!output.status.success(), "zero frame limit should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--frames must be a positive integer"),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "invalid CLI args must not create output file"
     );
 }
 

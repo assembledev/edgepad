@@ -10,11 +10,13 @@ Workflow:
 
 ```bash
 edgepad devices
-edgepad dump --device /dev/input/event5 --out bug.ev
+edgepad dump --device /dev/input/event5 --out bug.ev --frames 60
 edgepad replay bug.ev
 ```
 
-Stop capture with `Ctrl+C` after reproducing the gesture. The output format is the same text fixture format used by replay tests, so a useful bug capture can later be copied into `tests/fixtures/` and turned into a regression test.
+With `--frames N`, capture stops automatically after N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`). Without `--frames`, stop capture manually with `Ctrl+C` after reproducing the gesture.
+
+The output format is the same text fixture format used by replay tests, so a useful bug capture can later be copied into `tests/fixtures/` and turned into a regression test.
 
 The capture header includes real device capabilities when evdev exposes them:
 
@@ -43,7 +45,7 @@ Reading `/dev/input/event*` may require `sudo`, group `input`, or seat/logind AC
 ## Current limitations
 
 - No automatic touchpad selection yet; use `edgepad devices` first.
-- No duration/frame limit yet; use `Ctrl+C` to stop.
+- No duration/time limit yet; use `--frames N` or `Ctrl+C`.
 - No richer capture metadata beyond source path and core capabilities.
 
 These are intentional boundaries. This commit is about making `.ev` files easy to obtain and replay with real device ranges without touching dangerous passthrough/uinput behavior.

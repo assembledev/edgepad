@@ -86,12 +86,48 @@ pub fn write_fixture_event(mut writer: impl Write, event: InputEvent) -> io::Res
         return Ok(false);
     };
 
-    let is_sync_boundary = line == "SYN_REPORT" || line == "SYN_DROPPED";
+    write_fixture_line(&mut writer, &line)?;
+    Ok(true)
+}
+
+pub fn write_fixture_events_with_limit(
+    mut writer: impl Write,
+    events: impl IntoIterator<Item = InputEvent>,
+    remaining_frames: &mut Option<usize>,
+) -> io::Result<bool> {
+    if matches!(remaining_frames, Some(0)) {
+        return Ok(true);
+    }
+
+    for event in events {
+        let Some(line) = fixture_line_for_event(event) else {
+            continue;
+        };
+        let is_sync_boundary = is_sync_boundary(&line);
+        write_fixture_line(&mut writer, &line)?;
+
+        if is_sync_boundary {
+            if let Some(remaining) = remaining_frames.as_mut() {
+                *remaining = remaining.saturating_sub(1);
+                if *remaining == 0 {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn write_fixture_line(mut writer: impl Write, line: &str) -> io::Result<()> {
     writeln!(writer, "{line}")?;
-    if is_sync_boundary {
+    if is_sync_boundary(line) {
         writeln!(writer)?;
         writer.flush()?;
     }
+    Ok(())
+}
 
-    Ok(true)
+fn is_sync_boundary(line: &str) -> bool {
+    line == "SYN_REPORT" || line == "SYN_DROPPED"
 }
