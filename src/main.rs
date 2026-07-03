@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
 use std::io::LineWriter;
@@ -11,8 +12,8 @@ use edgepad::dump::{
     write_raw_events_with_limit, WriteEventsResult,
 };
 use edgepad::raw::{
-    parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawEvent, RawFrame,
-    RawOutputComposer, RecordingRawOutputSink, EV_SYN, SYN_DROPPED, SYN_REPORT,
+    extract_core_events, parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawEvent,
+    RawFrame, RawOutputComposer, RecordingRawOutputSink, EV_SYN, SYN_DROPPED, SYN_REPORT,
 };
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
@@ -321,10 +322,15 @@ struct ProxyDryRunStats {
     input_frame_boundaries: usize,
     raw_frames: usize,
     raw_events: usize,
+    recognizer_events: usize,
     recognizer_passthrough_events: usize,
+    passthrough_frames: usize,
+    claimed_edge_frames: usize,
+    empty_output_frames: usize,
     composed_frames: usize,
     composed_events: usize,
     gestures: Vec<Gesture>,
+    gesture_counts: BTreeMap<String, usize>,
     resync_required: bool,
 }
 
@@ -424,15 +430,34 @@ fn process_proxy_dry_run_frame(
     stats.raw_frames += 1;
     stats.raw_events += frame.events.len();
 
+    let recognizer_events = extract_core_events(frame).len();
+    stats.recognizer_events += recognizer_events;
+
     let routed = route_raw_frame(engine, frame).map_err(|err| format!("proxy failed: {err:?}"))?;
-    stats.recognizer_passthrough_events += routed.passthrough.len();
+    let passthrough_events = routed.passthrough.len();
+    stats.recognizer_passthrough_events += passthrough_events;
+    if passthrough_events > 0 {
+        stats.passthrough_frames += 1;
+    }
+    if recognizer_events > passthrough_events {
+        stats.claimed_edge_frames += 1;
+    }
     stats.resync_required |= routed.resync_required;
-    stats.gestures.extend(routed.gestures.iter().copied());
+    for gesture in routed.gestures.iter().copied() {
+        *stats
+            .gesture_counts
+            .entry(gesture_count_key(gesture))
+            .or_default() += 1;
+        stats.gestures.push(gesture);
+    }
 
     let composed_frames_before = sink.frames().len();
     write_raw_output_frame(composer, &routed, sink)
         .map_err(|err| format!("proxy output compose failed: {err:?}"))?;
     let new_frames = &sink.frames()[composed_frames_before..];
+    if new_frames.is_empty() {
+        stats.empty_output_frames += 1;
+    }
     stats.composed_frames += new_frames.len();
     stats.composed_events += new_frames
         .iter()
@@ -440,6 +465,14 @@ fn process_proxy_dry_run_frame(
         .sum::<usize>();
 
     Ok(())
+}
+
+fn gesture_count_key(gesture: Gesture) -> String {
+    format!(
+        "{}/{}",
+        zone_name(gesture.zone),
+        direction_name(gesture.direction)
+    )
 }
 
 fn print_proxy_dry_run_summary(
@@ -463,13 +496,24 @@ fn print_proxy_dry_run_summary(
     println!("input_frame_boundaries: {}", stats.input_frame_boundaries);
     println!("raw_frames: {}", stats.raw_frames);
     println!("raw_events: total={}", stats.raw_events);
+    println!("recognizer_events: total={}", stats.recognizer_events);
     println!(
         "recognizer_passthrough_events: {}",
         stats.recognizer_passthrough_events
     );
+    println!("passthrough_frames: {}", stats.passthrough_frames);
+    println!("claimed_edge_frames: {}", stats.claimed_edge_frames);
+    println!("empty_output_frames: {}", stats.empty_output_frames);
     println!("composed_frames: {}", stats.composed_frames);
     println!("composed_events: {}", stats.composed_events);
     println!("gestures: {}", stats.gestures.len());
+    if !stats.gesture_counts.is_empty() {
+        println!("gesture_counts:");
+        for (key, count) in &stats.gesture_counts {
+            let (zone, direction) = key.split_once('/').unwrap_or((key, "unknown"));
+            println!("  zone={zone} direction={direction} count={count}");
+        }
+    }
     for gesture in &stats.gestures {
         println!(
             "gesture slot={} tracking_id={} zone={} direction={}",
@@ -718,10 +762,54 @@ mod tests {
 
         assert_eq!(stats.raw_frames, 1);
         assert_eq!(stats.raw_events, 11);
+        assert_eq!(stats.recognizer_events, 8);
         assert_eq!(stats.recognizer_passthrough_events, 4);
+        assert_eq!(stats.claimed_edge_frames, 1);
+        assert_eq!(stats.passthrough_frames, 1);
+        assert_eq!(stats.empty_output_frames, 0);
         assert_eq!(stats.composed_frames, 1);
         assert_eq!(stats.composed_events, 8);
         assert_eq!(stats.gestures.len(), 0);
+        assert!(stats.gesture_counts.is_empty());
         assert!(!stats.resync_required);
+    }
+
+    #[test]
+    fn proxy_dry_run_stats_count_gestures_by_zone_and_direction() {
+        let capabilities = default_capabilities();
+        let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+        let mut composer = RawOutputComposer::new(capabilities);
+        let mut sink = RecordingRawOutputSink::default();
+        let mut stats = ProxyDryRunStats::default();
+        let frames = [
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(300),
+                RawEvent::abs_mt_position_x(980),
+                RawEvent::abs_mt_position_y(400),
+            ]),
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_position_x(980),
+                RawEvent::abs_mt_position_y(620),
+            ]),
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(-1),
+            ]),
+        ];
+
+        for frame in &frames {
+            process_proxy_dry_run_frame(&mut engine, &mut composer, &mut sink, &mut stats, frame)
+                .expect("edge frames should process");
+        }
+
+        assert_eq!(stats.raw_frames, 3);
+        assert_eq!(stats.claimed_edge_frames, 3);
+        assert_eq!(stats.passthrough_frames, 0);
+        assert_eq!(stats.empty_output_frames, 3);
+        assert_eq!(stats.composed_frames, 0);
+        assert_eq!(stats.gestures.len(), 1);
+        assert_eq!(stats.gesture_counts.get("right/down"), Some(&1));
     }
 }

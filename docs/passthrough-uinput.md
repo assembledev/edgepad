@@ -32,6 +32,8 @@ edgepad proxy --device /dev/input/event5 --frames 300 --dry-run
 
 It does **not** create a virtual device, emit uinput events, suppress the physical touchpad, or call `EVIOCGRAB`. Use it to inspect what the live proxy would decide before enabling virtual output/grabbing.
 
+The summary includes raw/event volume, recognizer events, passthrough vs claimed-edge frame counts, empty-output frames, composed output volume, individual gestures, and aggregate gesture counts by zone/direction.
+
 ## Output policy
 
 After raw routing, `edgepad` does **not** blindly forward raw global pointer-emulation events:
