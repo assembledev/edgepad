@@ -15,13 +15,18 @@ Implemented:
 - regression fixtures for edge claiming, normal passthrough, mixed slots, duplicate tracking IDs, and `SYN_DROPPED` recovery;
 - `edgepad replay <fixture.ev>` for inspecting fixture/capture behavior;
 - `edgepad devices` for read-only `/dev/input/event*` discovery;
-- `edgepad dump --device <event-node> --out <file.ev> [--frames N]` for read-only capture;
+- `edgepad dump --device <event-node> --out <file.ev> [--frames N]` for read-only replay-format capture;
+- `edgepad dump --raw --device <event-node> --out <file.raw.ev> [--frames N]` for read-only raw evdev capture;
+- `edgepad replay-raw <file.raw.ev>` for raw capture routing/output-composer inspection;
 - `.ev` metadata headers with real slot/X/Y ranges;
+- raw output composition that synthesizes `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` from unclaimed passthrough contacts;
+- tested raw output sink and buffered uinput sink plumbing;
+- virtual touchpad capability spec for future uinput device creation;
 - Nix flake for `nix build`, `nix run`, and `nix develop`.
 
 Not implemented yet:
 
-- virtual-device passthrough via `uinput`;
+- live virtual-device passthrough/proxy via `uinput`;
 - device grabbing;
 - daemon/service mode;
 - gesture/action configuration;
@@ -65,20 +70,32 @@ cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
 
 `dump` is read-only. It does not grab devices, suppress input, or create a virtual device.
 
+For recognizer-level debugging:
+
 ```bash
 edgepad devices              # touchpad candidates only
 edgepad devices --all        # full /dev/input list for debugging
-sudo edgepad dump --device /dev/input/eventX --out bug.ev --frames 60
+sudo edgepad dump --device /dev/input/eventX --out bug.ev --frames 300
 edgepad replay bug.ev
 ```
 
+For raw passthrough/output debugging:
+
+```bash
+sudo edgepad dump --raw --device /dev/input/eventX --out bug.raw.ev --frames 300
+edgepad replay-raw bug.raw.ev
+```
+
 Replace `/dev/input/eventX` with the touchpad event node reported by `edgepad devices`.
+
+For frame-limited edge gesture captures, a useful flow is: start capture, perform the edge or mixed gesture, release the gesture finger, then place a finger in the center until the frame budget finishes. This captures the gesture release while keeping the event stream active.
 
 ## Docs
 
 - [`docs/replay-format.md`](docs/replay-format.md)
 - [`docs/device-discovery.md`](docs/device-discovery.md)
 - [`docs/dump-capture.md`](docs/dump-capture.md)
+- [`docs/passthrough-uinput.md`](docs/passthrough-uinput.md)
 - [`docs/nix.md`](docs/nix.md)
 
 ## License

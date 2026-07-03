@@ -25,8 +25,15 @@ For read-only capture from `/dev/input/event*`, permissions may require `sudo`, 
 
 ```bash
 sudo ./result/bin/edgepad devices
-sudo ./result/bin/edgepad dump --device /dev/input/eventX --out bug.ev --frames 60
+sudo ./result/bin/edgepad dump --device /dev/input/eventX --out bug.ev --frames 300
 ./result/bin/edgepad replay bug.ev
+```
+
+For raw passthrough/output inspection:
+
+```bash
+sudo ./result/bin/edgepad dump --raw --device /dev/input/eventX --out bug.raw.ev --frames 300
+./result/bin/edgepad replay-raw bug.raw.ev
 ```
 
 ## Development shell
@@ -77,4 +84,4 @@ Supported systems in the flake:
 
 ## Scope
 
-The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later, after the daemon and virtual-device passthrough exist.
+The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later, after the daemon and live virtual-device passthrough exist.

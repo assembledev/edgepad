@@ -4,9 +4,9 @@ Replay fixtures are small text files that describe evdev-style input frames with
 
 They are for tests and debugging, not user configuration.
 
-## Syntax
+## Replay-format syntax
 
-Each non-empty non-comment line is one event:
+Each non-empty non-comment line is one recognizer-level event:
 
 ```text
 ABS_MT_SLOT <slot>
@@ -28,6 +28,25 @@ ABS_MT_SLOT 0 # inline comment
 
 `SYN_DROPPED` creates a standalone frame that tells the engine to clear local touch state and require resync.
 
+## Raw dump syntax
+
+Raw dumps use Linux event type and code names when known:
+
+```text
+EV_ABS ABS_MT_SLOT 0
+EV_ABS ABS_MT_TRACKING_ID 123
+EV_ABS ABS_MT_POSITION_X 500
+EV_ABS ABS_MT_POSITION_Y 300
+EV_KEY BTN_TOUCH 1
+EV_KEY BTN_TOOL_FINGER 1
+EV_ABS ABS_X 500
+EV_ABS ABS_Y 300
+EV_MSC MSC_TIMESTAMP 123456
+EV_SYN SYN_REPORT 0
+```
+
+Unknown event types/codes are preserved with numeric fallback. Raw replay routes only recognizer-relevant MT events into the engine, then composes output events for passthrough contacts. It does not blindly forward raw `BTN_TOUCH`, `BTN_TOOL_*`, or legacy `ABS_X/Y`; those are synthesized from unclaimed passthrough contacts.
+
 ## Metadata header
 
 Real captures can include capability metadata in comments:
@@ -40,7 +59,7 @@ Real captures can include capability metadata in comments:
 # y: 20..=820
 ```
 
-`edgepad replay` uses this metadata when present instead of fixture defaults. Edge-zone decisions use the real touchpad coordinate range and slot range.
+`edgepad replay` and `edgepad replay-raw` use this metadata when present instead of fixture defaults. Edge-zone decisions use the real touchpad coordinate range and slot range.
 
 Old handwritten fixtures without metadata still work; replay falls back to temporary defaults:
 
@@ -91,9 +110,9 @@ tests/fixtures/syn-dropped-reset.ev
 
 These cover the minimum lifecycle cases before real device I/O: claimed edge contact, normal passthrough contact, mixed claimed/passthrough slots in one stream, duplicate tracking ID rejection, and `SYN_DROPPED` recovery.
 
-## Inspecting a fixture manually
+## Inspecting captures manually
 
-The minimal CLI can run a fixture through the current engine and print a summary:
+Run a replay-format fixture or capture through the current engine:
 
 ```bash
 cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
@@ -112,7 +131,25 @@ gesture slot=0 tracking_id=123 zone=left direction=right
 resync_required: false
 ```
 
-The summary also prints lightweight capture diagnostics. For example, if a real `.ev` file contains movement events but no `ABS_MT_TRACKING_ID` start, replay reports that no contact starts were found and suggests starting capture before touching the pad and lifting before capture stops.
+Run a raw capture through routing and output composition:
+
+```bash
+cargo run -- replay-raw bug.raw.ev
+```
+
+Expected shape:
+
+```text
+capabilities: metadata slots=0..=4 x=10..=1210 y=20..=820
+raw_frames: 300
+raw_events: total=...
+recognizer_passthrough_events: ...
+composed_events: ...
+gestures: ...
+resync_required: false
+```
+
+The summary also prints lightweight capture diagnostics. With pure `--frames N`, a capture can end with an active center contact because the frame budget stopped mid-contact. For edge gesture captures, a useful workflow is to perform the gesture, release it, then place a finger in the center until `--frames` finishes.
 
 This is a debug/demo helper, not a replacement for `cargo test`. Fixtures without metadata use default ranges; captures produced by `edgepad dump` include real device ranges and replay uses those instead.
 
