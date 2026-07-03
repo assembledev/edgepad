@@ -21,12 +21,13 @@ use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use edgepad::uinput::{build_virtual_touchpad, UinputRawOutputSink, VirtualTouchpadSpec};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab)";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
 const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
 const PROXY_USAGE: &str =
-    "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab)";
+    "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
 const UINPUT_UNGRAB_SETTLE_DELAY: Duration = Duration::from_millis(30);
+const DEFAULT_EDGE_WIDTH: f32 = 0.10;
 
 fn main() {
     if let Err(err) = run() {
@@ -91,6 +92,7 @@ struct ProxyArgs {
     device: PathBuf,
     frames: usize,
     mode: ProxyMode,
+    edge_width: f32,
 }
 
 fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceArgs, String> {
@@ -142,6 +144,7 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
     let mut dry_run = false;
     let mut uinput = false;
     let mut grab = false;
+    let mut edge_width = DEFAULT_EDGE_WIDTH;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -153,6 +156,10 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
             "--dry-run" => dry_run = true,
             "--uinput" => uinput = true,
             "--grab" => grab = true,
+            "--edge-width" => {
+                let raw_value = args.next().ok_or_else(|| PROXY_USAGE.to_string())?;
+                edge_width = parse_edge_width(&raw_value)?;
+            }
             "--no-grab" => return Err("unknown proxy option --no-grab".to_string()),
             other if other.starts_with('-') => return Err(format!("unknown proxy option {other}")),
             _ => return Err(PROXY_USAGE.to_string()),
@@ -176,6 +183,7 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
         device,
         frames,
         mode,
+        edge_width,
     })
 }
 
@@ -185,6 +193,16 @@ fn parse_positive_frame_limit(raw_value: &str) -> Result<usize, String> {
         .map_err(|_| "--frames must be a positive integer".to_string())?;
     if parsed == 0 {
         return Err("--frames must be a positive integer".to_string());
+    }
+    Ok(parsed)
+}
+
+fn parse_edge_width(raw_value: &str) -> Result<f32, String> {
+    let parsed = raw_value
+        .parse::<f32>()
+        .map_err(|_| "--edge-width must be > 0 and < 0.5".to_string())?;
+    if !(parsed > 0.0 && parsed < 0.5) {
+        return Err("--edge-width must be > 0 and < 0.5".to_string());
     }
     Ok(parsed)
 }
@@ -368,9 +386,10 @@ struct ProxyDryRunStats {
 }
 
 fn proxy(args: &ProxyArgs) -> Result<(), String> {
+    let edge_widths = EdgeWidths::all(args.edge_width);
     match args.mode {
-        ProxyMode::DryRun => proxy_dry_run(&args.device, args.frames),
-        ProxyMode::UinputGrab => proxy_uinput_grab(&args.device, args.frames),
+        ProxyMode::DryRun => proxy_dry_run(&args.device, args.frames, edge_widths),
+        ProxyMode::UinputGrab => proxy_uinput_grab(&args.device, args.frames, edge_widths),
     }
 }
 
@@ -386,23 +405,38 @@ fn open_proxy_device(device_path: &Path) -> Result<(RawDevice, Capabilities), St
     Ok((device, capabilities))
 }
 
-fn proxy_dry_run(device_path: &Path, frame_limit: usize) -> Result<(), String> {
+fn proxy_dry_run(
+    device_path: &Path,
+    frame_limit: usize,
+    edge_widths: EdgeWidths,
+) -> Result<(), String> {
     let (mut device, capabilities) = open_proxy_device(device_path)?;
     let mut sink = RecordingRawOutputSink::default();
-    let stats = run_proxy_loop(&mut device, capabilities, frame_limit, &mut sink)?;
+    let stats = run_proxy_loop(
+        &mut device,
+        capabilities,
+        edge_widths,
+        frame_limit,
+        &mut sink,
+    )?;
     print_proxy_summary(
         ProxyMode::DryRun,
         device_path,
         capabilities,
+        edge_widths,
         frame_limit,
         &stats,
     );
     Ok(())
 }
 
-fn proxy_uinput_grab(device_path: &Path, frame_limit: usize) -> Result<(), String> {
+fn proxy_uinput_grab(
+    device_path: &Path,
+    frame_limit: usize,
+    edge_widths: EdgeWidths,
+) -> Result<(), String> {
     let (mut device, capabilities) = open_proxy_device(device_path)?;
-    let spec = VirtualTouchpadSpec::from_capabilities(capabilities);
+    let spec = VirtualTouchpadSpec::from_raw_device(&device, capabilities);
     let virtual_device = build_virtual_touchpad(&spec).map_err(|err| {
         format!("failed to create virtual touchpad via /dev/uinput before grabbing physical device: {err}")
     })?;
@@ -411,7 +445,13 @@ fn proxy_uinput_grab(device_path: &Path, frame_limit: usize) -> Result<(), Strin
     device
         .grab()
         .map_err(|err| format!("failed to grab device {}: {err}", device_path.display()))?;
-    let mut stats = run_proxy_loop(&mut device, capabilities, frame_limit, &mut sink)?;
+    let mut stats = run_proxy_loop(
+        &mut device,
+        capabilities,
+        edge_widths,
+        frame_limit,
+        &mut sink,
+    )?;
     emit_proxy_settle_output(capabilities, &mut sink, &mut stats)?;
     std::thread::sleep(UINPUT_UNGRAB_SETTLE_DELAY);
     device
@@ -421,6 +461,7 @@ fn proxy_uinput_grab(device_path: &Path, frame_limit: usize) -> Result<(), Strin
         ProxyMode::UinputGrab,
         device_path,
         capabilities,
+        edge_widths,
         frame_limit,
         &stats,
     );
@@ -430,6 +471,7 @@ fn proxy_uinput_grab(device_path: &Path, frame_limit: usize) -> Result<(), Strin
 fn run_proxy_loop<S>(
     device: &mut RawDevice,
     capabilities: Capabilities,
+    edge_widths: EdgeWidths,
     frame_limit: usize,
     sink: &mut S,
 ) -> Result<ProxyDryRunStats, String>
@@ -437,7 +479,7 @@ where
     S: RawOutputSink,
     S::Error: std::fmt::Debug,
 {
-    let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+    let mut engine = Engine::new(capabilities, edge_widths);
     let mut composer = RawOutputComposer::new(capabilities);
     let mut stats = ProxyDryRunStats::default();
     let mut current = Vec::new();
@@ -644,6 +686,7 @@ fn print_proxy_summary(
     mode: ProxyMode,
     device_path: &Path,
     capabilities: Capabilities,
+    edge_widths: EdgeWidths,
     requested_frames: usize,
     stats: &ProxyDryRunStats,
 ) {
@@ -662,6 +705,7 @@ fn print_proxy_summary(
         capabilities.y.max
     );
     println!("requested_frame_boundaries: {requested_frames}");
+    println!("edge_width: {:.3}", edge_widths.left);
     println!("input_frame_boundaries: {}", stats.input_frame_boundaries);
     println!("raw_frames: {}", stats.raw_frames);
     println!("raw_events: total={}", stats.raw_events);

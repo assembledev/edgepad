@@ -42,6 +42,12 @@ For bounded live dry-run inspection without forwarding input:
 sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
 ```
 
+Tune the edge zone for hardware validation when needed:
+
+```bash
+sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --edge-width 0.20 --dry-run
+```
+
 For bounded live passthrough through a virtual touchpad:
 
 ```bash

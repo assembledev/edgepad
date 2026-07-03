@@ -11,7 +11,7 @@ Implemented:
 3. `RawOutputComposer` synthesizes output state for unclaimed passthrough contacts.
 4. `RawOutputSink` writes composed raw events frame-by-frame into a sink.
 5. `UinputRawOutputSink` buffers one composed frame and flushes it to a uinput writer on `sync()`.
-6. `VirtualTouchpadSpec` describes the virtual touchpad capability set from captured device ranges.
+6. `VirtualTouchpadSpec` describes the virtual touchpad capability set from the physical device's absolute-axis metadata.
 7. `proxy --dry-run` reads bounded live frames from a physical touchpad, routes/composes them, and prints counters without forwarding input.
 8. `proxy --uinput --grab` creates a virtual touchpad, explicitly grabs the physical device, forwards composed passthrough frames to uinput, then ungrabs after the requested frame budget.
 
@@ -30,7 +30,13 @@ edgepad proxy --device /dev/input/event5 --frames 300 --dry-run
 
 It does **not** create a virtual device, emit uinput events, suppress the physical touchpad, or call `EVIOCGRAB`. Use it to inspect what the live proxy would decide before enabling virtual output/grabbing.
 
-The summary includes raw/event volume, recognizer events, passthrough vs claimed-edge frame counts, empty-output frames, composed output volume, final cleanup output volume, live uinput settle output volume, individual gestures, and aggregate gesture counts by zone/direction.
+The summary includes raw/event volume, recognizer events, passthrough vs claimed-edge frame counts, empty-output frames, composed output volume, final cleanup output volume, live uinput settle output volume, edge width, individual gestures, and aggregate gesture counts by zone/direction.
+
+The default edge width is `0.10` on each side. Use `--edge-width F` to validate wider/narrower edge gesture comfort, for example:
+
+```bash
+edgepad proxy --device /dev/input/event5 --frames 300 --edge-width 0.20 --dry-run
+```
 
 ## Bounded grab/uinput proxy
 
@@ -85,7 +91,7 @@ The Rust `evdev` crate's `VirtualDevice::emit(&[InputEvent])` appends `SYN_REPOR
 - keys: `BTN_TOUCH`, `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, `BTN_TOOL_TRIPLETAP`, `BTN_TOOL_QUADTAP`, `BTN_TOOL_QUINTTAP`;
 - absolute axes: `ABS_X`, `ABS_Y`, `ABS_MT_SLOT`, `ABS_MT_TRACKING_ID`, `ABS_MT_POSITION_X`, `ABS_MT_POSITION_Y`.
 
-The X/Y and slot ranges come from captured device metadata. `ABS_MT_TRACKING_ID` currently uses a conservative `0..=65535` range.
+For live proxy mode, the virtual touchpad mirrors the physical device's absolute-axis `value`, min/max, fuzz, flat, and resolution where the physical device exposes them. This matters for libinput pointer acceleration and touchpad speed. For replay-only paths without a physical device handle, the spec falls back to captured metadata ranges and a conservative `ABS_MT_TRACKING_ID` range of `0..=65535`.
 
 ## Manual live uinput test
 

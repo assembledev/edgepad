@@ -4,7 +4,7 @@ use edgepad::raw::{
     BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER, BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP, BTN_TOOL_TRIPLETAP,
     BTN_TOUCH,
 };
-use edgepad::uinput::{VirtualAbsAxis, VirtualTouchpadSpec};
+use edgepad::uinput::{PhysicalTouchpadAbsInfo, VirtualAbsAxis, VirtualTouchpadSpec};
 use evdev::PropType;
 
 fn test_capabilities() -> Capabilities {
@@ -52,4 +52,112 @@ fn virtual_touchpad_spec_can_use_a_custom_public_name() {
     let spec = VirtualTouchpadSpec::named(test_capabilities(), "edgepad test device");
 
     assert_eq!(spec.name, "edgepad test device");
+}
+
+#[test]
+fn virtual_touchpad_spec_preserves_physical_abs_resolution_for_pointer_speed() {
+    let spec = VirtualTouchpadSpec::from_physical_abs_info(
+        PhysicalTouchpadAbsInfo {
+            abs_x: Some(VirtualAbsAxis {
+                code: ABS_X,
+                value: 400,
+                min: 10,
+                max: 1210,
+                fuzz: 1,
+                flat: 2,
+                resolution: 31,
+            }),
+            abs_y: Some(VirtualAbsAxis {
+                code: ABS_Y,
+                value: 300,
+                min: 20,
+                max: 820,
+                fuzz: 3,
+                flat: 4,
+                resolution: 32,
+            }),
+            mt_slot: VirtualAbsAxis {
+                code: ABS_MT_SLOT,
+                value: 0,
+                min: 0,
+                max: 4,
+                fuzz: 0,
+                flat: 0,
+                resolution: 0,
+            },
+            mt_tracking_id: Some(VirtualAbsAxis {
+                code: ABS_MT_TRACKING_ID,
+                value: 0,
+                min: 0,
+                max: 65535,
+                fuzz: 0,
+                flat: 0,
+                resolution: 0,
+            }),
+            mt_position_x: VirtualAbsAxis {
+                code: ABS_MT_POSITION_X,
+                value: 400,
+                min: 10,
+                max: 1210,
+                fuzz: 5,
+                flat: 6,
+                resolution: 41,
+            },
+            mt_position_y: VirtualAbsAxis {
+                code: ABS_MT_POSITION_Y,
+                value: 300,
+                min: 20,
+                max: 820,
+                fuzz: 7,
+                flat: 8,
+                resolution: 42,
+            },
+        },
+        "edgepad mirrored touchpad",
+    );
+
+    assert_eq!(spec.name, "edgepad mirrored touchpad");
+    assert_eq!(
+        spec.absolute_axes,
+        vec![
+            VirtualAbsAxis {
+                code: ABS_X,
+                value: 400,
+                min: 10,
+                max: 1210,
+                fuzz: 1,
+                flat: 2,
+                resolution: 31,
+            },
+            VirtualAbsAxis {
+                code: ABS_Y,
+                value: 300,
+                min: 20,
+                max: 820,
+                fuzz: 3,
+                flat: 4,
+                resolution: 32,
+            },
+            VirtualAbsAxis::new(ABS_MT_SLOT, 0, 4),
+            VirtualAbsAxis::new(ABS_MT_TRACKING_ID, 0, 65535),
+            VirtualAbsAxis {
+                code: ABS_MT_POSITION_X,
+                value: 400,
+                min: 10,
+                max: 1210,
+                fuzz: 5,
+                flat: 6,
+                resolution: 41,
+            },
+            VirtualAbsAxis {
+                code: ABS_MT_POSITION_Y,
+                value: 300,
+                min: 20,
+                max: 820,
+                fuzz: 7,
+                flat: 8,
+                resolution: 42,
+            },
+        ]
+    );
 }

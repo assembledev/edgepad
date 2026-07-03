@@ -18,8 +18,8 @@ Implemented:
 - `edgepad dump --device <event-node> --out <file.ev> [--frames N]` for read-only replay-format capture;
 - `edgepad dump --raw --device <event-node> --out <file.raw.ev> [--frames N]` for read-only raw evdev capture;
 - `edgepad replay-raw <file.raw.ev>` for raw capture routing/output-composer inspection;
-- `edgepad proxy --device <event-node> --frames N --dry-run` for bounded live routing/output-composer inspection without forwarding input;
-- `edgepad proxy --device <event-node> --frames N --uinput --grab` for bounded live virtual-device passthrough with explicit physical-device grab;
+- `edgepad proxy --device <event-node> --frames N --dry-run [--edge-width F]` for bounded live routing/output-composer inspection without forwarding input;
+- `edgepad proxy --device <event-node> --frames N --uinput --grab [--edge-width F]` for bounded live virtual-device passthrough with explicit physical-device grab;
 - `.ev` metadata headers with real slot/X/Y ranges;
 - raw output composition that synthesizes `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` from unclaimed passthrough contacts;
 - tested raw output sink and buffered uinput sink plumbing;
@@ -99,6 +99,8 @@ sudo edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
 ```
 
 This mode creates the virtual touchpad first, then grabs the physical device, processes the requested frame budget, emits a final synthetic release frame if the virtual touchpad still has an active passthrough contact, sends a neutral settle frame to the virtual touchpad, waits briefly, ungrabs, prints the same summary, and exits.
+
+`proxy` uses a default edge width of `0.10` on each side. Use `--edge-width 0.15` or `--edge-width 0.20` when validating hardware/user gesture comfort on a real touchpad.
 
 Replace `/dev/input/eventX` with the touchpad event node reported by `edgepad devices`.
 
