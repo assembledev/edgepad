@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::LineWriter;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Duration;
 
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, Gesture, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
@@ -25,6 +26,7 @@ const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
 const PROXY_USAGE: &str =
     "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab)";
+const UINPUT_UNGRAB_SETTLE_DELAY: Duration = Duration::from_millis(30);
 
 fn main() {
     if let Err(err) = run() {
@@ -358,6 +360,8 @@ struct ProxyDryRunStats {
     composed_events: usize,
     cleanup_output_frames: usize,
     cleanup_output_events: usize,
+    settle_output_frames: usize,
+    settle_output_events: usize,
     gestures: Vec<Gesture>,
     gesture_counts: BTreeMap<String, usize>,
     resync_required: bool,
@@ -407,7 +411,9 @@ fn proxy_uinput_grab(device_path: &Path, frame_limit: usize) -> Result<(), Strin
     device
         .grab()
         .map_err(|err| format!("failed to grab device {}: {err}", device_path.display()))?;
-    let stats = run_proxy_loop(&mut device, capabilities, frame_limit, &mut sink)?;
+    let mut stats = run_proxy_loop(&mut device, capabilities, frame_limit, &mut sink)?;
+    emit_proxy_settle_output(capabilities, &mut sink, &mut stats)?;
+    std::thread::sleep(UINPUT_UNGRAB_SETTLE_DELAY);
     device
         .ungrab()
         .map_err(|err| format!("failed to ungrab device {}: {err}", device_path.display()))?;
@@ -588,6 +594,44 @@ where
     Ok(())
 }
 
+fn emit_proxy_settle_output<S>(
+    capabilities: Capabilities,
+    sink: &mut S,
+    stats: &mut ProxyDryRunStats,
+) -> Result<(), String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+{
+    let events = proxy_settle_events(capabilities);
+    stats.settle_output_frames += 1;
+    stats.settle_output_events += events.len();
+    for event in events {
+        sink.emit(event)
+            .map_err(|err| format!("proxy output settle emit failed: {err:?}"))?;
+    }
+    sink.sync()
+        .map_err(|err| format!("proxy output settle sync failed: {err:?}"))?;
+    Ok(())
+}
+
+fn proxy_settle_events(capabilities: Capabilities) -> Vec<RawEvent> {
+    let mut events = Vec::new();
+    for slot in capabilities.slot_min..=capabilities.slot_max {
+        events.push(RawEvent::abs_mt_slot(slot));
+        events.push(RawEvent::abs_mt_tracking_id(-1));
+    }
+    events.extend([
+        RawEvent::btn_touch(false),
+        RawEvent::btn_tool_finger(false),
+        RawEvent::btn_tool_doubletap(false),
+        RawEvent::btn_tool_tripletap(false),
+        RawEvent::btn_tool_quadtap(false),
+        RawEvent::btn_tool_quinttap(false),
+    ]);
+    events
+}
+
 fn gesture_count_key(gesture: Gesture) -> String {
     format!(
         "{}/{}",
@@ -633,6 +677,8 @@ fn print_proxy_summary(
     println!("composed_events: {}", stats.composed_events);
     println!("cleanup_output_frames: {}", stats.cleanup_output_frames);
     println!("cleanup_output_events: {}", stats.cleanup_output_events);
+    println!("settle_output_frames: {}", stats.settle_output_frames);
+    println!("settle_output_events: {}", stats.settle_output_events);
     println!("gestures: {}", stats.gestures.len());
     if !stats.gesture_counts.is_empty() {
         println!("gesture_counts:");
@@ -945,6 +991,41 @@ mod tests {
                 RawEvent::abs_mt_tracking_id(-1),
                 RawEvent::btn_touch(false),
                 RawEvent::btn_tool_finger(false),
+            ]
+        );
+    }
+
+    #[test]
+    fn proxy_settle_output_neutralizes_all_slots_and_touch_tools_before_ungrab() {
+        let capabilities = Capabilities {
+            slot_min: 0,
+            slot_max: 2,
+            ..default_capabilities()
+        };
+        let mut sink = RecordingRawOutputSink::default();
+        let mut stats = ProxyDryRunStats::default();
+
+        emit_proxy_settle_output(capabilities, &mut sink, &mut stats)
+            .expect("settle frame should emit");
+
+        assert_eq!(stats.settle_output_frames, 1);
+        assert_eq!(stats.settle_output_events, 12);
+        assert_eq!(sink.frames().len(), 1);
+        assert_eq!(
+            sink.frames()[0].events,
+            vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(-1),
+                RawEvent::abs_mt_slot(1),
+                RawEvent::abs_mt_tracking_id(-1),
+                RawEvent::abs_mt_slot(2),
+                RawEvent::abs_mt_tracking_id(-1),
+                RawEvent::btn_touch(false),
+                RawEvent::btn_tool_finger(false),
+                RawEvent::btn_tool_doubletap(false),
+                RawEvent::btn_tool_tripletap(false),
+                RawEvent::btn_tool_quadtap(false),
+                RawEvent::btn_tool_quinttap(false),
             ]
         );
     }

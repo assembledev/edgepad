@@ -30,7 +30,7 @@ edgepad proxy --device /dev/input/event5 --frames 300 --dry-run
 
 It does **not** create a virtual device, emit uinput events, suppress the physical touchpad, or call `EVIOCGRAB`. Use it to inspect what the live proxy would decide before enabling virtual output/grabbing.
 
-The summary includes raw/event volume, recognizer events, passthrough vs claimed-edge frame counts, empty-output frames, composed output volume, final cleanup output volume, individual gestures, and aggregate gesture counts by zone/direction.
+The summary includes raw/event volume, recognizer events, passthrough vs claimed-edge frame counts, empty-output frames, composed output volume, final cleanup output volume, live uinput settle output volume, individual gestures, and aggregate gesture counts by zone/direction.
 
 ## Bounded grab/uinput proxy
 
@@ -48,7 +48,9 @@ It is intentionally bounded. The command:
 4. routes/composes exactly the requested frame boundary budget;
 5. emits composed passthrough frames to the virtual touchpad;
 6. emits a final synthetic release frame if the frame budget stopped while a passthrough contact was still active;
-7. ungrabs and exits.
+7. emits one neutral settle frame that marks all virtual MT slots and touch/tool keys as released;
+8. waits briefly so the compositor can consume the virtual neutral state before the physical device is ungrabbed;
+9. ungrabs and exits.
 
 If virtual device creation fails, the physical device is not grabbed. `RawDevice` also ungrabs on drop, so errors during the bounded run do not intentionally leave the device grabbed.
 
