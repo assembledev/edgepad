@@ -1,4 +1,4 @@
-use crate::core::{Engine, Event, Gesture, SlotError};
+use crate::core::{AxisRange, Capabilities, Engine, Event, Gesture, SlotError};
 
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
@@ -109,11 +109,25 @@ pub enum RawParseError {
         event_type: String,
         code: String,
     },
+    InvalidMetadataRange {
+        line: usize,
+        field: &'static str,
+        value: String,
+    },
+    MissingMetadataField {
+        field: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RawFrame {
     pub events: Vec<RawEvent>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RawDumpFile {
+    pub capabilities: Option<Capabilities>,
+    pub frames: Vec<RawFrame>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -127,6 +141,106 @@ impl RawFrame {
     pub fn new(events: Vec<RawEvent>) -> Self {
         Self { events }
     }
+}
+
+pub fn parse_raw_dump_file(input: &str) -> Result<RawDumpFile, RawParseError> {
+    Ok(RawDumpFile {
+        capabilities: parse_capabilities_metadata(input)?,
+        frames: parse_raw_frames(input)?,
+    })
+}
+
+#[derive(Default)]
+struct CapabilityMetadata {
+    slots: Option<AxisRange>,
+    x: Option<AxisRange>,
+    y: Option<AxisRange>,
+    saw_any: bool,
+}
+
+fn parse_capabilities_metadata(input: &str) -> Result<Option<Capabilities>, RawParseError> {
+    let mut metadata = CapabilityMetadata::default();
+
+    for (index, raw_line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let Some(comment) = raw_line.trim_start().strip_prefix('#') else {
+            continue;
+        };
+        let Some((name, value)) = comment.trim().split_once(':') else {
+            continue;
+        };
+        let name = name.trim();
+        let value = value.trim();
+
+        match name {
+            "slots" => {
+                metadata.saw_any = true;
+                metadata.slots = Some(parse_metadata_range(line_number, "slots", value)?);
+            }
+            "x" => {
+                metadata.saw_any = true;
+                metadata.x = Some(parse_metadata_range(line_number, "x", value)?);
+            }
+            "y" => {
+                metadata.saw_any = true;
+                metadata.y = Some(parse_metadata_range(line_number, "y", value)?);
+            }
+            _ => {}
+        }
+    }
+
+    if !metadata.saw_any {
+        return Ok(None);
+    }
+
+    let slots = metadata
+        .slots
+        .ok_or(RawParseError::MissingMetadataField { field: "slots" })?;
+    let x = metadata
+        .x
+        .ok_or(RawParseError::MissingMetadataField { field: "x" })?;
+    let y = metadata
+        .y
+        .ok_or(RawParseError::MissingMetadataField { field: "y" })?;
+
+    Ok(Some(Capabilities {
+        slot_min: slots.min,
+        slot_max: slots.max,
+        x,
+        y,
+    }))
+}
+
+fn parse_metadata_range(
+    line: usize,
+    field: &'static str,
+    value: &str,
+) -> Result<AxisRange, RawParseError> {
+    let Some((min, max)) = value.split_once("..=") else {
+        return Err(RawParseError::InvalidMetadataRange {
+            line,
+            field,
+            value: value.to_string(),
+        });
+    };
+    let min = min
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| RawParseError::InvalidMetadataRange {
+            line,
+            field,
+            value: value.to_string(),
+        })?;
+    let max = max
+        .trim()
+        .parse::<i32>()
+        .map_err(|_| RawParseError::InvalidMetadataRange {
+            line,
+            field,
+            value: value.to_string(),
+        })?;
+
+    Ok(AxisRange { min, max })
 }
 
 pub fn parse_raw_frames(input: &str) -> Result<Vec<RawFrame>, RawParseError> {
