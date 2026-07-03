@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs::{self, File};
 use std::io::LineWriter;
+use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, Gesture, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
@@ -14,12 +15,12 @@ use edgepad::dump::{
 };
 use edgepad::raw::{
     extract_core_events, parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawEvent,
-    RawFrame, RawOutputComposer, RawOutputSink, RecordingRawOutputSink, EV_SYN, SYN_DROPPED,
-    SYN_REPORT,
+    RawFrame, RawOutputComposer, RawOutputSink, RecordingRawOutputSink, ABS_MT_SLOT,
+    ABS_MT_TRACKING_ID, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED, SYN_REPORT,
 };
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use edgepad::uinput::{build_virtual_touchpad, UinputRawOutputSink, VirtualTouchpadSpec};
-use evdev::raw_stream::RawDevice;
+use evdev::{raw_stream::RawDevice, KeyCode};
 
 const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
 const DUMP_USAGE: &str =
@@ -27,6 +28,7 @@ const DUMP_USAGE: &str =
 const PROXY_USAGE: &str =
     "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
 const UINPUT_UNGRAB_SETTLE_DELAY: Duration = Duration::from_millis(30);
+const UINPUT_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
 const DEFAULT_EDGE_WIDTH: f32 = 0.10;
 
 fn main() {
@@ -380,9 +382,126 @@ struct ProxyDryRunStats {
     cleanup_output_events: usize,
     settle_output_frames: usize,
     settle_output_events: usize,
+    idle_drain_frame_boundaries: usize,
+    idle_drain_timed_out: bool,
     gestures: Vec<Gesture>,
     gesture_counts: BTreeMap<String, usize>,
     resync_required: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopAfterFrameLimit {
+    Immediately,
+    WhenIdle,
+}
+
+#[derive(Debug, Clone)]
+struct FrameLimitStopper {
+    requested_frame_boundaries: usize,
+    observed_frame_boundaries: usize,
+    extra_frame_boundaries: usize,
+    mode: StopAfterFrameLimit,
+    draining: bool,
+}
+
+impl FrameLimitStopper {
+    fn new(requested_frame_boundaries: usize, mode: StopAfterFrameLimit) -> Self {
+        Self {
+            requested_frame_boundaries,
+            observed_frame_boundaries: 0,
+            extra_frame_boundaries: 0,
+            mode,
+            draining: false,
+        }
+    }
+
+    fn observe_frame_boundary(&mut self, physical_touch_down: bool) -> bool {
+        self.observed_frame_boundaries += 1;
+        if self.observed_frame_boundaries < self.requested_frame_boundaries {
+            return false;
+        }
+
+        if self.observed_frame_boundaries == self.requested_frame_boundaries {
+            return match self.mode {
+                StopAfterFrameLimit::Immediately => true,
+                StopAfterFrameLimit::WhenIdle if !physical_touch_down => true,
+                StopAfterFrameLimit::WhenIdle => {
+                    self.draining = true;
+                    false
+                }
+            };
+        }
+
+        self.extra_frame_boundaries += 1;
+        match self.mode {
+            StopAfterFrameLimit::Immediately => true,
+            StopAfterFrameLimit::WhenIdle => {
+                self.draining = physical_touch_down;
+                !physical_touch_down
+            }
+        }
+    }
+
+    fn is_draining(&self) -> bool {
+        self.draining
+    }
+
+    fn extra_frame_boundaries(&self) -> usize {
+        self.extra_frame_boundaries
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PhysicalTouchState {
+    current_slot: i32,
+    active_slots: Vec<bool>,
+    btn_touch_down: bool,
+    capabilities: Capabilities,
+}
+
+impl PhysicalTouchState {
+    fn new(capabilities: Capabilities) -> Self {
+        let slot_count = (capabilities.slot_max - capabilities.slot_min + 1) as usize;
+        Self {
+            current_slot: capabilities.slot_min,
+            active_slots: vec![false; slot_count],
+            btn_touch_down: false,
+            capabilities,
+        }
+    }
+
+    fn observe_frame(&mut self, frame: &RawFrame) {
+        for event in &frame.events {
+            match (event.kind, event.code) {
+                (EV_ABS, ABS_MT_SLOT) => {
+                    if self.slot_index(event.value).is_some() {
+                        self.current_slot = event.value;
+                    }
+                }
+                (EV_ABS, ABS_MT_TRACKING_ID) if event.value >= 0 => {
+                    if let Some(index) = self.slot_index(self.current_slot) {
+                        self.active_slots[index] = true;
+                    }
+                }
+                (EV_ABS, ABS_MT_TRACKING_ID) => {
+                    if let Some(index) = self.slot_index(self.current_slot) {
+                        self.active_slots[index] = false;
+                    }
+                }
+                (EV_KEY, BTN_TOUCH) => self.btn_touch_down = event.value != 0,
+                _ => {}
+            }
+        }
+    }
+
+    fn is_touch_down(&self) -> bool {
+        self.btn_touch_down || self.active_slots.iter().any(|active| *active)
+    }
+
+    fn slot_index(&self, slot: i32) -> Option<usize> {
+        (slot >= self.capabilities.slot_min && slot <= self.capabilities.slot_max)
+            .then_some((slot - self.capabilities.slot_min) as usize)
+    }
 }
 
 fn proxy(args: &ProxyArgs) -> Result<(), String> {
@@ -405,6 +524,27 @@ fn open_proxy_device(device_path: &Path) -> Result<(RawDevice, Capabilities), St
     Ok((device, capabilities))
 }
 
+fn ensure_physical_touchpad_idle_at_start(
+    device_path: &Path,
+    device: &RawDevice,
+) -> Result<(), String> {
+    if !physical_touch_is_down(device)? {
+        return Ok(());
+    }
+
+    Err(format!(
+        "touchpad is already touched on {}; release all fingers and retry live proxy",
+        device_path.display()
+    ))
+}
+
+fn physical_touch_is_down(device: &RawDevice) -> Result<bool, String> {
+    let key_state = device
+        .get_key_state()
+        .map_err(|err| format!("failed to read current touch state before live proxy: {err}"))?;
+    Ok(key_state.contains(KeyCode::BTN_TOUCH))
+}
+
 fn proxy_dry_run(
     device_path: &Path,
     frame_limit: usize,
@@ -417,6 +557,8 @@ fn proxy_dry_run(
         capabilities,
         edge_widths,
         frame_limit,
+        StopAfterFrameLimit::Immediately,
+        None,
         &mut sink,
     )?;
     print_proxy_summary(
@@ -436,6 +578,8 @@ fn proxy_uinput_grab(
     edge_widths: EdgeWidths,
 ) -> Result<(), String> {
     let (mut device, capabilities) = open_proxy_device(device_path)?;
+    ensure_physical_touchpad_idle_at_start(device_path, &device)?;
+
     let spec = VirtualTouchpadSpec::from_raw_device(&device, capabilities);
     let virtual_device = build_virtual_touchpad(&spec).map_err(|err| {
         format!("failed to create virtual touchpad via /dev/uinput before grabbing physical device: {err}")
@@ -450,6 +594,8 @@ fn proxy_uinput_grab(
         capabilities,
         edge_widths,
         frame_limit,
+        StopAfterFrameLimit::WhenIdle,
+        Some(UINPUT_IDLE_DRAIN_TIMEOUT),
         &mut sink,
     )?;
     emit_proxy_settle_output(capabilities, &mut sink, &mut stats)?;
@@ -473,6 +619,8 @@ fn run_proxy_loop<S>(
     capabilities: Capabilities,
     edge_widths: EdgeWidths,
     frame_limit: usize,
+    stop_after_frame_limit: StopAfterFrameLimit,
+    drain_timeout: Option<Duration>,
     sink: &mut S,
 ) -> Result<ProxyDryRunStats, String>
 where
@@ -482,48 +630,64 @@ where
     let mut engine = Engine::new(capabilities, edge_widths);
     let mut composer = RawOutputComposer::new(capabilities);
     let mut stats = ProxyDryRunStats::default();
+    let mut touch_state = PhysicalTouchState::new(capabilities);
+    let mut stopper = FrameLimitStopper::new(frame_limit, stop_after_frame_limit);
+    let mut drain_deadline: Option<Instant> = None;
     let mut current = Vec::new();
-    let mut remaining_frames = frame_limit;
 
     loop {
-        let events = device
-            .fetch_events()
-            .map_err(|err| format!("failed to read events from proxy device: {err}"))?;
+        let timeout =
+            drain_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let Some(events) = fetch_proxy_events(device, timeout)? else {
+            stats.idle_drain_timed_out = true;
+            finish_proxy_output(&mut composer, sink, &mut stats)?;
+            return Ok(stats);
+        };
 
-        for event in events {
-            let raw = RawEvent::new(event.event_type().0, event.code(), event.value());
+        for raw in events {
             match (raw.kind, raw.code) {
                 (EV_SYN, SYN_REPORT) => {
                     process_pending_proxy_frame(
                         &mut current,
+                        &mut touch_state,
                         &mut engine,
                         &mut composer,
                         sink,
                         &mut stats,
                     )?;
                     stats.input_frame_boundaries += 1;
-                    remaining_frames -= 1;
-                    if remaining_frames == 0 {
+                    if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
+                        stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                         finish_proxy_output(&mut composer, sink, &mut stats)?;
                         return Ok(stats);
                     }
+                    if stopper.is_draining() && drain_deadline.is_none() {
+                        drain_deadline = drain_timeout.map(|timeout| Instant::now() + timeout);
+                    }
+                    stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                 }
                 (EV_SYN, SYN_DROPPED) => {
                     process_pending_proxy_frame(
                         &mut current,
+                        &mut touch_state,
                         &mut engine,
                         &mut composer,
                         sink,
                         &mut stats,
                     )?;
                     let dropped = RawFrame::new(vec![raw]);
+                    touch_state.observe_frame(&dropped);
                     process_proxy_frame(&mut engine, &mut composer, sink, &mut stats, &dropped)?;
                     stats.input_frame_boundaries += 1;
-                    remaining_frames -= 1;
-                    if remaining_frames == 0 {
+                    if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
+                        stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                         finish_proxy_output(&mut composer, sink, &mut stats)?;
                         return Ok(stats);
                     }
+                    if stopper.is_draining() && drain_deadline.is_none() {
+                        drain_deadline = drain_timeout.map(|timeout| Instant::now() + timeout);
+                    }
+                    stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                 }
                 _ => current.push(raw),
             }
@@ -531,8 +695,52 @@ where
     }
 }
 
+fn fetch_proxy_events(
+    device: &mut RawDevice,
+    timeout: Option<Duration>,
+) -> Result<Option<Vec<RawEvent>>, String> {
+    if let Some(timeout) = timeout {
+        let timeout_ms = poll_timeout_ms(timeout);
+        let mut poll_fd = libc::pollfd {
+            fd: device.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ready = loop {
+            let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+            if result >= 0 {
+                break result;
+            }
+            let err = std::io::Error::last_os_error();
+            if err.kind() != std::io::ErrorKind::Interrupted {
+                return Err(format!("failed to wait for proxy events: {err}"));
+            }
+        };
+        if ready == 0 {
+            return Ok(None);
+        }
+    }
+
+    let events = device
+        .fetch_events()
+        .map_err(|err| format!("failed to read events from proxy device: {err}"))?
+        .map(|event| RawEvent::new(event.event_type().0, event.code(), event.value()))
+        .collect();
+    Ok(Some(events))
+}
+
+fn poll_timeout_ms(timeout: Duration) -> i32 {
+    let millis = timeout.as_millis();
+    if millis == 0 {
+        0
+    } else {
+        millis.min(i32::MAX as u128) as i32
+    }
+}
+
 fn process_pending_proxy_frame<S>(
     current: &mut Vec<RawEvent>,
+    touch_state: &mut PhysicalTouchState,
     engine: &mut Engine,
     composer: &mut RawOutputComposer,
     sink: &mut S,
@@ -547,6 +755,7 @@ where
     }
 
     let frame = RawFrame::new(std::mem::take(current));
+    touch_state.observe_frame(&frame);
     process_proxy_frame(engine, composer, sink, stats, &frame)
 }
 
@@ -723,6 +932,11 @@ fn print_proxy_summary(
     println!("cleanup_output_events: {}", stats.cleanup_output_events);
     println!("settle_output_frames: {}", stats.settle_output_frames);
     println!("settle_output_events: {}", stats.settle_output_events);
+    println!(
+        "idle_drain_frame_boundaries: {}",
+        stats.idle_drain_frame_boundaries
+    );
+    println!("idle_drain_timed_out: {}", stats.idle_drain_timed_out);
     println!("gestures: {}", stats.gestures.len());
     if !stats.gesture_counts.is_empty() {
         println!("gesture_counts:");
@@ -1072,6 +1286,48 @@ mod tests {
                 RawEvent::btn_tool_quinttap(false),
             ]
         );
+    }
+
+    #[test]
+    fn physical_touch_state_tracks_touch_lifecycle_from_raw_frames() {
+        let capabilities = default_capabilities();
+        let mut touch_state = PhysicalTouchState::new(capabilities);
+
+        touch_state.observe_frame(&RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(10),
+            RawEvent::btn_touch(true),
+        ]));
+        assert!(touch_state.is_touch_down());
+
+        touch_state.observe_frame(&RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(-1),
+            RawEvent::btn_touch(false),
+        ]));
+        assert!(!touch_state.is_touch_down());
+    }
+
+    #[test]
+    fn frame_limit_stop_waits_for_idle_after_budget_when_configured() {
+        let mut stopper = FrameLimitStopper::new(2, StopAfterFrameLimit::WhenIdle);
+
+        assert!(!stopper.observe_frame_boundary(true));
+        assert!(!stopper.observe_frame_boundary(true));
+        assert_eq!(stopper.extra_frame_boundaries(), 0);
+        assert!(!stopper.observe_frame_boundary(true));
+        assert_eq!(stopper.extra_frame_boundaries(), 1);
+        assert!(stopper.observe_frame_boundary(false));
+        assert_eq!(stopper.extra_frame_boundaries(), 2);
+    }
+
+    #[test]
+    fn frame_limit_stop_keeps_exact_budget_for_dry_run() {
+        let mut stopper = FrameLimitStopper::new(2, StopAfterFrameLimit::Immediately);
+
+        assert!(!stopper.observe_frame_boundary(true));
+        assert!(stopper.observe_frame_boundary(true));
+        assert_eq!(stopper.extra_frame_boundaries(), 0);
     }
 
     #[test]

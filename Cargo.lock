@@ -37,6 +37,7 @@ name = "edgepad"
 version = "0.1.0"
 dependencies = [
  "evdev",
+ "libc",
 ]
 
 [[package]]

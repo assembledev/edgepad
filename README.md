@@ -98,7 +98,7 @@ For bounded live passthrough through a virtual touchpad:
 sudo edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
 ```
 
-This mode creates the virtual touchpad first, then grabs the physical device, processes the requested frame budget, emits a final synthetic release frame if the virtual touchpad still has an active passthrough contact, sends a neutral settle frame to the virtual touchpad, waits briefly, ungrabs, prints the same summary, and exits.
+This mode refuses to start if the physical touchpad is already touched, creates the virtual touchpad, grabs the physical device, processes the requested frame budget, drains briefly until the physical touchpad is idle when the budget ends mid-touch, emits a final synthetic release frame if the virtual touchpad still has an active passthrough contact, sends a neutral settle frame to the virtual touchpad, waits briefly, ungrabs, prints the same summary, and exits.
 
 `proxy` uses a default edge width of `0.10` on each side. Use `--edge-width 0.15` or `--edge-width 0.20` when validating hardware/user gesture comfort on a real touchpad.
 

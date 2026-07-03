@@ -49,14 +49,18 @@ sudo edgepad proxy --device /dev/input/event5 --frames 300 --uinput --grab
 It is intentionally bounded. The command:
 
 1. opens the physical touchpad and reads its capabilities;
-2. creates the virtual touchpad through `/dev/uinput`;
-3. only then calls `EVIOCGRAB` on the physical device;
-4. routes/composes exactly the requested frame boundary budget;
-5. emits composed passthrough frames to the virtual touchpad;
-6. emits a final synthetic release frame if the frame budget stopped while a passthrough contact was still active;
-7. emits one neutral settle frame that marks all virtual MT slots and touch/tool keys as released;
-8. waits briefly so the compositor can consume the virtual neutral state before the physical device is ungrabbed;
-9. ungrabs and exits.
+2. refuses to continue if the physical touchpad is already touched, so the proxy does not start in the middle of an unknown contact lifecycle;
+3. creates the virtual touchpad through `/dev/uinput`;
+4. only then calls `EVIOCGRAB` on the physical device;
+5. routes/composes the requested frame boundary budget;
+6. if the frame budget ends while the physical touchpad is still touched, keeps proxying briefly until all fingers are up, with a bounded timeout;
+7. emits composed passthrough frames to the virtual touchpad;
+8. emits a final synthetic release frame if the frame budget/drain stopped while a passthrough contact was still active;
+9. emits one neutral settle frame that marks all virtual MT slots and touch/tool keys as released;
+10. waits briefly so the compositor can consume the virtual neutral state before the physical device is ungrabbed;
+11. ungrabs and exits.
+
+The idle drain is not an unbounded shutdown lock. It is a short grace period for smooth handoff at the end of a bounded manual run; timeout status is reported as `idle_drain_timed_out`.
 
 If virtual device creation fails, the physical device is not grabbed. `RawDevice` also ungrabs on drop, so errors during the bounded run do not intentionally leave the device grabbed.
 

@@ -16,5 +16,6 @@ path = "src/main.rs"
 
 [dependencies]
 evdev = "0.13.2"
+libc = "0.2"
 
 [dev-dependencies]
