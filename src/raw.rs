@@ -1,3 +1,5 @@
+use crate::core::Event;
+
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
 pub const EV_ABS: u16 = 0x03;
@@ -71,5 +73,24 @@ pub struct RawFrame {
 impl RawFrame {
     pub fn new(events: Vec<RawEvent>) -> Self {
         Self { events }
+    }
+}
+
+pub fn extract_core_events(frame: &RawFrame) -> Vec<Event> {
+    frame
+        .events
+        .iter()
+        .filter_map(|event| core_event_for_raw_event(*event))
+        .collect()
+}
+
+fn core_event_for_raw_event(event: RawEvent) -> Option<Event> {
+    match (event.kind, event.code) {
+        (EV_ABS, ABS_MT_SLOT) => Some(Event::slot(event.value)),
+        (EV_ABS, ABS_MT_TRACKING_ID) => Some(Event::tracking_id(event.value)),
+        (EV_ABS, ABS_MT_POSITION_X) => Some(Event::x(event.value)),
+        (EV_ABS, ABS_MT_POSITION_Y) => Some(Event::y(event.value)),
+        (EV_SYN, SYN_DROPPED) => Some(Event::syn_dropped()),
+        _ => None,
     }
 }
