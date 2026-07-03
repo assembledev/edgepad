@@ -356,6 +356,8 @@ struct ProxyDryRunStats {
     empty_output_frames: usize,
     composed_frames: usize,
     composed_events: usize,
+    cleanup_output_frames: usize,
+    cleanup_output_events: usize,
     gestures: Vec<Gesture>,
     gesture_counts: BTreeMap<String, usize>,
     resync_required: bool,
@@ -454,6 +456,7 @@ where
                     stats.input_frame_boundaries += 1;
                     remaining_frames -= 1;
                     if remaining_frames == 0 {
+                        finish_proxy_output(&mut composer, sink, &mut stats)?;
                         return Ok(stats);
                     }
                 }
@@ -470,6 +473,7 @@ where
                     stats.input_frame_boundaries += 1;
                     remaining_frames -= 1;
                     if remaining_frames == 0 {
+                        finish_proxy_output(&mut composer, sink, &mut stats)?;
                         return Ok(stats);
                     }
                 }
@@ -553,6 +557,37 @@ where
     Ok(())
 }
 
+fn finish_proxy_output<S>(
+    composer: &mut RawOutputComposer,
+    sink: &mut S,
+    stats: &mut ProxyDryRunStats,
+) -> Result<(), String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+{
+    let output_frame = composer
+        .finish()
+        .map_err(|err| format!("proxy output finish failed: {err:?}"))?;
+    if output_frame.events.is_empty() {
+        return Ok(());
+    }
+
+    let event_count = output_frame.events.len();
+    stats.composed_frames += 1;
+    stats.composed_events += event_count;
+    stats.cleanup_output_frames += 1;
+    stats.cleanup_output_events += event_count;
+    for event in output_frame.events {
+        sink.emit(event)
+            .map_err(|err| format!("proxy output cleanup emit failed: {err:?}"))?;
+    }
+    sink.sync()
+        .map_err(|err| format!("proxy output cleanup sync failed: {err:?}"))?;
+
+    Ok(())
+}
+
 fn gesture_count_key(gesture: Gesture) -> String {
     format!(
         "{}/{}",
@@ -596,6 +631,8 @@ fn print_proxy_summary(
     println!("empty_output_frames: {}", stats.empty_output_frames);
     println!("composed_frames: {}", stats.composed_frames);
     println!("composed_events: {}", stats.composed_events);
+    println!("cleanup_output_frames: {}", stats.cleanup_output_frames);
+    println!("cleanup_output_events: {}", stats.cleanup_output_events);
     println!("gestures: {}", stats.gestures.len());
     if !stats.gesture_counts.is_empty() {
         println!("gesture_counts:");
@@ -726,6 +763,18 @@ fn replay_raw(path: &Path) -> Result<(), String> {
 
         write_raw_output_frame(&mut composer, &routed, &mut sink)
             .map_err(|err| format!("raw output write failed: {err:?}"))?;
+    }
+
+    let finish_frame = composer
+        .finish()
+        .map_err(|err| format!("raw output finish failed: {err:?}"))?;
+    if !finish_frame.events.is_empty() {
+        for event in finish_frame.events {
+            sink.emit(event)
+                .map_err(|err| format!("raw output finish emit failed: {err:?}"))?;
+        }
+        sink.sync()
+            .map_err(|err| format!("raw output finish sync failed: {err:?}"))?;
     }
 
     let composed_events = sink
@@ -865,6 +914,39 @@ mod tests {
         assert_eq!(stats.gestures.len(), 0);
         assert!(stats.gesture_counts.is_empty());
         assert!(!stats.resync_required);
+    }
+
+    #[test]
+    fn proxy_finish_output_releases_active_passthrough_contact_before_exit() {
+        let capabilities = default_capabilities();
+        let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+        let mut composer = RawOutputComposer::new(capabilities);
+        let mut sink = RecordingRawOutputSink::default();
+        let mut stats = ProxyDryRunStats::default();
+        let frame = RawFrame::new(vec![
+            RawEvent::abs_mt_tracking_id(200),
+            RawEvent::abs_mt_position_x(520),
+            RawEvent::abs_mt_position_y(320),
+        ]);
+
+        process_proxy_frame(&mut engine, &mut composer, &mut sink, &mut stats, &frame)
+            .expect("center frame should process");
+        finish_proxy_output(&mut composer, &mut sink, &mut stats)
+            .expect("finish should emit a synthetic release frame");
+
+        assert_eq!(stats.composed_frames, 2);
+        assert_eq!(stats.composed_events, 10);
+        assert_eq!(stats.cleanup_output_frames, 1);
+        assert_eq!(stats.cleanup_output_events, 3);
+        assert_eq!(sink.frames().len(), 2);
+        assert_eq!(
+            sink.frames()[1].events,
+            vec![
+                RawEvent::abs_mt_tracking_id(-1),
+                RawEvent::btn_touch(false),
+                RawEvent::btn_tool_finger(false),
+            ]
+        );
     }
 
     #[test]

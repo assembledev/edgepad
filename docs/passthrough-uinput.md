@@ -30,7 +30,7 @@ edgepad proxy --device /dev/input/event5 --frames 300 --dry-run
 
 It does **not** create a virtual device, emit uinput events, suppress the physical touchpad, or call `EVIOCGRAB`. Use it to inspect what the live proxy would decide before enabling virtual output/grabbing.
 
-The summary includes raw/event volume, recognizer events, passthrough vs claimed-edge frame counts, empty-output frames, composed output volume, individual gestures, and aggregate gesture counts by zone/direction.
+The summary includes raw/event volume, recognizer events, passthrough vs claimed-edge frame counts, empty-output frames, composed output volume, final cleanup output volume, individual gestures, and aggregate gesture counts by zone/direction.
 
 ## Bounded grab/uinput proxy
 
@@ -47,7 +47,8 @@ It is intentionally bounded. The command:
 3. only then calls `EVIOCGRAB` on the physical device;
 4. routes/composes exactly the requested frame boundary budget;
 5. emits composed passthrough frames to the virtual touchpad;
-6. ungrabs and exits.
+6. emits a final synthetic release frame if the frame budget stopped while a passthrough contact was still active;
+7. ungrabs and exits.
 
 If virtual device creation fails, the physical device is not grabbed. `RawDevice` also ungrabs on drop, so errors during the bounded run do not intentionally leave the device grabbed.
 
@@ -104,4 +105,4 @@ This test requires a kernel/user environment that exposes `/dev/uinput` and allo
 
 ## Safety boundary
 
-Default tests do not require `/dev/uinput` and do not touch real hardware. The live uinput test creates only a virtual device; it does not read, suppress, or grab a physical touchpad. Physical device grabbing belongs later, after live virtual output is proven.
+Default tests do not require `/dev/uinput` and do not touch real hardware. The ignored live uinput test creates only a virtual device; it does not read, suppress, or grab a physical touchpad. The bounded `proxy --uinput --grab` command is the explicit manual hardware test path for physical-device grabbing.

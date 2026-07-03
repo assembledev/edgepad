@@ -270,6 +270,12 @@ impl RawOutputComposer {
         Ok(RawFrame::new(events))
     }
 
+    pub fn finish(&mut self) -> Result<RawFrame, SlotError> {
+        let events = self.release_all_tracked_contacts()?;
+        self.reset();
+        Ok(RawFrame::new(events))
+    }
+
     fn apply_passthrough_event(&mut self, event: RawEvent) -> Result<(), SlotError> {
         match (event.kind, event.code) {
             (EV_ABS, ABS_MT_SLOT) => {

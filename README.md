@@ -98,7 +98,7 @@ For bounded live passthrough through a virtual touchpad:
 sudo edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
 ```
 
-This mode creates the virtual touchpad first, then grabs the physical device, processes the requested frame budget, ungrabs, prints the same summary, and exits.
+This mode creates the virtual touchpad first, then grabs the physical device, processes the requested frame budget, emits a final synthetic release frame if the virtual touchpad still has an active passthrough contact, ungrabs, prints the same summary, and exits.
 
 Replace `/dev/input/eventX` with the touchpad event node reported by `edgepad devices`.
 

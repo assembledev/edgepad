@@ -235,3 +235,39 @@ fn compose_frame_releases_each_active_passthrough_slot_on_resync() {
         ]
     );
 }
+
+#[test]
+fn finish_releases_active_passthrough_contact_when_capture_stops_mid_contact() {
+    let mut engine = test_engine();
+    let mut composer = RawOutputComposer::new(test_capabilities());
+
+    let _ = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_tracking_id(100),
+            RawEvent::abs_mt_position_x(500),
+            RawEvent::abs_mt_position_y(300),
+        ]),
+    );
+
+    let output = composer
+        .finish()
+        .expect("finish should synthesize release for active passthrough contact")
+        .events;
+
+    assert_eq!(
+        output,
+        vec![
+            RawEvent::abs_mt_tracking_id(-1),
+            RawEvent::btn_touch(false),
+            RawEvent::btn_tool_finger(false),
+        ]
+    );
+
+    let second_finish = composer
+        .finish()
+        .expect("finish should be idempotent after cleanup")
+        .events;
+    assert!(second_finish.is_empty());
+}

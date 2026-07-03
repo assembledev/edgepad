@@ -95,12 +95,56 @@ EV_SYN SYN_REPORT 0
         "stdout was: {stdout}"
     );
     assert!(
-        stdout.contains("composed_events: 8"),
+        stdout.contains("composed_events: 11"),
         "stdout was: {stdout}"
     );
     assert!(stdout.contains("gestures: 0"), "stdout was: {stdout}");
     assert!(
         stdout.contains("resync_required: false"),
+        "stdout was: {stdout}"
+    );
+}
+
+#[test]
+fn replay_raw_cli_includes_final_release_when_capture_ends_mid_passthrough_contact() {
+    let path = unique_temp_path("edgepad-raw-replay-active-passthrough-at-end.raw.ev");
+    fs::write(
+        &path,
+        r#"
+# edgepad .ev dump
+# slots: 0..=4
+# x: 0..=4000
+# y: 0..=2500
+
+EV_ABS ABS_MT_TRACKING_ID 123
+EV_ABS ABS_MT_POSITION_X 1200
+EV_ABS ABS_MT_POSITION_Y 900
+EV_SYN SYN_REPORT 0
+"#,
+    )
+    .expect("raw fixture should be written");
+
+    let output = edgepad()
+        .arg("replay-raw")
+        .arg(&path)
+        .output()
+        .expect("edgepad binary should run");
+
+    fs::remove_file(&path).expect("raw fixture should be removed");
+
+    assert!(
+        output.status.success(),
+        "expected raw replay command to succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("raw_frames: 1"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("recognizer_passthrough_events: 3"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("composed_events: 10"),
         "stdout was: {stdout}"
     );
 }

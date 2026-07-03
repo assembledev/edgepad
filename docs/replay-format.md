@@ -149,6 +149,8 @@ gestures: ...
 resync_required: false
 ```
 
+If the raw capture ends with an active passthrough contact, output composition includes a final synthetic release frame so replay inspection matches the bounded live proxy cleanup behavior.
+
 The summary also prints lightweight capture diagnostics. With pure `--frames N`, a capture can end with an active center contact because the frame budget stopped mid-contact. For edge gesture captures, a useful workflow is to perform the gesture, release it, then place a finger in the center until `--frames` finishes.
 
 This is a debug/demo helper, not a replacement for `cargo test`. Fixtures without metadata use default ranges; captures produced by `edgepad dump` include real device ranges and replay uses those instead.
