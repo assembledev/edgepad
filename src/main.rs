@@ -10,10 +10,11 @@ use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
     write_raw_events_with_limit, WriteEventsResult,
 };
+use edgepad::raw::{parse_raw_dump_file, route_raw_frame, RawOutputComposer};
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
 const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
 
@@ -34,6 +35,13 @@ fn run() -> Result<(), String> {
                 return Err(USAGE.to_string());
             }
             replay(Path::new(&path))
+        }
+        Some("replay-raw") => {
+            let path = args.next().ok_or_else(|| USAGE.to_string())?;
+            if args.next().is_some() {
+                return Err(USAGE.to_string());
+            }
+            replay_raw(Path::new(&path))
         }
         Some("devices") => {
             let args = parse_devices_args(args)?;
@@ -331,6 +339,69 @@ fn replay(path: &Path) -> Result<(), String> {
     }
     println!("resync_required: {resync_required}");
     print_replay_diagnosis(&stats, passthrough_events, gesture_count);
+
+    Ok(())
+}
+
+fn replay_raw(path: &Path) -> Result<(), String> {
+    let input = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let raw_dump = parse_raw_dump_file(&input).map_err(|err| format!("parse failed: {err:?}"))?;
+
+    let (capability_source, capabilities) = match raw_dump.capabilities {
+        Some(capabilities) => ("metadata", capabilities),
+        None => ("defaults", default_capabilities()),
+    };
+    let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+    let mut composer = RawOutputComposer::new(capabilities);
+
+    let raw_events = raw_dump
+        .frames
+        .iter()
+        .map(|frame| frame.events.len())
+        .sum::<usize>();
+    let mut recognizer_passthrough_events = 0;
+    let mut composed_events = 0;
+    let mut gestures = Vec::new();
+    let mut resync_required = false;
+
+    for frame in &raw_dump.frames {
+        let routed = route_raw_frame(&mut engine, frame)
+            .map_err(|err| format!("raw replay failed: {err:?}"))?;
+        recognizer_passthrough_events += routed.passthrough.len();
+        resync_required |= routed.resync_required;
+        gestures.extend(routed.gestures.iter().copied());
+
+        let composed = composer
+            .compose_frame(&routed)
+            .map_err(|err| format!("raw output compose failed: {err:?}"))?;
+        composed_events += composed.events.len();
+    }
+
+    println!(
+        "capabilities: {capability_source} slots={}..={} x={}..={} y={}..={}",
+        capabilities.slot_min,
+        capabilities.slot_max,
+        capabilities.x.min,
+        capabilities.x.max,
+        capabilities.y.min,
+        capabilities.y.max
+    );
+    println!("raw_frames: {}", raw_dump.frames.len());
+    println!("raw_events: total={raw_events}");
+    println!("recognizer_passthrough_events: {recognizer_passthrough_events}");
+    println!("composed_events: {composed_events}");
+    println!("gestures: {}", gestures.len());
+    for gesture in gestures {
+        println!(
+            "gesture slot={} tracking_id={} zone={} direction={}",
+            gesture.slot,
+            gesture.tracking_id,
+            zone_name(gesture.zone),
+            direction_name(gesture.direction)
+        );
+    }
+    println!("resync_required: {resync_required}");
 
     Ok(())
 }
