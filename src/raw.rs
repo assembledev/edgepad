@@ -63,6 +63,26 @@ impl RawEvent {
         Self::new(EV_KEY, BTN_TOUCH, pressed as i32)
     }
 
+    pub const fn btn_tool_finger(pressed: bool) -> Self {
+        Self::new(EV_KEY, BTN_TOOL_FINGER, pressed as i32)
+    }
+
+    pub const fn btn_tool_doubletap(pressed: bool) -> Self {
+        Self::new(EV_KEY, BTN_TOOL_DOUBLETAP, pressed as i32)
+    }
+
+    pub const fn btn_tool_tripletap(pressed: bool) -> Self {
+        Self::new(EV_KEY, BTN_TOOL_TRIPLETAP, pressed as i32)
+    }
+
+    pub const fn btn_tool_quadtap(pressed: bool) -> Self {
+        Self::new(EV_KEY, BTN_TOOL_QUADTAP, pressed as i32)
+    }
+
+    pub const fn btn_tool_quinttap(pressed: bool) -> Self {
+        Self::new(EV_KEY, BTN_TOOL_QUINTTAP, pressed as i32)
+    }
+
     pub const fn abs_x(value: i32) -> Self {
         Self::new(EV_ABS, ABS_X, value)
     }
@@ -143,9 +163,205 @@ pub struct RoutedRawFrame {
     pub resync_required: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct RawOutputComposer {
+    caps: Capabilities,
+    current_slot: i32,
+    slots: Vec<RawOutputSlotState>,
+    last_touch_down: bool,
+    last_tool_count: usize,
+    last_abs_x: Option<i32>,
+    last_abs_y: Option<i32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct RawOutputSlotState {
+    active: bool,
+    x: Option<i32>,
+    y: Option<i32>,
+}
+
 impl RawFrame {
     pub fn new(events: Vec<RawEvent>) -> Self {
         Self { events }
+    }
+}
+
+impl RawOutputComposer {
+    pub fn new(caps: Capabilities) -> Self {
+        assert!(
+            caps.slot_min <= caps.slot_max,
+            "invalid slot range: {}..={} ",
+            caps.slot_min,
+            caps.slot_max
+        );
+        let slot_count = (caps.slot_max - caps.slot_min + 1) as usize;
+        Self {
+            current_slot: caps.slot_min,
+            caps,
+            slots: vec![RawOutputSlotState::default(); slot_count],
+            last_touch_down: false,
+            last_tool_count: 0,
+            last_abs_x: None,
+            last_abs_y: None,
+        }
+    }
+
+    pub fn compose_frame(&mut self, routed: &RoutedRawFrame) -> Result<RawFrame, SlotError> {
+        if routed.resync_required {
+            let events = self.release_all_tracked_contacts()?;
+            self.reset();
+            return Ok(RawFrame::new(events));
+        }
+
+        let mut events = Vec::new();
+        for event in routed.passthrough.iter().copied() {
+            self.apply_passthrough_event(event)?;
+            events.push(event);
+        }
+        self.append_legacy_state_events(&mut events);
+
+        Ok(RawFrame::new(events))
+    }
+
+    fn apply_passthrough_event(&mut self, event: RawEvent) -> Result<(), SlotError> {
+        match (event.kind, event.code) {
+            (EV_ABS, ABS_MT_SLOT) => {
+                self.ensure_slot(event.value)?;
+                self.current_slot = event.value;
+            }
+            (EV_ABS, ABS_MT_TRACKING_ID) if event.value >= 0 => {
+                let slot = self.slot_mut(self.current_slot)?;
+                slot.active = true;
+                slot.x = None;
+                slot.y = None;
+            }
+            (EV_ABS, ABS_MT_TRACKING_ID) => {
+                let slot = self.slot_mut(self.current_slot)?;
+                slot.active = false;
+                slot.x = None;
+                slot.y = None;
+            }
+            (EV_ABS, ABS_MT_POSITION_X) => {
+                self.slot_mut(self.current_slot)?.x = Some(event.value);
+            }
+            (EV_ABS, ABS_MT_POSITION_Y) => {
+                self.slot_mut(self.current_slot)?.y = Some(event.value);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn append_legacy_state_events(&mut self, events: &mut Vec<RawEvent>) {
+        let active_count = self.active_slot_count();
+        let touch_down = active_count > 0;
+
+        if self.last_touch_down != touch_down {
+            events.push(RawEvent::btn_touch(touch_down));
+            self.last_touch_down = touch_down;
+        }
+
+        if self.last_tool_count != active_count {
+            if let Some(previous_tool) = tool_event_for_contact_count(self.last_tool_count, false) {
+                events.push(previous_tool);
+            }
+            if let Some(next_tool) = tool_event_for_contact_count(active_count, true) {
+                events.push(next_tool);
+            }
+            self.last_tool_count = active_count;
+        }
+
+        if let Some((x, y)) = self.representative_position() {
+            if self.last_abs_x != Some(x) {
+                events.push(RawEvent::abs_x(x));
+                self.last_abs_x = Some(x);
+            }
+            if self.last_abs_y != Some(y) {
+                events.push(RawEvent::abs_y(y));
+                self.last_abs_y = Some(y);
+            }
+        } else {
+            self.last_abs_x = None;
+            self.last_abs_y = None;
+        }
+    }
+
+    fn active_slot_count(&self) -> usize {
+        self.slots.iter().filter(|slot| slot.active).count()
+    }
+
+    fn representative_position(&self) -> Option<(i32, i32)> {
+        self.slots
+            .iter()
+            .find(|slot| slot.active && slot.x.is_some() && slot.y.is_some())
+            .and_then(|slot| Some((slot.x?, slot.y?)))
+    }
+
+    fn release_all_tracked_contacts(&mut self) -> Result<Vec<RawEvent>, SlotError> {
+        let mut events = Vec::new();
+        let mut emitted_current_slot = self.current_slot;
+        for index in 0..self.slots.len() {
+            if !self.slots[index].active {
+                continue;
+            }
+            let slot = self.caps.slot_min + index as i32;
+            if slot != emitted_current_slot {
+                events.push(RawEvent::abs_mt_slot(slot));
+                emitted_current_slot = slot;
+            }
+            events.push(RawEvent::abs_mt_tracking_id(-1));
+        }
+        self.clear_slot_state();
+        self.append_legacy_state_events(&mut events);
+        Ok(events)
+    }
+
+    fn reset(&mut self) {
+        self.clear_slot_state();
+        self.current_slot = self.caps.slot_min;
+        self.last_touch_down = false;
+        self.last_tool_count = 0;
+        self.last_abs_x = None;
+        self.last_abs_y = None;
+    }
+
+    fn clear_slot_state(&mut self) {
+        for slot in &mut self.slots {
+            *slot = RawOutputSlotState::default();
+        }
+    }
+
+    fn ensure_slot(&self, slot: i32) -> Result<(), SlotError> {
+        if slot < self.caps.slot_min || slot > self.caps.slot_max {
+            return Err(SlotError::SlotOutOfRange {
+                slot,
+                min: self.caps.slot_min,
+                max: self.caps.slot_max,
+            });
+        }
+        Ok(())
+    }
+
+    fn slot_index(&self, slot: i32) -> Result<usize, SlotError> {
+        self.ensure_slot(slot)?;
+        Ok((slot - self.caps.slot_min) as usize)
+    }
+
+    fn slot_mut(&mut self, slot: i32) -> Result<&mut RawOutputSlotState, SlotError> {
+        let index = self.slot_index(slot)?;
+        Ok(&mut self.slots[index])
+    }
+}
+
+fn tool_event_for_contact_count(count: usize, pressed: bool) -> Option<RawEvent> {
+    match count {
+        0 => None,
+        1 => Some(RawEvent::btn_tool_finger(pressed)),
+        2 => Some(RawEvent::btn_tool_doubletap(pressed)),
+        3 => Some(RawEvent::btn_tool_tripletap(pressed)),
+        4 => Some(RawEvent::btn_tool_quadtap(pressed)),
+        _ => Some(RawEvent::btn_tool_quinttap(pressed)),
     }
 }
 
