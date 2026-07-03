@@ -1,7 +1,7 @@
 use edgepad::core::{AxisRange, Capabilities};
 use edgepad::raw::{
     parse_raw_dump_file, parse_raw_frames, RawDumpFile, RawEvent, RawFrame, RawParseError, EV_ABS,
-    EV_KEY,
+    EV_KEY, EV_MSC,
 };
 
 #[test]
@@ -16,6 +16,7 @@ EV_ABS ABS_MT_SLOT 1
 EV_ABS ABS_MT_TRACKING_ID 200
 EV_ABS ABS_MT_POSITION_X 500
 EV_ABS ABS_MT_POSITION_Y 300
+EV_MSC MSC_TIMESTAMP 16000
 EV_SYN SYN_REPORT 0
 
 EV_ABS ABS_MT_SLOT 1
@@ -35,6 +36,7 @@ EV_SYN SYN_REPORT 0
                 RawEvent::abs_mt_tracking_id(200),
                 RawEvent::abs_mt_position_x(500),
                 RawEvent::abs_mt_position_y(300),
+                RawEvent::msc_timestamp(16000),
             ]),
             RawFrame::new(vec![
                 RawEvent::abs_mt_slot(1),
@@ -47,13 +49,14 @@ EV_SYN SYN_REPORT 0
 
 #[test]
 fn parse_raw_frames_preserves_numeric_fallback_events() {
-    let input = "EV_KEY 65535 1\nEV_ABS 65535 42\nEV_65535 65534 123\nEV_SYN SYN_REPORT 0\n";
+    let input = "EV_KEY 65535 1\nEV_ABS 65535 42\nEV_MSC 5 16000\nEV_65535 65534 123\nEV_SYN SYN_REPORT 0\n";
 
     assert_eq!(
         parse_raw_frames(input),
         Ok(vec![RawFrame::new(vec![
             RawEvent::new(EV_KEY, 65535, 1),
             RawEvent::new(EV_ABS, 65535, 42),
+            RawEvent::new(EV_MSC, 5, 16000),
             RawEvent::new(65535, 65534, 123),
         ])])
     );

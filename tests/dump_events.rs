@@ -3,7 +3,7 @@ use edgepad::dump::{
     fixture_line_for_event, raw_line_for_event, write_capture_header, write_fixture_event,
     write_fixture_events_with_limit, write_raw_events_with_limit,
 };
-use evdev::{AbsoluteAxisCode, EventType, InputEvent, KeyCode, SynchronizationCode};
+use evdev::{AbsoluteAxisCode, EventType, InputEvent, KeyCode, MiscCode, SynchronizationCode};
 
 #[test]
 fn write_capture_header_includes_device_capabilities_metadata() {
@@ -221,6 +221,14 @@ fn raw_line_for_event_writes_touchpad_relevant_events_with_type_names() {
     assert_eq!(
         raw_line_for_event(InputEvent::new(EventType::KEY.0, KeyCode::BTN_TOUCH.0, 1)),
         "EV_KEY BTN_TOUCH 1"
+    );
+    assert_eq!(
+        raw_line_for_event(InputEvent::new(
+            EventType::MISC.0,
+            MiscCode::MSC_TIMESTAMP.0,
+            16000,
+        )),
+        "EV_MSC MSC_TIMESTAMP 16000"
     );
     assert_eq!(
         raw_line_for_event(InputEvent::new(

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use crate::core::{AxisRange, Capabilities};
 use evdev::raw_stream::RawDevice;
-use evdev::{AbsoluteAxisCode, EventSummary, InputEvent, KeyCode, SynchronizationCode};
+use evdev::{AbsoluteAxisCode, EventSummary, InputEvent, KeyCode, MiscCode, SynchronizationCode};
 
 pub fn write_capture_header(
     mut writer: impl Write,
@@ -90,6 +90,7 @@ pub fn raw_line_for_event(event: InputEvent) -> String {
         EventSummary::AbsoluteAxis(_, code, value) => {
             format!("EV_ABS {} {value}", absolute_axis_code_name(code))
         }
+        EventSummary::Misc(_, code, value) => format!("EV_MSC {} {value}", misc_code_name(code)),
         _ => format!(
             "EV_{} {} {}",
             event.event_type().0,
@@ -104,6 +105,14 @@ fn synchronization_code_name(code: SynchronizationCode) -> String {
         "SYN_REPORT".to_string()
     } else if code == SynchronizationCode::SYN_DROPPED {
         "SYN_DROPPED".to_string()
+    } else {
+        code.0.to_string()
+    }
+}
+
+fn misc_code_name(code: MiscCode) -> String {
+    if code == MiscCode::MSC_TIMESTAMP {
+        "MSC_TIMESTAMP".to_string()
     } else {
         code.0.to_string()
     }

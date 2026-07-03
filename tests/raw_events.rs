@@ -1,7 +1,8 @@
 use edgepad::core::Event;
 use edgepad::raw::{
     extract_core_events, RawEvent, RawFrame, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT,
-    ABS_MT_TRACKING_ID, ABS_X, ABS_Y, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED, SYN_REPORT,
+    ABS_MT_TRACKING_ID, ABS_X, ABS_Y, BTN_TOUCH, EV_ABS, EV_KEY, EV_MSC, EV_SYN, MSC_TIMESTAMP,
+    SYN_DROPPED, SYN_REPORT,
 };
 
 #[test]
@@ -36,6 +37,10 @@ fn raw_event_model_can_represent_non_recognizer_touchpad_events() {
     );
     assert_eq!(RawEvent::abs_x(640), RawEvent::new(EV_ABS, ABS_X, 640));
     assert_eq!(RawEvent::abs_y(320), RawEvent::new(EV_ABS, ABS_Y, 320));
+    assert_eq!(
+        RawEvent::msc_timestamp(16000),
+        RawEvent::new(EV_MSC, MSC_TIMESTAMP, 16000)
+    );
 }
 
 #[test]

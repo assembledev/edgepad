@@ -3,9 +3,11 @@ use crate::core::{AxisRange, Capabilities, Engine, Event, Gesture, SlotError};
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
 pub const EV_ABS: u16 = 0x03;
+pub const EV_MSC: u16 = 0x04;
 
 pub const SYN_REPORT: u16 = 0x00;
 pub const SYN_DROPPED: u16 = 0x03;
+pub const MSC_TIMESTAMP: u16 = 0x05;
 
 pub const BTN_LEFT: u16 = 0x110;
 pub const BTN_RIGHT: u16 = 0x111;
@@ -67,6 +69,10 @@ impl RawEvent {
 
     pub const fn abs_y(value: i32) -> Self {
         Self::new(EV_ABS, ABS_Y, value)
+    }
+
+    pub const fn msc_timestamp(value: i32) -> Self {
+        Self::new(EV_MSC, MSC_TIMESTAMP, value)
     }
 
     pub const fn abs_mt_slot(slot: i32) -> Self {
@@ -313,6 +319,7 @@ fn parse_event_type(line: usize, name: &str) -> Result<u16, RawParseError> {
         "EV_SYN" => Ok(EV_SYN),
         "EV_KEY" => Ok(EV_KEY),
         "EV_ABS" => Ok(EV_ABS),
+        "EV_MSC" => Ok(EV_MSC),
         _ => {
             let Some(raw) = name.strip_prefix("EV_") else {
                 return Err(RawParseError::UnknownEventType {
@@ -342,6 +349,7 @@ fn parse_event_code(
         EV_SYN => synchronization_code_for_name(code),
         EV_KEY => key_code_for_name(code),
         EV_ABS => absolute_axis_code_for_name(code),
+        EV_MSC => misc_code_for_name(code),
         _ => None,
     };
 
@@ -376,6 +384,13 @@ fn synchronization_code_for_name(name: &str) -> Option<u16> {
     match name {
         "SYN_REPORT" => Some(SYN_REPORT),
         "SYN_DROPPED" => Some(SYN_DROPPED),
+        _ => None,
+    }
+}
+
+fn misc_code_for_name(name: &str) -> Option<u16> {
+    match name {
+        "MSC_TIMESTAMP" => Some(MSC_TIMESTAMP),
         _ => None,
     }
 }
