@@ -8,13 +8,14 @@ use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirectio
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
 use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
-    WriteFixtureEventsResult,
+    write_raw_events_with_limit, WriteEventsResult,
 };
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N]";
-const DUMP_USAGE: &str = "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
+const DUMP_USAGE: &str =
+    "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
 
 fn main() {
     if let Err(err) = run() {
@@ -40,7 +41,7 @@ fn run() -> Result<(), String> {
         }
         Some("dump") => {
             let args = parse_dump_args(args)?;
-            dump(&args.device, &args.out, args.frames)
+            dump(&args.device, &args.out, args.frames, args.raw)
         }
         _ => Err(USAGE.to_string()),
     }
@@ -55,6 +56,7 @@ struct DumpArgs {
     device: PathBuf,
     out: PathBuf,
     frames: Option<usize>,
+    raw: bool,
 }
 
 fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceArgs, String> {
@@ -76,14 +78,15 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
     let mut device = None;
     let mut out = None;
     let mut frames = None;
+    let mut raw = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--device" => device = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
             "--out" => out = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
             "--frames" => {
-                let raw = args.next().ok_or_else(|| DUMP_USAGE.to_string())?;
-                let parsed = raw
+                let raw_value = args.next().ok_or_else(|| DUMP_USAGE.to_string())?;
+                let parsed = raw_value
                     .parse::<usize>()
                     .map_err(|_| "--frames must be a positive integer".to_string())?;
                 if parsed == 0 {
@@ -91,6 +94,7 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
                 }
                 frames = Some(parsed);
             }
+            "--raw" => raw = true,
             _ => return Err(DUMP_USAGE.to_string()),
         }
     }
@@ -99,6 +103,7 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
         device: device.ok_or_else(|| DUMP_USAGE.to_string())?,
         out: out.ok_or_else(|| DUMP_USAGE.to_string())?,
         frames,
+        raw,
     })
 }
 
@@ -152,12 +157,33 @@ fn event_node_count_text(count: usize) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DumpFormat {
+    Replay,
+    Raw,
+}
+
+impl DumpFormat {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Replay => "replay",
+            Self::Raw => "raw",
+        }
+    }
+}
+
 fn dump(
     device_path: &Path,
     out_path: &Path,
     mut remaining_frames: Option<usize>,
+    raw: bool,
 ) -> Result<(), String> {
     let requested_frames = remaining_frames;
+    let format = if raw {
+        DumpFormat::Raw
+    } else {
+        DumpFormat::Replay
+    };
     let mut device = RawDevice::open(device_path)
         .map_err(|err| format!("failed to open device {}: {err}", device_path.display()))?;
     let file = File::create(out_path)
@@ -166,7 +192,7 @@ fn dump(
     let capabilities = capabilities_from_raw_device(&device);
     write_capture_header(&mut writer, device_path, capabilities)
         .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
-    let mut total = WriteFixtureEventsResult::default();
+    let mut total = WriteEventsResult::default();
 
     loop {
         let events = device.fetch_events().map_err(|err| {
@@ -175,11 +201,22 @@ fn dump(
                 device_path.display()
             )
         })?;
-        let result = write_fixture_events_with_limit(&mut writer, events, &mut remaining_frames)
-            .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+        let result = if raw {
+            write_raw_events_with_limit(&mut writer, events, &mut remaining_frames)
+        } else {
+            write_fixture_events_with_limit(&mut writer, events, &mut remaining_frames)
+        }
+        .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
         total.add(result);
         if total.reached_limit {
-            print_dump_summary(device_path, out_path, capabilities, requested_frames, total);
+            print_dump_summary(
+                device_path,
+                out_path,
+                capabilities,
+                requested_frames,
+                total,
+                format,
+            );
             return Ok(());
         }
     }
@@ -190,10 +227,12 @@ fn print_dump_summary(
     out_path: &Path,
     capabilities: Option<Capabilities>,
     requested_frames: Option<usize>,
-    stats: WriteFixtureEventsResult,
+    stats: WriteEventsResult,
+    format: DumpFormat,
 ) {
     println!("wrote: {}", out_path.display());
     println!("device: {}", device_path.display());
+    println!("format: {}", format.label());
     if let Some(capabilities) = capabilities {
         println!(
             "capabilities: slots={}..={} x={}..={} y={}..={}",
@@ -215,7 +254,10 @@ fn print_dump_summary(
         stats.frame_boundaries_written
     );
     println!("written_events: {}", stats.events_written);
-    println!("next: edgepad replay {}", out_path.display());
+    match format {
+        DumpFormat::Replay => println!("next: edgepad replay {}", out_path.display()),
+        DumpFormat::Raw => println!("next: inspect raw dump; replay expects non-raw dump format"),
+    }
 }
 
 fn default_capabilities() -> Capabilities {
