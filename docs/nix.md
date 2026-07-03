@@ -36,6 +36,12 @@ sudo ./result/bin/edgepad dump --raw --device /dev/input/eventX --out bug.raw.ev
 ./result/bin/edgepad replay-raw bug.raw.ev
 ```
 
+For bounded live dry-run inspection without forwarding input:
+
+```bash
+sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
+```
+
 ## Development shell
 
 ```bash

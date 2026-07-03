@@ -18,6 +18,7 @@ Implemented:
 - `edgepad dump --device <event-node> --out <file.ev> [--frames N]` for read-only replay-format capture;
 - `edgepad dump --raw --device <event-node> --out <file.raw.ev> [--frames N]` for read-only raw evdev capture;
 - `edgepad replay-raw <file.raw.ev>` for raw capture routing/output-composer inspection;
+- `edgepad proxy --device <event-node> --frames N --dry-run` for bounded live routing/output-composer inspection without forwarding input;
 - `.ev` metadata headers with real slot/X/Y ranges;
 - raw output composition that synthesizes `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` from unclaimed passthrough contacts;
 - tested raw output sink and buffered uinput sink plumbing;
@@ -26,7 +27,7 @@ Implemented:
 
 Not implemented yet:
 
-- live virtual-device passthrough/proxy via `uinput`;
+- live virtual-device passthrough via `uinput`;
 - device grabbing;
 - daemon/service mode;
 - gesture/action configuration;
@@ -84,6 +85,12 @@ For raw passthrough/output debugging:
 ```bash
 sudo edgepad dump --raw --device /dev/input/eventX --out bug.raw.ev --frames 300
 edgepad replay-raw bug.raw.ev
+```
+
+For bounded live routing/output inspection without forwarding input:
+
+```bash
+sudo edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
 ```
 
 Replace `/dev/input/eventX` with the touchpad event node reported by `edgepad devices`.

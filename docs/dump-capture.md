@@ -83,6 +83,6 @@ Reading `/dev/input/event*` may require `sudo`, group `input`, or seat/logind AC
 
 - No automatic touchpad selection yet; use `edgepad devices` first.
 - No duration/time limit yet; use `--frames N` or `Ctrl+C`.
-- No live passthrough/proxy mode yet.
+- Live proxy output through `uinput` is not implemented yet; use `proxy --dry-run` for bounded live routing/composer inspection.
 
 The capture path stays read-only so samples can be collected before device grabbing or live virtual input are implemented.

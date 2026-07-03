@@ -4,22 +4,23 @@ use std::io::LineWriter;
 use std::path::{Path, PathBuf};
 use std::process;
 
-use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
+use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, Gesture, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
 use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
     write_raw_events_with_limit, WriteEventsResult,
 };
 use edgepad::raw::{
-    parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawOutputComposer,
-    RecordingRawOutputSink,
+    parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawEvent, RawFrame,
+    RawOutputComposer, RecordingRawOutputSink, EV_SYN, SYN_DROPPED, SYN_REPORT,
 };
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N --dry-run";
 const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
+const PROXY_USAGE: &str = "usage: edgepad proxy --device <event-node> --frames N --dry-run";
 
 fn main() {
     if let Err(err) = run() {
@@ -54,6 +55,10 @@ fn run() -> Result<(), String> {
             let args = parse_dump_args(args)?;
             dump(&args.device, &args.out, args.frames, args.raw)
         }
+        Some("proxy") => {
+            let args = parse_proxy_args(args)?;
+            proxy_dry_run(&args.device, args.frames)
+        }
         _ => Err(USAGE.to_string()),
     }
 }
@@ -68,6 +73,11 @@ struct DumpArgs {
     out: PathBuf,
     frames: Option<usize>,
     raw: bool,
+}
+
+struct ProxyArgs {
+    device: PathBuf,
+    frames: usize,
 }
 
 fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceArgs, String> {
@@ -97,12 +107,7 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
             "--out" => out = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
             "--frames" => {
                 let raw_value = args.next().ok_or_else(|| DUMP_USAGE.to_string())?;
-                let parsed = raw_value
-                    .parse::<usize>()
-                    .map_err(|_| "--frames must be a positive integer".to_string())?;
-                if parsed == 0 {
-                    return Err("--frames must be a positive integer".to_string());
-                }
+                let parsed = parse_positive_frame_limit(&raw_value)?;
                 frames = Some(parsed);
             }
             "--raw" => raw = true,
@@ -116,6 +121,42 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
         frames,
         raw,
     })
+}
+
+fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs, String> {
+    let mut device = None;
+    let mut frames = None;
+    let mut dry_run = false;
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device" => device = Some(args.next().ok_or_else(|| PROXY_USAGE.to_string())?.into()),
+            "--frames" => {
+                let raw_value = args.next().ok_or_else(|| PROXY_USAGE.to_string())?;
+                frames = Some(parse_positive_frame_limit(&raw_value)?);
+            }
+            "--dry-run" => dry_run = true,
+            _ => return Err(PROXY_USAGE.to_string()),
+        }
+    }
+
+    let device = device.ok_or_else(|| PROXY_USAGE.to_string())?;
+    let frames = frames.ok_or_else(|| PROXY_USAGE.to_string())?;
+    if !dry_run {
+        return Err("proxy currently requires --dry-run".to_string());
+    }
+
+    Ok(ProxyArgs { device, frames })
+}
+
+fn parse_positive_frame_limit(raw_value: &str) -> Result<usize, String> {
+    let parsed = raw_value
+        .parse::<usize>()
+        .map_err(|_| "--frames must be a positive integer".to_string())?;
+    if parsed == 0 {
+        return Err("--frames must be a positive integer".to_string());
+    }
+    Ok(parsed)
 }
 
 fn devices(root: &Path, show_all: bool) -> Result<(), String> {
@@ -273,6 +314,173 @@ fn dump_next_command(format: DumpFormat, out_path: &Path) -> String {
         DumpFormat::Replay => format!("edgepad replay {}", out_path.display()),
         DumpFormat::Raw => format!("edgepad replay-raw {}", out_path.display()),
     }
+}
+
+#[derive(Debug, Default)]
+struct ProxyDryRunStats {
+    input_frame_boundaries: usize,
+    raw_frames: usize,
+    raw_events: usize,
+    recognizer_passthrough_events: usize,
+    composed_frames: usize,
+    composed_events: usize,
+    gestures: Vec<Gesture>,
+    resync_required: bool,
+}
+
+fn proxy_dry_run(device_path: &Path, frame_limit: usize) -> Result<(), String> {
+    let mut device = RawDevice::open(device_path)
+        .map_err(|err| format!("failed to open device {}: {err}", device_path.display()))?;
+    let capabilities = capabilities_from_raw_device(&device).ok_or_else(|| {
+        format!(
+            "failed to read touchpad capabilities from {}; proxy needs ABS_MT_SLOT, ABS_MT_POSITION_X, and ABS_MT_POSITION_Y",
+            device_path.display()
+        )
+    })?;
+    let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+    let mut composer = RawOutputComposer::new(capabilities);
+    let mut sink = RecordingRawOutputSink::default();
+    let mut stats = ProxyDryRunStats::default();
+    let mut current = Vec::new();
+    let mut remaining_frames = frame_limit;
+
+    loop {
+        let events = device.fetch_events().map_err(|err| {
+            format!(
+                "failed to read events from {}: {err}",
+                device_path.display()
+            )
+        })?;
+
+        for event in events {
+            let raw = RawEvent::new(event.event_type().0, event.code(), event.value());
+            match (raw.kind, raw.code) {
+                (EV_SYN, SYN_REPORT) => {
+                    process_pending_proxy_frame(
+                        &mut current,
+                        &mut engine,
+                        &mut composer,
+                        &mut sink,
+                        &mut stats,
+                    )?;
+                    stats.input_frame_boundaries += 1;
+                    remaining_frames -= 1;
+                    if remaining_frames == 0 {
+                        print_proxy_dry_run_summary(device_path, capabilities, frame_limit, &stats);
+                        return Ok(());
+                    }
+                }
+                (EV_SYN, SYN_DROPPED) => {
+                    process_pending_proxy_frame(
+                        &mut current,
+                        &mut engine,
+                        &mut composer,
+                        &mut sink,
+                        &mut stats,
+                    )?;
+                    let dropped = RawFrame::new(vec![raw]);
+                    process_proxy_dry_run_frame(
+                        &mut engine,
+                        &mut composer,
+                        &mut sink,
+                        &mut stats,
+                        &dropped,
+                    )?;
+                    stats.input_frame_boundaries += 1;
+                    remaining_frames -= 1;
+                    if remaining_frames == 0 {
+                        print_proxy_dry_run_summary(device_path, capabilities, frame_limit, &stats);
+                        return Ok(());
+                    }
+                }
+                _ => current.push(raw),
+            }
+        }
+    }
+}
+
+fn process_pending_proxy_frame(
+    current: &mut Vec<RawEvent>,
+    engine: &mut Engine,
+    composer: &mut RawOutputComposer,
+    sink: &mut RecordingRawOutputSink,
+    stats: &mut ProxyDryRunStats,
+) -> Result<(), String> {
+    if current.is_empty() {
+        return Ok(());
+    }
+
+    let frame = RawFrame::new(std::mem::take(current));
+    process_proxy_dry_run_frame(engine, composer, sink, stats, &frame)
+}
+
+fn process_proxy_dry_run_frame(
+    engine: &mut Engine,
+    composer: &mut RawOutputComposer,
+    sink: &mut RecordingRawOutputSink,
+    stats: &mut ProxyDryRunStats,
+    frame: &RawFrame,
+) -> Result<(), String> {
+    stats.raw_frames += 1;
+    stats.raw_events += frame.events.len();
+
+    let routed = route_raw_frame(engine, frame).map_err(|err| format!("proxy failed: {err:?}"))?;
+    stats.recognizer_passthrough_events += routed.passthrough.len();
+    stats.resync_required |= routed.resync_required;
+    stats.gestures.extend(routed.gestures.iter().copied());
+
+    let composed_frames_before = sink.frames().len();
+    write_raw_output_frame(composer, &routed, sink)
+        .map_err(|err| format!("proxy output compose failed: {err:?}"))?;
+    let new_frames = &sink.frames()[composed_frames_before..];
+    stats.composed_frames += new_frames.len();
+    stats.composed_events += new_frames
+        .iter()
+        .map(|frame| frame.events.len())
+        .sum::<usize>();
+
+    Ok(())
+}
+
+fn print_proxy_dry_run_summary(
+    device_path: &Path,
+    capabilities: Capabilities,
+    requested_frames: usize,
+    stats: &ProxyDryRunStats,
+) {
+    println!("mode: proxy dry-run");
+    println!("device: {}", device_path.display());
+    println!(
+        "capabilities: slots={}..={} x={}..={} y={}..={}",
+        capabilities.slot_min,
+        capabilities.slot_max,
+        capabilities.x.min,
+        capabilities.x.max,
+        capabilities.y.min,
+        capabilities.y.max
+    );
+    println!("requested_frame_boundaries: {requested_frames}");
+    println!("input_frame_boundaries: {}", stats.input_frame_boundaries);
+    println!("raw_frames: {}", stats.raw_frames);
+    println!("raw_events: total={}", stats.raw_events);
+    println!(
+        "recognizer_passthrough_events: {}",
+        stats.recognizer_passthrough_events
+    );
+    println!("composed_frames: {}", stats.composed_frames);
+    println!("composed_events: {}", stats.composed_events);
+    println!("gestures: {}", stats.gestures.len());
+    for gesture in &stats.gestures {
+        println!(
+            "gesture slot={} tracking_id={} zone={} direction={}",
+            gesture.slot,
+            gesture.tracking_id,
+            zone_name(gesture.zone),
+            direction_name(gesture.direction)
+        );
+    }
+    println!("resync_required: {}", stats.resync_required);
+    println!("output: not emitted (--dry-run)");
 }
 
 fn default_capabilities() -> Capabilities {
@@ -482,5 +690,38 @@ mod tests {
             dump_next_command(DumpFormat::Replay, Path::new("bug.ev")),
             "edgepad replay bug.ev"
         );
+    }
+
+    #[test]
+    fn proxy_dry_run_frame_stats_match_raw_replay_output() {
+        let capabilities = default_capabilities();
+        let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+        let mut composer = RawOutputComposer::new(capabilities);
+        let mut sink = RecordingRawOutputSink::default();
+        let mut stats = ProxyDryRunStats::default();
+        let frame = RawFrame::new(vec![
+            RawEvent::btn_touch(true),
+            RawEvent::abs_x(20),
+            RawEvent::abs_y(300),
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(100),
+            RawEvent::abs_mt_position_x(20),
+            RawEvent::abs_mt_position_y(300),
+            RawEvent::abs_mt_slot(1),
+            RawEvent::abs_mt_tracking_id(200),
+            RawEvent::abs_mt_position_x(520),
+            RawEvent::abs_mt_position_y(320),
+        ]);
+
+        process_proxy_dry_run_frame(&mut engine, &mut composer, &mut sink, &mut stats, &frame)
+            .expect("mixed frame should process");
+
+        assert_eq!(stats.raw_frames, 1);
+        assert_eq!(stats.raw_events, 11);
+        assert_eq!(stats.recognizer_passthrough_events, 4);
+        assert_eq!(stats.composed_frames, 1);
+        assert_eq!(stats.composed_events, 8);
+        assert_eq!(stats.gestures.len(), 0);
+        assert!(!stats.resync_required);
     }
 }

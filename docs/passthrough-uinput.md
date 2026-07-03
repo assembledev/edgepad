@@ -12,14 +12,25 @@ Implemented:
 4. `RawOutputSink` writes composed raw events frame-by-frame into a sink.
 5. `UinputRawOutputSink` buffers one composed frame and flushes it to a uinput writer on `sync()`.
 6. `VirtualTouchpadSpec` describes the virtual touchpad capability set from captured device ranges.
+7. `proxy --dry-run` reads bounded live frames from a physical touchpad, routes/composes them, and prints counters without forwarding input.
 
-Not wired into a live command yet:
+Not wired into a live forwarding command yet:
 
 - opening `/dev/uinput` from the CLI;
 - creating a real virtual input device during normal commands;
-- reading a physical event node and writing a virtual node in one loop;
+- writing live proxy output to a virtual node;
 - `EVIOCGRAB`;
 - daemon/service mode.
+
+## Live dry-run proxy
+
+`proxy --dry-run` is a bounded live inspection mode. It reads a physical touchpad stream, runs raw routing and output composition, prints counters, and exits after the requested frame boundary budget.
+
+```bash
+edgepad proxy --device /dev/input/event5 --frames 300 --dry-run
+```
+
+It does **not** create a virtual device, emit uinput events, suppress the physical touchpad, or call `EVIOCGRAB`. Use it to inspect what the live proxy would decide before enabling virtual output/grabbing.
 
 ## Output policy
 
