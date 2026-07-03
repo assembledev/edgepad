@@ -52,6 +52,24 @@ The Rust `evdev` crate's `VirtualDevice::emit(&[InputEvent])` appends `SYN_REPOR
 
 The X/Y and slot ranges come from captured device metadata. `ABS_MT_TRACKING_ID` currently uses a conservative `0..=65535` range.
 
+## Manual live uinput test
+
+Normal test runs do not touch `/dev/uinput`:
+
+```bash
+cargo test
+```
+
+The live uinput boundary check is an ignored integration test:
+
+```bash
+cargo test --test uinput_live -- --ignored
+```
+
+It creates a temporary virtual touchpad from `VirtualTouchpadSpec`, emits one center contact down/up frame through `UinputRawOutputSink`, then lets the virtual device drop at test end.
+
+This test requires a kernel/user environment that exposes `/dev/uinput` and allows the current user to create virtual input devices. If `/dev/uinput` is missing or permission is denied, the test fails with the underlying OS error. That failure means the live environment is not ready; it does not mean the default replay/unit test suite is broken.
+
 ## Safety boundary
 
-Current tests do not require `/dev/uinput` and do not touch real hardware. The next live step should be a narrow virtual-device smoke path before any physical device grabbing is added.
+Default tests do not require `/dev/uinput` and do not touch real hardware. The live uinput test creates only a virtual device; it does not read, suppress, or grab a physical touchpad. Physical device grabbing belongs later, after live virtual output is proven.
