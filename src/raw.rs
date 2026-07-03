@@ -7,14 +7,35 @@ pub const EV_ABS: u16 = 0x03;
 pub const SYN_REPORT: u16 = 0x00;
 pub const SYN_DROPPED: u16 = 0x03;
 
+pub const BTN_LEFT: u16 = 0x110;
+pub const BTN_RIGHT: u16 = 0x111;
+pub const BTN_MIDDLE: u16 = 0x112;
+pub const BTN_SIDE: u16 = 0x113;
+pub const BTN_EXTRA: u16 = 0x114;
+pub const BTN_TOOL_FINGER: u16 = 0x145;
+pub const BTN_TOOL_QUINTTAP: u16 = 0x148;
 pub const BTN_TOUCH: u16 = 0x14a;
+pub const BTN_TOOL_DOUBLETAP: u16 = 0x14d;
+pub const BTN_TOOL_TRIPLETAP: u16 = 0x14e;
+pub const BTN_TOOL_QUADTAP: u16 = 0x14f;
 
 pub const ABS_X: u16 = 0x00;
 pub const ABS_Y: u16 = 0x01;
 pub const ABS_MT_SLOT: u16 = 0x2f;
+pub const ABS_MT_TOUCH_MAJOR: u16 = 0x30;
+pub const ABS_MT_TOUCH_MINOR: u16 = 0x31;
+pub const ABS_MT_WIDTH_MAJOR: u16 = 0x32;
+pub const ABS_MT_WIDTH_MINOR: u16 = 0x33;
+pub const ABS_MT_ORIENTATION: u16 = 0x34;
 pub const ABS_MT_POSITION_X: u16 = 0x35;
 pub const ABS_MT_POSITION_Y: u16 = 0x36;
+pub const ABS_MT_TOOL_TYPE: u16 = 0x37;
+pub const ABS_MT_BLOB_ID: u16 = 0x38;
 pub const ABS_MT_TRACKING_ID: u16 = 0x39;
+pub const ABS_MT_PRESSURE: u16 = 0x3a;
+pub const ABS_MT_DISTANCE: u16 = 0x3b;
+pub const ABS_MT_TOOL_X: u16 = 0x3c;
+pub const ABS_MT_TOOL_Y: u16 = 0x3d;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawEvent {
@@ -65,6 +86,31 @@ impl RawEvent {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawParseError {
+    MissingField {
+        line: usize,
+        field: &'static str,
+    },
+    ExtraField {
+        line: usize,
+    },
+    InvalidInteger {
+        line: usize,
+        field: &'static str,
+        value: String,
+    },
+    UnknownEventType {
+        line: usize,
+        name: String,
+    },
+    UnknownCode {
+        line: usize,
+        event_type: String,
+        code: String,
+    },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RawFrame {
     pub events: Vec<RawEvent>,
@@ -80,6 +126,183 @@ pub struct RoutedRawFrame {
 impl RawFrame {
     pub fn new(events: Vec<RawEvent>) -> Self {
         Self { events }
+    }
+}
+
+pub fn parse_raw_frames(input: &str) -> Result<Vec<RawFrame>, RawParseError> {
+    let mut frames = Vec::new();
+    let mut current = Vec::new();
+
+    for (index, raw_line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw_line
+            .split_once('#')
+            .map_or(raw_line, |(before_comment, _)| before_comment)
+            .trim();
+
+        if line.is_empty() {
+            continue;
+        }
+
+        let event = parse_raw_event_line(line_number, line)?;
+        match (event.kind, event.code) {
+            (EV_SYN, SYN_REPORT) => {
+                if !current.is_empty() {
+                    frames.push(RawFrame::new(std::mem::take(&mut current)));
+                }
+            }
+            (EV_SYN, SYN_DROPPED) => {
+                if !current.is_empty() {
+                    frames.push(RawFrame::new(std::mem::take(&mut current)));
+                }
+                frames.push(RawFrame::new(vec![event]));
+            }
+            _ => current.push(event),
+        }
+    }
+
+    if !current.is_empty() {
+        frames.push(RawFrame::new(current));
+    }
+
+    Ok(frames)
+}
+
+fn parse_raw_event_line(line: usize, raw_line: &str) -> Result<RawEvent, RawParseError> {
+    let mut parts = raw_line.split_whitespace();
+    let event_type = parts.next().ok_or(RawParseError::MissingField {
+        line,
+        field: "event_type",
+    })?;
+    let code = parts.next().ok_or(RawParseError::MissingField {
+        line,
+        field: "code",
+    })?;
+    let value = parts.next().ok_or(RawParseError::MissingField {
+        line,
+        field: "value",
+    })?;
+
+    if parts.next().is_some() {
+        return Err(RawParseError::ExtraField { line });
+    }
+
+    let kind = parse_event_type(line, event_type)?;
+    let code = parse_event_code(line, event_type, kind, code)?;
+    let value = parse_i32_field(line, "value", value)?;
+
+    Ok(RawEvent::new(kind, code, value))
+}
+
+fn parse_event_type(line: usize, name: &str) -> Result<u16, RawParseError> {
+    match name {
+        "EV_SYN" => Ok(EV_SYN),
+        "EV_KEY" => Ok(EV_KEY),
+        "EV_ABS" => Ok(EV_ABS),
+        _ => {
+            let Some(raw) = name.strip_prefix("EV_") else {
+                return Err(RawParseError::UnknownEventType {
+                    line,
+                    name: name.to_string(),
+                });
+            };
+            parse_u16_field(line, "event_type", raw).map_err(|_| RawParseError::UnknownEventType {
+                line,
+                name: name.to_string(),
+            })
+        }
+    }
+}
+
+fn parse_event_code(
+    line: usize,
+    event_type_name: &str,
+    event_type: u16,
+    code: &str,
+) -> Result<u16, RawParseError> {
+    if let Ok(value) = parse_u16_field(line, "code", code) {
+        return Ok(value);
+    }
+
+    let value = match event_type {
+        EV_SYN => synchronization_code_for_name(code),
+        EV_KEY => key_code_for_name(code),
+        EV_ABS => absolute_axis_code_for_name(code),
+        _ => None,
+    };
+
+    value.ok_or_else(|| RawParseError::UnknownCode {
+        line,
+        event_type: event_type_name.to_string(),
+        code: code.to_string(),
+    })
+}
+
+fn parse_u16_field(line: usize, field: &'static str, value: &str) -> Result<u16, RawParseError> {
+    value
+        .parse::<u16>()
+        .map_err(|_| RawParseError::InvalidInteger {
+            line,
+            field,
+            value: value.to_string(),
+        })
+}
+
+fn parse_i32_field(line: usize, field: &'static str, value: &str) -> Result<i32, RawParseError> {
+    value
+        .parse::<i32>()
+        .map_err(|_| RawParseError::InvalidInteger {
+            line,
+            field,
+            value: value.to_string(),
+        })
+}
+
+fn synchronization_code_for_name(name: &str) -> Option<u16> {
+    match name {
+        "SYN_REPORT" => Some(SYN_REPORT),
+        "SYN_DROPPED" => Some(SYN_DROPPED),
+        _ => None,
+    }
+}
+
+fn key_code_for_name(name: &str) -> Option<u16> {
+    match name {
+        "BTN_LEFT" => Some(BTN_LEFT),
+        "BTN_RIGHT" => Some(BTN_RIGHT),
+        "BTN_MIDDLE" => Some(BTN_MIDDLE),
+        "BTN_SIDE" => Some(BTN_SIDE),
+        "BTN_EXTRA" => Some(BTN_EXTRA),
+        "BTN_TOOL_FINGER" => Some(BTN_TOOL_FINGER),
+        "BTN_TOOL_QUINTTAP" => Some(BTN_TOOL_QUINTTAP),
+        "BTN_TOUCH" => Some(BTN_TOUCH),
+        "BTN_TOOL_DOUBLETAP" => Some(BTN_TOOL_DOUBLETAP),
+        "BTN_TOOL_TRIPLETAP" => Some(BTN_TOOL_TRIPLETAP),
+        "BTN_TOOL_QUADTAP" => Some(BTN_TOOL_QUADTAP),
+        _ => None,
+    }
+}
+
+fn absolute_axis_code_for_name(name: &str) -> Option<u16> {
+    match name {
+        "ABS_X" => Some(ABS_X),
+        "ABS_Y" => Some(ABS_Y),
+        "ABS_MT_SLOT" => Some(ABS_MT_SLOT),
+        "ABS_MT_TOUCH_MAJOR" => Some(ABS_MT_TOUCH_MAJOR),
+        "ABS_MT_TOUCH_MINOR" => Some(ABS_MT_TOUCH_MINOR),
+        "ABS_MT_WIDTH_MAJOR" => Some(ABS_MT_WIDTH_MAJOR),
+        "ABS_MT_WIDTH_MINOR" => Some(ABS_MT_WIDTH_MINOR),
+        "ABS_MT_ORIENTATION" => Some(ABS_MT_ORIENTATION),
+        "ABS_MT_POSITION_X" => Some(ABS_MT_POSITION_X),
+        "ABS_MT_POSITION_Y" => Some(ABS_MT_POSITION_Y),
+        "ABS_MT_TOOL_TYPE" => Some(ABS_MT_TOOL_TYPE),
+        "ABS_MT_BLOB_ID" => Some(ABS_MT_BLOB_ID),
+        "ABS_MT_TRACKING_ID" => Some(ABS_MT_TRACKING_ID),
+        "ABS_MT_PRESSURE" => Some(ABS_MT_PRESSURE),
+        "ABS_MT_DISTANCE" => Some(ABS_MT_DISTANCE),
+        "ABS_MT_TOOL_X" => Some(ABS_MT_TOOL_X),
+        "ABS_MT_TOOL_Y" => Some(ABS_MT_TOOL_Y),
+        _ => None,
     }
 }
 
