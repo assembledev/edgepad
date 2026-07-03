@@ -49,7 +49,6 @@ The dev shell includes:
 To load the dev environment through direnv:
 
 ```bash
-echo 'use flake' > .envrc
 direnv allow
 ```
 
