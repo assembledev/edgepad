@@ -10,7 +10,10 @@ use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
     write_raw_events_with_limit, WriteEventsResult,
 };
-use edgepad::raw::{parse_raw_dump_file, route_raw_frame, RawOutputComposer};
+use edgepad::raw::{
+    parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawOutputComposer,
+    RecordingRawOutputSink,
+};
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
@@ -361,9 +364,9 @@ fn replay_raw(path: &Path) -> Result<(), String> {
         .map(|frame| frame.events.len())
         .sum::<usize>();
     let mut recognizer_passthrough_events = 0;
-    let mut composed_events = 0;
     let mut gestures = Vec::new();
     let mut resync_required = false;
+    let mut sink = RecordingRawOutputSink::default();
 
     for frame in &raw_dump.frames {
         let routed = route_raw_frame(&mut engine, frame)
@@ -372,11 +375,15 @@ fn replay_raw(path: &Path) -> Result<(), String> {
         resync_required |= routed.resync_required;
         gestures.extend(routed.gestures.iter().copied());
 
-        let composed = composer
-            .compose_frame(&routed)
-            .map_err(|err| format!("raw output compose failed: {err:?}"))?;
-        composed_events += composed.events.len();
+        write_raw_output_frame(&mut composer, &routed, &mut sink)
+            .map_err(|err| format!("raw output write failed: {err:?}"))?;
     }
+
+    let composed_events = sink
+        .frames()
+        .iter()
+        .map(|frame| frame.events.len())
+        .sum::<usize>();
 
     println!(
         "capabilities: {capability_source} slots={}..={} x={}..={} y={}..={}",

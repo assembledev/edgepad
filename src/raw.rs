@@ -181,6 +181,52 @@ struct RawOutputSlotState {
     y: Option<i32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RawOutputError<E> {
+    Compose(SlotError),
+    Sink(E),
+}
+
+pub trait RawOutputSink {
+    type Error;
+
+    fn emit(&mut self, event: RawEvent) -> Result<(), Self::Error>;
+    fn sync(&mut self) -> Result<(), Self::Error>;
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecordingRawOutputSink {
+    frames: Vec<RawFrame>,
+    current: Vec<RawEvent>,
+}
+
+impl RecordingRawOutputSink {
+    pub fn frames(&self) -> &[RawFrame] {
+        &self.frames
+    }
+
+    pub fn into_frames(self) -> Vec<RawFrame> {
+        self.frames
+    }
+}
+
+impl RawOutputSink for RecordingRawOutputSink {
+    type Error = std::convert::Infallible;
+
+    fn emit(&mut self, event: RawEvent) -> Result<(), Self::Error> {
+        self.current.push(event);
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<(), Self::Error> {
+        if !self.current.is_empty() {
+            self.frames
+                .push(RawFrame::new(std::mem::take(&mut self.current)));
+        }
+        Ok(())
+    }
+}
+
 impl RawFrame {
     pub fn new(events: Vec<RawEvent>) -> Self {
         Self { events }
@@ -352,6 +398,27 @@ impl RawOutputComposer {
         let index = self.slot_index(slot)?;
         Ok(&mut self.slots[index])
     }
+}
+
+pub fn write_raw_output_frame<S>(
+    composer: &mut RawOutputComposer,
+    routed: &RoutedRawFrame,
+    sink: &mut S,
+) -> Result<(), RawOutputError<S::Error>>
+where
+    S: RawOutputSink,
+{
+    let frame = composer
+        .compose_frame(routed)
+        .map_err(RawOutputError::Compose)?;
+    if frame.events.is_empty() {
+        return Ok(());
+    }
+
+    for event in frame.events {
+        sink.emit(event).map_err(RawOutputError::Sink)?;
+    }
+    sink.sync().map_err(RawOutputError::Sink)
 }
 
 fn tool_event_for_contact_count(count: usize, pressed: bool) -> Option<RawEvent> {
