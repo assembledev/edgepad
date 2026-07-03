@@ -185,6 +185,52 @@ SYN_REPORT
 }
 
 #[test]
+fn replay_cli_explains_frame_budget_stopping_mid_contact_without_bad_lift_hint() {
+    let path = unique_temp_path("edgepad-replay-active-at-end.ev");
+    fs::write(
+        &path,
+        r#"
+# slots: 0..=4
+# x: 0..=4000
+# y: 0..=2500
+
+ABS_MT_TRACKING_ID 123
+ABS_MT_POSITION_X 1200
+ABS_MT_POSITION_Y 900
+SYN_REPORT
+"#,
+    )
+    .expect("active-at-end fixture should be written");
+
+    let output = edgepad()
+        .arg("replay")
+        .arg(&path)
+        .output()
+        .expect("edgepad binary should run");
+
+    fs::remove_file(&path).expect("active-at-end fixture should be removed");
+
+    assert!(
+        output.status.success(),
+        "expected replay command to succeed, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("diagnosis: capture ended with active contact(s); frame budget likely stopped mid-contact"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("diagnosis_hint: for edge gesture captures, perform the gesture, release it, then place a finger in the center until --frames finishes"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        !stdout.contains("lift fingers before capture stops"),
+        "stdout was: {stdout}"
+    );
+}
+
+#[test]
 fn replay_cli_returns_nonzero_for_engine_error() {
     let output = edgepad()
         .arg("replay")

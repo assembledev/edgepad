@@ -416,11 +416,14 @@ fn print_replay_diagnosis(
             "diagnosis: no contact starts found; capture likely began after a finger was already down or no new touch started"
         );
         println!(
-            "diagnosis_hint: start dump before touching the pad, perform one gesture, lift the finger before capture stops, or increase --frames"
+            "diagnosis_hint: start dump before touching the pad, or use the gesture-release-then-center-finger flow for frame-limited captures"
         );
     } else if stats.tracking_starts > stats.tracking_ends {
         println!(
-            "diagnosis: capture ended with active contact(s); lift fingers before capture stops or increase --frames"
+            "diagnosis: capture ended with active contact(s); frame budget likely stopped mid-contact"
+        );
+        println!(
+            "diagnosis_hint: for edge gesture captures, perform the gesture, release it, then place a finger in the center until --frames finishes"
         );
     } else if stats.tracking_starts == 0 && stats.total_events == 0 {
         println!("diagnosis: no replay-relevant touch events found");
