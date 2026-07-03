@@ -265,9 +265,13 @@ fn print_dump_summary(
         stats.frame_boundaries_written
     );
     println!("written_events: {}", stats.events_written);
+    println!("next: {}", dump_next_command(format, out_path));
+}
+
+fn dump_next_command(format: DumpFormat, out_path: &Path) -> String {
     match format {
-        DumpFormat::Replay => println!("next: edgepad replay {}", out_path.display()),
-        DumpFormat::Raw => println!("next: inspect raw dump; replay expects non-raw dump format"),
+        DumpFormat::Replay => format!("edgepad replay {}", out_path.display()),
+        DumpFormat::Raw => format!("edgepad replay-raw {}", out_path.display()),
     }
 }
 
@@ -457,5 +461,26 @@ fn direction_name(direction: GestureDirection) -> &'static str {
         GestureDirection::Left => "left",
         GestureDirection::Right => "right",
         GestureDirection::Tap => "tap",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dump_next_command_points_raw_dumps_to_replay_raw() {
+        assert_eq!(
+            dump_next_command(DumpFormat::Raw, Path::new("bug.raw.ev")),
+            "edgepad replay-raw bug.raw.ev"
+        );
+    }
+
+    #[test]
+    fn dump_next_command_points_replay_dumps_to_replay() {
+        assert_eq!(
+            dump_next_command(DumpFormat::Replay, Path::new("bug.ev")),
+            "edgepad replay bug.ev"
+        );
     }
 }
