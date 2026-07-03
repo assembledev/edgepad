@@ -6,6 +6,7 @@
 pub mod device;
 pub mod dump;
 pub mod raw;
+pub mod uinput;
 
 pub mod core {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
