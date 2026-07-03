@@ -19,6 +19,7 @@ Implemented:
 - `edgepad dump --raw --device <event-node> --out <file.raw.ev> [--frames N]` for read-only raw evdev capture;
 - `edgepad replay-raw <file.raw.ev>` for raw capture routing/output-composer inspection;
 - `edgepad proxy --device <event-node> --frames N --dry-run` for bounded live routing/output-composer inspection without forwarding input;
+- `edgepad proxy --device <event-node> --frames N --uinput --grab` for bounded live virtual-device passthrough with explicit physical-device grab;
 - `.ev` metadata headers with real slot/X/Y ranges;
 - raw output composition that synthesizes `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` from unclaimed passthrough contacts;
 - tested raw output sink and buffered uinput sink plumbing;
@@ -27,9 +28,7 @@ Implemented:
 
 Not implemented yet:
 
-- live virtual-device passthrough via `uinput`;
-- device grabbing;
-- daemon/service mode;
+- long-running daemon/service mode;
 - gesture/action configuration;
 - NixOS/Home Manager service module.
 
@@ -92,6 +91,14 @@ For bounded live routing/output inspection without forwarding input:
 ```bash
 sudo edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
 ```
+
+For bounded live passthrough through a virtual touchpad:
+
+```bash
+sudo edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
+```
+
+This mode creates the virtual touchpad first, then grabs the physical device, processes the requested frame budget, ungrabs, prints the same summary, and exits.
 
 Replace `/dev/input/eventX` with the touchpad event node reported by `edgepad devices`.
 

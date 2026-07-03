@@ -13,14 +13,12 @@ Implemented:
 5. `UinputRawOutputSink` buffers one composed frame and flushes it to a uinput writer on `sync()`.
 6. `VirtualTouchpadSpec` describes the virtual touchpad capability set from captured device ranges.
 7. `proxy --dry-run` reads bounded live frames from a physical touchpad, routes/composes them, and prints counters without forwarding input.
+8. `proxy --uinput --grab` creates a virtual touchpad, explicitly grabs the physical device, forwards composed passthrough frames to uinput, then ungrabs after the requested frame budget.
 
 Not wired into a live forwarding command yet:
 
-- opening `/dev/uinput` from the CLI;
-- creating a real virtual input device during normal commands;
-- writing live proxy output to a virtual node;
-- `EVIOCGRAB`;
-- daemon/service mode.
+- long-running daemon/service mode;
+- gesture/action configuration.
 
 ## Live dry-run proxy
 
@@ -33,6 +31,27 @@ edgepad proxy --device /dev/input/event5 --frames 300 --dry-run
 It does **not** create a virtual device, emit uinput events, suppress the physical touchpad, or call `EVIOCGRAB`. Use it to inspect what the live proxy would decide before enabling virtual output/grabbing.
 
 The summary includes raw/event volume, recognizer events, passthrough vs claimed-edge frame counts, empty-output frames, composed output volume, individual gestures, and aggregate gesture counts by zone/direction.
+
+## Bounded grab/uinput proxy
+
+`proxy --uinput --grab` is the first live forwarding mode:
+
+```bash
+sudo edgepad proxy --device /dev/input/event5 --frames 300 --uinput --grab
+```
+
+It is intentionally bounded. The command:
+
+1. opens the physical touchpad and reads its capabilities;
+2. creates the virtual touchpad through `/dev/uinput`;
+3. only then calls `EVIOCGRAB` on the physical device;
+4. routes/composes exactly the requested frame boundary budget;
+5. emits composed passthrough frames to the virtual touchpad;
+6. ungrabs and exits.
+
+If virtual device creation fails, the physical device is not grabbed. `RawDevice` also ungrabs on drop, so errors during the bounded run do not intentionally leave the device grabbed.
+
+There is no `--no-grab` duplicate-input mode in the main test path because duplicate touchpad streams are too noisy to evaluate by hand. Use `--dry-run` for inspection and `--uinput --grab` for the bounded live proxy test.
 
 ## Output policy
 

@@ -42,6 +42,12 @@ For bounded live dry-run inspection without forwarding input:
 sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
 ```
 
+For bounded live passthrough through a virtual touchpad:
+
+```bash
+sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
+```
+
 ## Development shell
 
 ```bash
@@ -90,4 +96,4 @@ Supported systems in the flake:
 
 ## Scope
 
-The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later, after the daemon and live virtual-device passthrough exist.
+The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later, after daemon/action configuration is ready.

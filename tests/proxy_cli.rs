@@ -6,7 +6,7 @@ fn edgepad() -> Command {
 }
 
 #[test]
-fn proxy_cli_requires_device_frames_and_dry_run() {
+fn proxy_cli_requires_device_frames_and_mode() {
     let output = edgepad()
         .arg("proxy")
         .arg("--device")
@@ -21,7 +21,9 @@ fn proxy_cli_requires_device_frames_and_dry_run() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("edgepad proxy --device <event-node> --frames N --dry-run"),
+        stderr.contains(
+            "edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab)"
+        ),
         "stderr was: {stderr}"
     );
 }
@@ -50,8 +52,8 @@ fn proxy_cli_rejects_zero_frame_limit_before_device_open() {
 }
 
 #[test]
-fn proxy_cli_requires_dry_run_before_device_open() {
-    let missing_device = unique_temp_path("edgepad-missing-proxy-device-no-dry-run");
+fn proxy_cli_requires_mode_before_device_open() {
+    let missing_device = unique_temp_path("edgepad-missing-proxy-device-no-mode");
     let _ = std::fs::remove_file(&missing_device);
 
     let output = edgepad()
@@ -65,11 +67,126 @@ fn proxy_cli_requires_dry_run_before_device_open() {
 
     assert!(
         !output.status.success(),
-        "proxy should require --dry-run for now"
+        "proxy should require an explicit mode"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("proxy currently requires --dry-run"),
+        stderr.contains("proxy requires either --dry-run or --uinput --grab"),
+        "stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn proxy_cli_rejects_uinput_without_grab_before_device_open() {
+    let missing_device = unique_temp_path("edgepad-missing-proxy-device-uinput-without-grab");
+    let _ = std::fs::remove_file(&missing_device);
+
+    let output = edgepad()
+        .arg("proxy")
+        .arg("--device")
+        .arg(&missing_device)
+        .arg("--frames")
+        .arg("2")
+        .arg("--uinput")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(
+        !output.status.success(),
+        "--uinput without --grab should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("proxy --uinput requires --grab"),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        !stderr.contains("failed to open device"),
+        "mode validation should happen before device open, stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn proxy_cli_rejects_grab_without_uinput_before_device_open() {
+    let missing_device = unique_temp_path("edgepad-missing-proxy-device-grab-without-uinput");
+    let _ = std::fs::remove_file(&missing_device);
+
+    let output = edgepad()
+        .arg("proxy")
+        .arg("--device")
+        .arg(&missing_device)
+        .arg("--frames")
+        .arg("2")
+        .arg("--grab")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(
+        !output.status.success(),
+        "--grab without --uinput should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("proxy --grab requires --uinput"),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        !stderr.contains("failed to open device"),
+        "mode validation should happen before device open, stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn proxy_cli_accepts_uinput_grab_arguments_before_device_open() {
+    let missing_device = unique_temp_path("edgepad-missing-proxy-device-uinput-grab");
+    let _ = std::fs::remove_file(&missing_device);
+
+    let output = edgepad()
+        .arg("proxy")
+        .arg("--device")
+        .arg(&missing_device)
+        .arg("--frames")
+        .arg("2")
+        .arg("--uinput")
+        .arg("--grab")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(
+        !output.status.success(),
+        "proxy should still fail for missing device"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("failed to open device"),
+        "--uinput --grab should parse before device open, stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains(&missing_device.display().to_string()),
+        "stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn proxy_cli_rejects_no_grab_mode() {
+    let missing_device = unique_temp_path("edgepad-missing-proxy-device-no-grab");
+    let _ = std::fs::remove_file(&missing_device);
+
+    let output = edgepad()
+        .arg("proxy")
+        .arg("--device")
+        .arg(&missing_device)
+        .arg("--frames")
+        .arg("2")
+        .arg("--uinput")
+        .arg("--no-grab")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(!output.status.success(), "--no-grab should not exist");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown proxy option --no-grab"),
         "stderr was: {stderr}"
     );
 }

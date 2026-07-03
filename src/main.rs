@@ -13,15 +13,18 @@ use edgepad::dump::{
 };
 use edgepad::raw::{
     extract_core_events, parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawEvent,
-    RawFrame, RawOutputComposer, RecordingRawOutputSink, EV_SYN, SYN_DROPPED, SYN_REPORT,
+    RawFrame, RawOutputComposer, RawOutputSink, RecordingRawOutputSink, EV_SYN, SYN_DROPPED,
+    SYN_REPORT,
 };
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
+use edgepad::uinput::{build_virtual_touchpad, UinputRawOutputSink, VirtualTouchpadSpec};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N --dry-run";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab)";
 const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
-const PROXY_USAGE: &str = "usage: edgepad proxy --device <event-node> --frames N --dry-run";
+const PROXY_USAGE: &str =
+    "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab)";
 
 fn main() {
     if let Err(err) = run() {
@@ -58,7 +61,7 @@ fn run() -> Result<(), String> {
         }
         Some("proxy") => {
             let args = parse_proxy_args(args)?;
-            proxy_dry_run(&args.device, args.frames)
+            proxy(&args)
         }
         _ => Err(USAGE.to_string()),
     }
@@ -76,9 +79,16 @@ struct DumpArgs {
     raw: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyMode {
+    DryRun,
+    UinputGrab,
+}
+
 struct ProxyArgs {
     device: PathBuf,
     frames: usize,
+    mode: ProxyMode,
 }
 
 fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceArgs, String> {
@@ -128,6 +138,8 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
     let mut device = None;
     let mut frames = None;
     let mut dry_run = false;
+    let mut uinput = false;
+    let mut grab = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -137,17 +149,32 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
                 frames = Some(parse_positive_frame_limit(&raw_value)?);
             }
             "--dry-run" => dry_run = true,
+            "--uinput" => uinput = true,
+            "--grab" => grab = true,
+            "--no-grab" => return Err("unknown proxy option --no-grab".to_string()),
+            other if other.starts_with('-') => return Err(format!("unknown proxy option {other}")),
             _ => return Err(PROXY_USAGE.to_string()),
         }
     }
 
     let device = device.ok_or_else(|| PROXY_USAGE.to_string())?;
     let frames = frames.ok_or_else(|| PROXY_USAGE.to_string())?;
-    if !dry_run {
-        return Err("proxy currently requires --dry-run".to_string());
-    }
+    let mode = match (dry_run, uinput, grab) {
+        (true, false, false) => ProxyMode::DryRun,
+        (false, true, true) => ProxyMode::UinputGrab,
+        (false, true, false) => return Err("proxy --uinput requires --grab".to_string()),
+        (false, false, true) => return Err("proxy --grab requires --uinput".to_string()),
+        (false, false, false) => {
+            return Err("proxy requires either --dry-run or --uinput --grab".to_string())
+        }
+        _ => return Err("proxy modes are mutually exclusive".to_string()),
+    };
 
-    Ok(ProxyArgs { device, frames })
+    Ok(ProxyArgs {
+        device,
+        frames,
+        mode,
+    })
 }
 
 fn parse_positive_frame_limit(raw_value: &str) -> Result<usize, String> {
@@ -334,8 +361,15 @@ struct ProxyDryRunStats {
     resync_required: bool,
 }
 
-fn proxy_dry_run(device_path: &Path, frame_limit: usize) -> Result<(), String> {
-    let mut device = RawDevice::open(device_path)
+fn proxy(args: &ProxyArgs) -> Result<(), String> {
+    match args.mode {
+        ProxyMode::DryRun => proxy_dry_run(&args.device, args.frames),
+        ProxyMode::UinputGrab => proxy_uinput_grab(&args.device, args.frames),
+    }
+}
+
+fn open_proxy_device(device_path: &Path) -> Result<(RawDevice, Capabilities), String> {
+    let device = RawDevice::open(device_path)
         .map_err(|err| format!("failed to open device {}: {err}", device_path.display()))?;
     let capabilities = capabilities_from_raw_device(&device).ok_or_else(|| {
         format!(
@@ -343,20 +377,68 @@ fn proxy_dry_run(device_path: &Path, frame_limit: usize) -> Result<(), String> {
             device_path.display()
         )
     })?;
+    Ok((device, capabilities))
+}
+
+fn proxy_dry_run(device_path: &Path, frame_limit: usize) -> Result<(), String> {
+    let (mut device, capabilities) = open_proxy_device(device_path)?;
+    let mut sink = RecordingRawOutputSink::default();
+    let stats = run_proxy_loop(&mut device, capabilities, frame_limit, &mut sink)?;
+    print_proxy_summary(
+        ProxyMode::DryRun,
+        device_path,
+        capabilities,
+        frame_limit,
+        &stats,
+    );
+    Ok(())
+}
+
+fn proxy_uinput_grab(device_path: &Path, frame_limit: usize) -> Result<(), String> {
+    let (mut device, capabilities) = open_proxy_device(device_path)?;
+    let spec = VirtualTouchpadSpec::from_capabilities(capabilities);
+    let virtual_device = build_virtual_touchpad(&spec).map_err(|err| {
+        format!("failed to create virtual touchpad via /dev/uinput before grabbing physical device: {err}")
+    })?;
+    let mut sink = UinputRawOutputSink::new(virtual_device);
+
+    device
+        .grab()
+        .map_err(|err| format!("failed to grab device {}: {err}", device_path.display()))?;
+    let stats = run_proxy_loop(&mut device, capabilities, frame_limit, &mut sink)?;
+    device
+        .ungrab()
+        .map_err(|err| format!("failed to ungrab device {}: {err}", device_path.display()))?;
+    print_proxy_summary(
+        ProxyMode::UinputGrab,
+        device_path,
+        capabilities,
+        frame_limit,
+        &stats,
+    );
+    Ok(())
+}
+
+fn run_proxy_loop<S>(
+    device: &mut RawDevice,
+    capabilities: Capabilities,
+    frame_limit: usize,
+    sink: &mut S,
+) -> Result<ProxyDryRunStats, String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+{
     let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
     let mut composer = RawOutputComposer::new(capabilities);
-    let mut sink = RecordingRawOutputSink::default();
     let mut stats = ProxyDryRunStats::default();
     let mut current = Vec::new();
     let mut remaining_frames = frame_limit;
 
     loop {
-        let events = device.fetch_events().map_err(|err| {
-            format!(
-                "failed to read events from {}: {err}",
-                device_path.display()
-            )
-        })?;
+        let events = device
+            .fetch_events()
+            .map_err(|err| format!("failed to read events from proxy device: {err}"))?;
 
         for event in events {
             let raw = RawEvent::new(event.event_type().0, event.code(), event.value());
@@ -366,14 +448,13 @@ fn proxy_dry_run(device_path: &Path, frame_limit: usize) -> Result<(), String> {
                         &mut current,
                         &mut engine,
                         &mut composer,
-                        &mut sink,
+                        sink,
                         &mut stats,
                     )?;
                     stats.input_frame_boundaries += 1;
                     remaining_frames -= 1;
                     if remaining_frames == 0 {
-                        print_proxy_dry_run_summary(device_path, capabilities, frame_limit, &stats);
-                        return Ok(());
+                        return Ok(stats);
                     }
                 }
                 (EV_SYN, SYN_DROPPED) => {
@@ -381,22 +462,15 @@ fn proxy_dry_run(device_path: &Path, frame_limit: usize) -> Result<(), String> {
                         &mut current,
                         &mut engine,
                         &mut composer,
-                        &mut sink,
+                        sink,
                         &mut stats,
                     )?;
                     let dropped = RawFrame::new(vec![raw]);
-                    process_proxy_dry_run_frame(
-                        &mut engine,
-                        &mut composer,
-                        &mut sink,
-                        &mut stats,
-                        &dropped,
-                    )?;
+                    process_proxy_frame(&mut engine, &mut composer, sink, &mut stats, &dropped)?;
                     stats.input_frame_boundaries += 1;
                     remaining_frames -= 1;
                     if remaining_frames == 0 {
-                        print_proxy_dry_run_summary(device_path, capabilities, frame_limit, &stats);
-                        return Ok(());
+                        return Ok(stats);
                     }
                 }
                 _ => current.push(raw),
@@ -405,28 +479,36 @@ fn proxy_dry_run(device_path: &Path, frame_limit: usize) -> Result<(), String> {
     }
 }
 
-fn process_pending_proxy_frame(
+fn process_pending_proxy_frame<S>(
     current: &mut Vec<RawEvent>,
     engine: &mut Engine,
     composer: &mut RawOutputComposer,
-    sink: &mut RecordingRawOutputSink,
+    sink: &mut S,
     stats: &mut ProxyDryRunStats,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+{
     if current.is_empty() {
         return Ok(());
     }
 
     let frame = RawFrame::new(std::mem::take(current));
-    process_proxy_dry_run_frame(engine, composer, sink, stats, &frame)
+    process_proxy_frame(engine, composer, sink, stats, &frame)
 }
 
-fn process_proxy_dry_run_frame(
+fn process_proxy_frame<S>(
     engine: &mut Engine,
     composer: &mut RawOutputComposer,
-    sink: &mut RecordingRawOutputSink,
+    sink: &mut S,
     stats: &mut ProxyDryRunStats,
     frame: &RawFrame,
-) -> Result<(), String> {
+) -> Result<(), String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+{
     stats.raw_frames += 1;
     stats.raw_events += frame.events.len();
 
@@ -451,18 +533,22 @@ fn process_proxy_dry_run_frame(
         stats.gestures.push(gesture);
     }
 
-    let composed_frames_before = sink.frames().len();
-    write_raw_output_frame(composer, &routed, sink)
+    let output_frame = composer
+        .compose_frame(&routed)
         .map_err(|err| format!("proxy output compose failed: {err:?}"))?;
-    let new_frames = &sink.frames()[composed_frames_before..];
-    if new_frames.is_empty() {
+    if output_frame.events.is_empty() {
         stats.empty_output_frames += 1;
+        return Ok(());
     }
-    stats.composed_frames += new_frames.len();
-    stats.composed_events += new_frames
-        .iter()
-        .map(|frame| frame.events.len())
-        .sum::<usize>();
+
+    stats.composed_frames += 1;
+    stats.composed_events += output_frame.events.len();
+    for event in output_frame.events {
+        sink.emit(event)
+            .map_err(|err| format!("proxy output emit failed: {err:?}"))?;
+    }
+    sink.sync()
+        .map_err(|err| format!("proxy output sync failed: {err:?}"))?;
 
     Ok(())
 }
@@ -475,13 +561,17 @@ fn gesture_count_key(gesture: Gesture) -> String {
     )
 }
 
-fn print_proxy_dry_run_summary(
+fn print_proxy_summary(
+    mode: ProxyMode,
     device_path: &Path,
     capabilities: Capabilities,
     requested_frames: usize,
     stats: &ProxyDryRunStats,
 ) {
-    println!("mode: proxy dry-run");
+    match mode {
+        ProxyMode::DryRun => println!("mode: proxy dry-run"),
+        ProxyMode::UinputGrab => println!("mode: proxy uinput grab"),
+    }
     println!("device: {}", device_path.display());
     println!(
         "capabilities: slots={}..={} x={}..={} y={}..={}",
@@ -524,7 +614,10 @@ fn print_proxy_dry_run_summary(
         );
     }
     println!("resync_required: {}", stats.resync_required);
-    println!("output: not emitted (--dry-run)");
+    match mode {
+        ProxyMode::DryRun => println!("output: not emitted (--dry-run)"),
+        ProxyMode::UinputGrab => println!("output: emitted (--uinput --grab)"),
+    }
 }
 
 fn default_capabilities() -> Capabilities {
@@ -757,7 +850,7 @@ mod tests {
             RawEvent::abs_mt_position_y(320),
         ]);
 
-        process_proxy_dry_run_frame(&mut engine, &mut composer, &mut sink, &mut stats, &frame)
+        process_proxy_frame(&mut engine, &mut composer, &mut sink, &mut stats, &frame)
             .expect("mixed frame should process");
 
         assert_eq!(stats.raw_frames, 1);
@@ -800,7 +893,7 @@ mod tests {
         ];
 
         for frame in &frames {
-            process_proxy_dry_run_frame(&mut engine, &mut composer, &mut sink, &mut stats, frame)
+            process_proxy_frame(&mut engine, &mut composer, &mut sink, &mut stats, frame)
                 .expect("edge frames should process");
         }
 
