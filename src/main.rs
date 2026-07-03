@@ -22,6 +22,8 @@ use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use edgepad::uinput::{build_virtual_touchpad, UinputRawOutputSink, VirtualTouchpadSpec};
 use evdev::{raw_stream::RawDevice, KeyCode};
 
+nix::ioctl_read_buf!(eviocgmtslots, b'E', 0x0a, u8);
+
 const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
 const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
@@ -527,8 +529,9 @@ fn open_proxy_device(device_path: &Path) -> Result<(RawDevice, Capabilities), St
 fn ensure_physical_touchpad_idle_at_start(
     device_path: &Path,
     device: &RawDevice,
+    capabilities: Capabilities,
 ) -> Result<(), String> {
-    if !physical_touch_is_down(device)? {
+    if !physical_touch_is_down(device, capabilities)? {
         return Ok(());
     }
 
@@ -538,11 +541,35 @@ fn ensure_physical_touchpad_idle_at_start(
     ))
 }
 
-fn physical_touch_is_down(device: &RawDevice) -> Result<bool, String> {
-    let key_state = device
-        .get_key_state()
-        .map_err(|err| format!("failed to read current touch state before live proxy: {err}"))?;
-    Ok(key_state.contains(KeyCode::BTN_TOUCH))
+fn physical_touch_is_down(device: &RawDevice, capabilities: Capabilities) -> Result<bool, String> {
+    let key_state = device.get_key_state().map_err(|err| {
+        format!("failed to read current touch key state before live proxy: {err}")
+    })?;
+    let tracking_ids = mt_tracking_ids(device, capabilities)?;
+    Ok(physical_touch_snapshot_is_down(
+        key_state.contains(KeyCode::BTN_TOUCH),
+        &tracking_ids,
+    ))
+}
+
+fn physical_touch_snapshot_is_down(btn_touch_down: bool, mt_tracking_ids: &[i32]) -> bool {
+    btn_touch_down || mt_tracking_ids.iter().any(|tracking_id| *tracking_id >= 0)
+}
+
+fn mt_tracking_ids(device: &RawDevice, capabilities: Capabilities) -> Result<Vec<i32>, String> {
+    let slot_count = (capabilities.slot_max - capabilities.slot_min + 1) as usize;
+    let mut request = vec![0_i32; slot_count + 1];
+    request[0] = ABS_MT_TRACKING_ID as i32;
+    let request_bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            request.as_mut_ptr().cast::<u8>(),
+            request.len() * std::mem::size_of::<i32>(),
+        )
+    };
+    unsafe { eviocgmtslots(device.as_raw_fd(), request_bytes) }.map_err(|err| {
+        format!("failed to read current multitouch slot state before live proxy: {err}")
+    })?;
+    Ok(request[1..].to_vec())
 }
 
 fn proxy_dry_run(
@@ -578,7 +605,7 @@ fn proxy_uinput_grab(
     edge_widths: EdgeWidths,
 ) -> Result<(), String> {
     let (mut device, capabilities) = open_proxy_device(device_path)?;
-    ensure_physical_touchpad_idle_at_start(device_path, &device)?;
+    ensure_physical_touchpad_idle_at_start(device_path, &device, capabilities)?;
 
     let spec = VirtualTouchpadSpec::from_raw_device(&device, capabilities);
     let virtual_device = build_virtual_touchpad(&spec).map_err(|err| {
@@ -1328,6 +1355,16 @@ mod tests {
         assert!(!stopper.observe_frame_boundary(true));
         assert!(stopper.observe_frame_boundary(true));
         assert_eq!(stopper.extra_frame_boundaries(), 0);
+    }
+
+    #[test]
+    fn physical_touch_snapshot_treats_active_mt_tracking_id_as_touch_down() {
+        assert!(physical_touch_snapshot_is_down(false, &[42, -1, -1]));
+    }
+
+    #[test]
+    fn physical_touch_snapshot_treats_all_released_slots_as_idle() {
+        assert!(!physical_touch_snapshot_is_down(false, &[-1, -1, -1]));
     }
 
     #[test]
