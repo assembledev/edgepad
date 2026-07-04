@@ -11,6 +11,7 @@ use edgepad::actions::{ActionDispatcher, ActionDispatcherStats};
 use edgepad::config::{load_edgepad_config, DeviceConfig, EdgepadConfig};
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
+use edgepad::doctor::{run_doctor, DoctorConfig, DoctorReport};
 use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
     write_raw_events_with_limit, WriteEventsResult,
@@ -26,12 +27,13 @@ use edgepad::raw::{
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
 const PROXY_USAGE: &str =
     "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
 const DAEMON_USAGE: &str = "usage: edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const DOCTOR_USAGE: &str = "usage: edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]";
 const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DAEMON_ACTION_QUEUE_CAPACITY: usize = 32;
@@ -39,13 +41,16 @@ const DAEMON_ACTION_QUEUE_CAPACITY: usize = 32;
 static DAEMON_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
-    if let Err(err) = run() {
-        eprintln!("{err}");
-        process::exit(1);
+    match run() {
+        Ok(exit_code) => process::exit(exit_code),
+        Err(err) => {
+            eprintln!("{err}");
+            process::exit(1);
+        }
     }
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<i32, String> {
     let mut args = env::args().skip(1);
 
     match args.next().as_deref() {
@@ -54,30 +59,34 @@ fn run() -> Result<(), String> {
             if args.next().is_some() {
                 return Err(USAGE.to_string());
             }
-            replay(Path::new(&path))
+            replay(Path::new(&path)).map(|()| 0)
         }
         Some("replay-raw") => {
             let path = args.next().ok_or_else(|| USAGE.to_string())?;
             if args.next().is_some() {
                 return Err(USAGE.to_string());
             }
-            replay_raw(Path::new(&path))
+            replay_raw(Path::new(&path)).map(|()| 0)
         }
         Some("devices") => {
             let args = parse_devices_args(args)?;
-            devices(&args.root, args.show_all)
+            devices(&args.root, args.show_all).map(|()| 0)
+        }
+        Some("doctor") => {
+            let config = parse_doctor_args(args)?;
+            doctor(&config)
         }
         Some("dump") => {
             let args = parse_dump_args(args)?;
-            dump(&args.device, &args.out, args.frames, args.raw)
+            dump(&args.device, &args.out, args.frames, args.raw).map(|()| 0)
         }
         Some("proxy") => {
             let args = parse_proxy_args(args)?;
-            proxy(&args)
+            proxy(&args).map(|()| 0)
         }
         Some("daemon") => {
             let args = parse_daemon_args(args)?;
-            daemon(&args)
+            daemon(&args).map(|()| 0)
         }
         _ => Err(USAGE.to_string()),
     }
@@ -120,6 +129,34 @@ fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceAr
     }
 
     Ok(DeviceArgs { root, show_all })
+}
+
+fn parse_doctor_args(mut args: impl Iterator<Item = String>) -> Result<DoctorConfig, String> {
+    let mut config = DoctorConfig::default();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--device" => {
+                let raw_value = args.next().ok_or_else(|| DOCTOR_USAGE.to_string())?;
+                config.device = DeviceConfig::parse(&raw_value)?;
+            }
+            "--input-root" => {
+                config.input_root = args.next().ok_or_else(|| DOCTOR_USAGE.to_string())?.into();
+            }
+            "--uinput" => {
+                config.uinput_path = args.next().ok_or_else(|| DOCTOR_USAGE.to_string())?.into();
+            }
+            "--service" => {
+                config.service_name = args.next().ok_or_else(|| DOCTOR_USAGE.to_string())?;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown doctor option {other}"));
+            }
+            _ => return Err(DOCTOR_USAGE.to_string()),
+        }
+    }
+
+    Ok(config)
 }
 
 fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, String> {
@@ -296,6 +333,37 @@ fn devices(root: &Path, show_all: bool) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+fn doctor(config: &DoctorConfig) -> Result<i32, String> {
+    let report = run_doctor(config);
+    print_doctor_report(&report);
+    if report.has_failures() {
+        Ok(2)
+    } else {
+        Ok(0)
+    }
+}
+
+fn print_doctor_report(report: &DoctorReport) {
+    println!("edgepad doctor");
+    for check in &report.checks {
+        println!(
+            "{:<4} {:<22} {}",
+            check.status.label(),
+            check.name,
+            check.detail
+        );
+    }
+    let counts = report.counts();
+    println!(
+        "summary: ok={} warn={} fail={}",
+        counts.ok, counts.warn, counts.fail
+    );
+    match report.has_failures() {
+        true => println!("result: problems found"),
+        false => println!("result: ok"),
+    }
 }
 
 fn event_node_count_text(count: usize) -> String {
@@ -811,5 +879,50 @@ mod tests {
             dump_next_command(DumpFormat::Replay, Path::new("bug.ev")),
             "edgepad replay bug.ev"
         );
+    }
+
+    #[test]
+    fn doctor_args_default_to_auto_device_and_system_paths() {
+        let args = parse_doctor_args(Vec::<String>::new().into_iter()).expect("doctor args parse");
+
+        assert_eq!(args.device, DeviceConfig::Auto);
+        assert_eq!(args.input_root, PathBuf::from("/dev/input"));
+        assert_eq!(args.uinput_path, PathBuf::from("/dev/uinput"));
+        assert_eq!(args.service_name, "edgepad.service");
+    }
+
+    #[test]
+    fn doctor_args_accept_overrides() {
+        let args = parse_doctor_args(
+            [
+                "--device",
+                "/tmp/input/event7",
+                "--input-root",
+                "/tmp/input",
+                "--uinput",
+                "/tmp/uinput",
+                "--service",
+                "custom-edgepad.service",
+            ]
+            .into_iter()
+            .map(String::from),
+        )
+        .expect("doctor args parse");
+
+        assert_eq!(
+            args.device,
+            DeviceConfig::Path(PathBuf::from("/tmp/input/event7"))
+        );
+        assert_eq!(args.input_root, PathBuf::from("/tmp/input"));
+        assert_eq!(args.uinput_path, PathBuf::from("/tmp/uinput"));
+        assert_eq!(args.service_name, "custom-edgepad.service");
+    }
+
+    #[test]
+    fn doctor_args_reject_unknown_option() {
+        let err = parse_doctor_args(["--wat"].into_iter().map(String::from))
+            .expect_err("unknown option should fail");
+
+        assert_eq!(err, "unknown doctor option --wat");
     }
 }

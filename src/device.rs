@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use evdev::{AbsoluteAxisCode, Device, PropType};
 
+use crate::uinput::DEFAULT_VIRTUAL_TOUCHPAD_NAME;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AxisInfo {
     pub min: i32,
@@ -111,8 +113,14 @@ pub fn discover_device_report(input_root: &Path) -> io::Result<DiscoveryReport> 
 pub fn touchpad_candidates(summaries: &[DeviceSummary]) -> Vec<&DeviceSummary> {
     summaries
         .iter()
-        .filter(|summary| summary.kind == DeviceKind::Touchpad)
+        .filter(|summary| {
+            summary.kind == DeviceKind::Touchpad && !is_edgepad_virtual_touchpad(summary)
+        })
         .collect()
+}
+
+fn is_edgepad_virtual_touchpad(summary: &DeviceSummary) -> bool {
+    summary.name == DEFAULT_VIRTUAL_TOUCHPAD_NAME
 }
 
 pub fn format_device_line(summary: &DeviceSummary) -> String {

@@ -10,7 +10,7 @@ use evdev::{
 };
 use std::io;
 
-const DEFAULT_VIRTUAL_TOUCHPAD_NAME: &str = "edgepad virtual touchpad";
+pub const DEFAULT_VIRTUAL_TOUCHPAD_NAME: &str = "edgepad virtual touchpad";
 const TRACKING_ID_MAX: i32 = 65_535;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

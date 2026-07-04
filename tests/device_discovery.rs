@@ -5,6 +5,7 @@ use edgepad::device::{
     classify_device, event_device_paths, format_device_line, touchpad_candidates, AxisInfo,
     DeviceKind, DeviceSummary, EventDeviceCapabilities,
 };
+use edgepad::uinput::DEFAULT_VIRTUAL_TOUCHPAD_NAME;
 
 #[test]
 fn classify_touchpad_from_multitouch_pointer_capabilities() {
@@ -74,6 +75,27 @@ fn touchpad_candidates_filter_out_noise_devices() {
             DeviceKind::Touchpad,
         ),
         device_summary("/dev/input/event9", "Touchscreen", DeviceKind::Touchscreen),
+    ];
+
+    let candidates = touchpad_candidates(&summaries);
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].path, PathBuf::from("/dev/input/event7"));
+}
+
+#[test]
+fn touchpad_candidates_filter_out_edgepad_virtual_touchpad() {
+    let summaries = vec![
+        device_summary(
+            "/dev/input/event7",
+            "Example Touchpad",
+            DeviceKind::Touchpad,
+        ),
+        device_summary(
+            "/dev/input/event16",
+            DEFAULT_VIRTUAL_TOUCHPAD_NAME,
+            DeviceKind::Touchpad,
+        ),
     ];
 
     let candidates = touchpad_candidates(&summaries);
