@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
+use edgepad::actions::{ActionDispatcher, ActionDispatcherStats};
 use edgepad::config::{load_edgepad_config, DeviceConfig, EdgepadConfig};
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
@@ -15,8 +16,8 @@ use edgepad::dump::{
     write_raw_events_with_limit, WriteEventsResult,
 };
 use edgepad::proxy::{
-    run_proxy, ProxyMode, ProxyRunConfig, ProxyRunLimit, ProxyRunSummary, StopAfterFrameLimit,
-    StopToken, DEFAULT_EDGE_WIDTH,
+    run_proxy, run_proxy_with_gesture_handler, ProxyMode, ProxyRunConfig, ProxyRunLimit,
+    ProxyRunSummary, StopAfterFrameLimit, StopToken, DEFAULT_EDGE_WIDTH,
 };
 use edgepad::raw::{
     parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawOutputComposer, RawOutputSink,
@@ -33,6 +34,7 @@ const PROXY_USAGE: &str =
 const DAEMON_USAGE: &str = "usage: edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DAEMON_ACTION_QUEUE_CAPACITY: usize = 32;
 
 static DAEMON_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -432,6 +434,8 @@ fn daemon(args: &DaemonArgs) -> Result<(), String> {
     let device_path = args.config.device.resolve(&args.input_root)?;
     let stop = StopToken::new();
     install_daemon_signal_handlers(stop.clone())?;
+    let mut action_dispatcher =
+        ActionDispatcher::new(args.config.gestures.clone(), DAEMON_ACTION_QUEUE_CAPACITY)?;
 
     eprintln!(
         "edgepad daemon: device={} edge_width={:.3} gesture_bindings={}",
@@ -441,16 +445,22 @@ fn daemon(args: &DaemonArgs) -> Result<(), String> {
     );
     eprintln!("edgepad daemon: press Ctrl+C to stop");
 
-    let summary = run_proxy(&ProxyRunConfig {
-        device_path,
-        limit: ProxyRunLimit::UntilStopped {
-            stop,
-            idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
+    let run_result = run_proxy_with_gesture_handler(
+        &ProxyRunConfig {
+            device_path,
+            limit: ProxyRunLimit::UntilStopped {
+                stop,
+                idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
+            },
+            edge_widths: EdgeWidths::all(args.config.edge_width),
+            mode: ProxyMode::UinputGrab,
         },
-        edge_widths: EdgeWidths::all(args.config.edge_width),
-        mode: ProxyMode::UinputGrab,
-    })?;
+        &mut action_dispatcher,
+    );
+    let action_stats = action_dispatcher.shutdown();
+    let summary = run_result?;
     print_proxy_summary(&summary);
+    print_action_summary(&action_stats);
     Ok(())
 }
 
@@ -496,6 +506,21 @@ fn register_daemon_signal_handler(signal: libc::c_int) -> Result<(), String> {
 
 extern "C" fn handle_daemon_signal(_signal: libc::c_int) {
     DAEMON_STOP_REQUESTED.store(true, Ordering::SeqCst);
+}
+
+fn print_action_summary(stats: &ActionDispatcherStats) {
+    println!(
+        "actions: matched={} unmatched={} log={} queued={} dropped={} started={} succeeded={} failed={} worker_panics={}",
+        stats.matched_gestures,
+        stats.unmatched_gestures,
+        stats.log_actions,
+        stats.queued_commands,
+        stats.dropped_commands,
+        stats.started_commands,
+        stats.succeeded_commands,
+        stats.failed_commands,
+        stats.worker_panics
+    );
 }
 
 fn print_proxy_summary(summary: &ProxyRunSummary) {

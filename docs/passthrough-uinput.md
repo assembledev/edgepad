@@ -15,10 +15,10 @@ Implemented:
 7. `proxy --dry-run` reads bounded live frames from a physical touchpad, routes/composes them, and prints counters without forwarding input.
 8. `proxy --uinput --grab` creates a virtual touchpad, explicitly grabs the physical device, forwards composed passthrough frames to uinput, then ungrabs after the requested frame budget.
 9. `daemon` reuses the same live proxy runtime without a frame budget and stops through Ctrl+C/SIGTERM.
+10. Daemon gesture actions are dispatched through a bounded worker queue, and argv commands are waited on after spawn.
 
 Still outside this layer:
 
-- gesture action dispatch;
 - NixOS/Home Manager service wiring.
 
 ## Live dry-run proxy
@@ -89,13 +89,23 @@ edge_width = 0.10
 
 [[gestures]]
 zone = "left"
-direction = "right"
-action = ["notify-send", "edgepad", "left-right"]
+direction = "up"
+action = ["notify-send", "edgepad", "left-up"]
 
 [[gestures]]
 zone = "right"
 direction = "down"
 action = ["notify-send", "edgepad", "right-down"]
+
+[[gestures]]
+zone = "top"
+direction = "right"
+action = ["notify-send", "edgepad", "top-right"]
+
+[[gestures]]
+zone = "bottom"
+direction = "left"
+action = ["notify-send", "edgepad", "bottom-left"]
 ```
 
 Load a config with:
@@ -104,7 +114,7 @@ Load a config with:
 sudo edgepad daemon --config edgepad.conf
 ```
 
-Gesture bindings are parsed and validated now; dispatching configured actions is the next layer.
+Gesture bindings are parsed, validated, and dispatched by daemon mode. Command actions are launched without a shell, so arguments are not re-split or interpreted. The action worker waits for each spawned child process before running the next command, which prevents short-lived action commands from accumulating as zombies while the daemon keeps running.
 
 ## Output policy
 

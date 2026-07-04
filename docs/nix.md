@@ -68,8 +68,13 @@ edge_width = 0.10
 
 [[gestures]]
 zone = "left"
+direction = "up"
+action = ["notify-send", "edgepad", "left-up"]
+
+[[gestures]]
+zone = "top"
 direction = "right"
-action = ["notify-send", "edgepad", "left-right"]
+action = ["notify-send", "edgepad", "top-right"]
 ```
 
 ## Development shell
@@ -120,4 +125,4 @@ Supported systems in the flake:
 
 ## Scope
 
-The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later, after gesture action dispatch is ready.
+The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later.

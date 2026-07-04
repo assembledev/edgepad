@@ -128,11 +128,33 @@ pub struct GestureCountKey {
     pub direction: GestureDirection,
 }
 
+pub trait GestureHandler {
+    fn handle_gesture(&mut self, gesture: Gesture);
+}
+
+#[derive(Debug, Default)]
+pub struct NoopGestureHandler;
+
+impl GestureHandler for NoopGestureHandler {
+    fn handle_gesture(&mut self, _gesture: Gesture) {}
+}
+
 pub fn run_proxy(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
+    let mut handler = NoopGestureHandler;
+    run_proxy_with_gesture_handler(config, &mut handler)
+}
+
+pub fn run_proxy_with_gesture_handler<H>(
+    config: &ProxyRunConfig,
+    handler: &mut H,
+) -> Result<ProxyRunSummary, String>
+where
+    H: GestureHandler,
+{
     validate_run_limit(&config.limit)?;
     match config.mode {
-        ProxyMode::DryRun => proxy_dry_run(config),
-        ProxyMode::UinputGrab => proxy_uinput_grab(config),
+        ProxyMode::DryRun => proxy_dry_run(config, handler),
+        ProxyMode::UinputGrab => proxy_uinput_grab(config, handler),
     }
 }
 
@@ -146,7 +168,10 @@ fn validate_run_limit(limit: &ProxyRunLimit) -> Result<(), String> {
     }
 }
 
-fn proxy_dry_run(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
+fn proxy_dry_run<H>(config: &ProxyRunConfig, handler: &mut H) -> Result<ProxyRunSummary, String>
+where
+    H: GestureHandler,
+{
     let (mut device, capabilities) = open_proxy_device(&config.device_path)?;
     let mut sink = RecordingRawOutputSink::default();
     let stats = run_proxy_loop(
@@ -155,6 +180,7 @@ fn proxy_dry_run(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
         config.edge_widths,
         &config.limit,
         &mut sink,
+        handler,
     )?;
 
     Ok(ProxyRunSummary {
@@ -167,7 +193,10 @@ fn proxy_dry_run(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
     })
 }
 
-fn proxy_uinput_grab(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
+fn proxy_uinput_grab<H>(config: &ProxyRunConfig, handler: &mut H) -> Result<ProxyRunSummary, String>
+where
+    H: GestureHandler,
+{
     let (mut device, capabilities) = open_proxy_device(&config.device_path)?;
     ensure_physical_touchpad_idle_at_start(&config.device_path, &device, capabilities)?;
 
@@ -189,6 +218,7 @@ fn proxy_uinput_grab(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String>
         config.edge_widths,
         &config.limit,
         &mut sink,
+        handler,
     );
     let settle_result = settle_after_uinput_proxy_run(capabilities, &mut sink, run_result);
     std::thread::sleep(UINPUT_UNGRAB_SETTLE_DELAY);
@@ -314,16 +344,18 @@ fn append_additional_error(primary: String, additional: String) -> String {
     format!("{primary}; additionally {additional}")
 }
 
-fn run_proxy_loop<S>(
+fn run_proxy_loop<S, H>(
     device: &mut RawDevice,
     capabilities: Capabilities,
     edge_widths: EdgeWidths,
     limit: &ProxyRunLimit,
     sink: &mut S,
+    handler: &mut H,
 ) -> Result<ProxyRuntimeStats, String>
 where
     S: RawOutputSink,
     S::Error: std::fmt::Debug,
+    H: GestureHandler,
 {
     let mut engine = Engine::new(capabilities, edge_widths);
     let mut composer = RawOutputComposer::new(capabilities);
@@ -365,6 +397,7 @@ where
                         &mut composer,
                         sink,
                         &mut stats,
+                        handler,
                     )?;
                     stats.input_frame_boundaries += 1;
                     if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
@@ -387,10 +420,18 @@ where
                         &mut composer,
                         sink,
                         &mut stats,
+                        handler,
                     )?;
                     let dropped = RawFrame::new(vec![raw]);
                     touch_state.observe_frame(&dropped);
-                    process_proxy_frame(&mut engine, &mut composer, sink, &mut stats, &dropped)?;
+                    process_proxy_frame_with_handler(
+                        &mut engine,
+                        &mut composer,
+                        sink,
+                        &mut stats,
+                        &dropped,
+                        handler,
+                    )?;
                     stats.input_frame_boundaries += 1;
                     if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
                         stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
@@ -453,17 +494,19 @@ fn poll_timeout_ms(timeout: Duration) -> i32 {
     }
 }
 
-fn process_pending_proxy_frame<S>(
+fn process_pending_proxy_frame<S, H>(
     current: &mut Vec<RawEvent>,
     touch_state: &mut PhysicalTouchState,
     engine: &mut Engine,
     composer: &mut RawOutputComposer,
     sink: &mut S,
     stats: &mut ProxyRuntimeStats,
+    handler: &mut H,
 ) -> Result<(), String>
 where
     S: RawOutputSink,
     S::Error: std::fmt::Debug,
+    H: GestureHandler,
 {
     if current.is_empty() {
         return Ok(());
@@ -471,9 +514,10 @@ where
 
     let frame = RawFrame::new(std::mem::take(current));
     touch_state.observe_frame(&frame);
-    process_proxy_frame(engine, composer, sink, stats, &frame)
+    process_proxy_frame_with_handler(engine, composer, sink, stats, &frame, handler)
 }
 
+#[cfg(test)]
 fn process_proxy_frame<S>(
     engine: &mut Engine,
     composer: &mut RawOutputComposer,
@@ -484,6 +528,23 @@ fn process_proxy_frame<S>(
 where
     S: RawOutputSink,
     S::Error: std::fmt::Debug,
+{
+    let mut handler = NoopGestureHandler;
+    process_proxy_frame_with_handler(engine, composer, sink, stats, frame, &mut handler)
+}
+
+fn process_proxy_frame_with_handler<S, H>(
+    engine: &mut Engine,
+    composer: &mut RawOutputComposer,
+    sink: &mut S,
+    stats: &mut ProxyRuntimeStats,
+    frame: &RawFrame,
+    handler: &mut H,
+) -> Result<(), String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+    H: GestureHandler,
 {
     stats.raw_frames += 1;
     stats.raw_events += frame.events.len();
@@ -507,6 +568,7 @@ where
             .entry(gesture_count_key(gesture))
             .or_default() += 1;
         stats.gestures.push(gesture);
+        handler.handle_gesture(gesture);
     }
 
     let output_frame = composer
@@ -914,6 +976,17 @@ mod tests {
         batches: Vec<Vec<evdev::InputEvent>>,
     }
 
+    #[derive(Debug, Default)]
+    struct RecordingGestureHandler {
+        gestures: Vec<Gesture>,
+    }
+
+    impl GestureHandler for RecordingGestureHandler {
+        fn handle_gesture(&mut self, gesture: Gesture) {
+            self.gestures.push(gesture);
+        }
+    }
+
     impl UinputEventWriter for RecordingUinputWriter {
         type Error = std::convert::Infallible;
 
@@ -1213,6 +1286,50 @@ mod tests {
             }),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn proxy_handler_receives_recognized_gestures_live() {
+        let capabilities = test_capabilities();
+        let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+        let mut composer = RawOutputComposer::new(capabilities);
+        let mut sink = RecordingRawOutputSink::default();
+        let mut stats = ProxyRuntimeStats::default();
+        let mut handler = RecordingGestureHandler::default();
+        let frames = [
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(300),
+                RawEvent::abs_mt_position_x(980),
+                RawEvent::abs_mt_position_y(400),
+            ]),
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_position_x(980),
+                RawEvent::abs_mt_position_y(620),
+            ]),
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(-1),
+            ]),
+        ];
+
+        for frame in &frames {
+            process_proxy_frame_with_handler(
+                &mut engine,
+                &mut composer,
+                &mut sink,
+                &mut stats,
+                frame,
+                &mut handler,
+            )
+            .expect("edge frames should process");
+        }
+
+        assert_eq!(handler.gestures, stats.gestures);
+        assert_eq!(handler.gestures.len(), 1);
+        assert_eq!(handler.gestures[0].zone, Zone::Right);
+        assert_eq!(handler.gestures[0].direction, GestureDirection::Down);
     }
 
     #[test]

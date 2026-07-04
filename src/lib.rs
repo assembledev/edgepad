@@ -3,6 +3,7 @@
 //! The first production surface is built test-first around Type-B
 //! multi-touch slot lifecycle and edge ownership invariants.
 
+pub mod actions;
 pub mod config;
 pub mod device;
 pub mod dump;

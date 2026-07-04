@@ -22,6 +22,7 @@ Implemented:
 - `edgepad proxy --device <event-node> --frames N --uinput --grab [--edge-width F]` for bounded live virtual-device passthrough with explicit physical-device grab;
 - `edgepad daemon [--config <file>] [--device auto|<event-node>] [--edge-width F]` for long-running live proxy mode with Ctrl+C/SIGTERM shutdown;
 - TOML config parsing for `device = "auto"|"<event-node>"`, `edge_width = F`, and gesture command arrays;
+- gesture action dispatch through a bounded worker queue that runs argv commands without a shell and waits for child processes;
 - `.ev` metadata headers with real slot/X/Y ranges;
 - raw output composition that synthesizes `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` from unclaimed passthrough contacts;
 - tested raw output sink and buffered uinput sink plumbing;
@@ -30,7 +31,6 @@ Implemented:
 
 Not implemented yet:
 
-- gesture action dispatch;
 - NixOS/Home Manager service module.
 
 ## Quick start
@@ -123,13 +123,23 @@ edge_width = 0.10
 
 [[gestures]]
 zone = "left"
-direction = "right"
-action = ["notify-send", "edgepad", "left-right"]
+direction = "up"
+action = ["notify-send", "edgepad", "left-up"]
 
 [[gestures]]
 zone = "right"
 direction = "down"
 action = ["notify-send", "edgepad", "right-down"]
+
+[[gestures]]
+zone = "top"
+direction = "right"
+action = ["notify-send", "edgepad", "top-right"]
+
+[[gestures]]
+zone = "bottom"
+direction = "left"
+action = ["notify-send", "edgepad", "bottom-left"]
 ```
 
 Load it with:
@@ -137,6 +147,8 @@ Load it with:
 ```bash
 sudo edgepad daemon --config edgepad.conf
 ```
+
+Command actions run from a bounded daemon worker queue. They are launched without a shell, and the worker waits for each child process so short-lived commands are reaped instead of accumulating zombies.
 
 ## Docs
 
