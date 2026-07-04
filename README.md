@@ -151,7 +151,7 @@ For long-running live proxy mode:
 sudo edgepad daemon --device auto
 ```
 
-`daemon` auto-detects a single readable touchpad candidate by default. If multiple touchpads are present, pass `--device /dev/input/eventX` explicitly. Stop it with Ctrl+C or SIGTERM; it drains briefly until the physical touchpad is idle before ungrabbing.
+`daemon` auto-detects a single readable touchpad candidate by default. If multiple touchpads are present, pass `--device /dev/input/eventX` explicitly. On startup it retries device and `/dev/uinput` access briefly so boot-time udev/logind races do not fail the user service immediately. Stop it with Ctrl+C or SIGTERM; it drains briefly until the physical touchpad is idle before ungrabbing.
 
 Minimal TOML config file:
 

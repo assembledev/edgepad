@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use edgepad::actions::{ActionDispatcher, ActionDispatcherStats};
 use edgepad::config::{load_edgepad_config, DeviceConfig, EdgepadConfig};
@@ -36,7 +36,10 @@ const DAEMON_USAGE: &str = "usage: edgepad daemon [--config <file>] [--device au
 const DOCTOR_USAGE: &str = "usage: edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]";
 const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DAEMON_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const DAEMON_ACTION_QUEUE_CAPACITY: usize = 32;
+const DAEMON_STARTUP_RETRY_ENV: &str = "EDGEPAD_DAEMON_STARTUP_RETRY_MS";
 
 static DAEMON_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
@@ -499,37 +502,141 @@ fn proxy(args: &ProxyArgs) -> Result<(), String> {
 }
 
 fn daemon(args: &DaemonArgs) -> Result<(), String> {
-    let device_path = args.config.device.resolve(&args.input_root)?;
+    let startup_retry_timeout = daemon_startup_retry_timeout()?;
     let stop = StopToken::new();
     install_daemon_signal_handlers(stop.clone())?;
     let mut action_dispatcher =
         ActionDispatcher::new(args.config.gestures.clone(), DAEMON_ACTION_QUEUE_CAPACITY)?;
-
-    eprintln!(
-        "edgepad daemon: device={} edge_width={:.3} gesture_bindings={}",
-        device_path.display(),
-        args.config.edge_width,
-        args.config.gestures.len()
-    );
     eprintln!("edgepad daemon: press Ctrl+C to stop");
 
-    let run_result = run_proxy_with_gesture_handler(
-        &ProxyRunConfig {
-            device_path,
-            limit: ProxyRunLimit::UntilStopped {
-                stop,
-                idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
-            },
-            edge_widths: EdgeWidths::all(args.config.edge_width),
-            mode: ProxyMode::UinputGrab,
-        },
+    let run_result = run_daemon_proxy_with_startup_retry(
+        &args.config,
+        &args.input_root,
+        stop,
         &mut action_dispatcher,
+        startup_retry_timeout,
     );
     let action_stats = action_dispatcher.shutdown();
-    let summary = run_result?;
-    print_proxy_summary(&summary);
+    if let Some(summary) = run_result? {
+        print_proxy_summary(&summary);
+    }
     print_action_summary(&action_stats);
     Ok(())
+}
+
+fn daemon_startup_retry_timeout() -> Result<Duration, String> {
+    match env::var(DAEMON_STARTUP_RETRY_ENV) {
+        Ok(raw) => parse_daemon_startup_retry_timeout_ms(&raw),
+        Err(env::VarError::NotPresent) => Ok(DAEMON_STARTUP_RETRY_TIMEOUT),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(format!("{DAEMON_STARTUP_RETRY_ENV} must be UTF-8"))
+        }
+    }
+}
+
+fn parse_daemon_startup_retry_timeout_ms(raw: &str) -> Result<Duration, String> {
+    let millis = raw
+        .parse::<u64>()
+        .map_err(|_| format!("{DAEMON_STARTUP_RETRY_ENV} must be a non-negative integer"))?;
+    Ok(Duration::from_millis(millis))
+}
+
+fn run_daemon_proxy_with_startup_retry(
+    config: &EdgepadConfig,
+    input_root: &Path,
+    stop: StopToken,
+    action_dispatcher: &mut ActionDispatcher,
+    startup_retry_timeout: Duration,
+) -> Result<Option<ProxyRunSummary>, String> {
+    let started_at = Instant::now();
+    let mut last_announced_device: Option<PathBuf> = None;
+    let mut retry_announced = false;
+
+    loop {
+        if stop.is_stopped() {
+            eprintln!("edgepad daemon: stopped before startup completed");
+            return Ok(None);
+        }
+
+        let run_result = config.device.resolve(input_root).and_then(|device_path| {
+            if last_announced_device.as_ref() != Some(&device_path) {
+                eprintln!(
+                    "edgepad daemon: device={} edge_width={:.3} gesture_bindings={}",
+                    device_path.display(),
+                    config.edge_width,
+                    config.gestures.len()
+                );
+                last_announced_device = Some(device_path.clone());
+            }
+
+            run_proxy_with_gesture_handler(
+                &ProxyRunConfig {
+                    device_path,
+                    limit: ProxyRunLimit::UntilStopped {
+                        stop: stop.clone(),
+                        idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
+                    },
+                    edge_widths: EdgeWidths::all(config.edge_width),
+                    mode: ProxyMode::UinputGrab,
+                },
+                action_dispatcher,
+            )
+        });
+
+        match run_result {
+            Ok(summary) => return Ok(Some(summary)),
+            Err(err) if should_retry_daemon_startup_error(&err) => {
+                let elapsed = started_at.elapsed();
+                if startup_retry_timeout == Duration::ZERO || elapsed >= startup_retry_timeout {
+                    return Err(format!(
+                        "edgepad daemon startup timed out after {:.1}s waiting for device/uinput access; last error: {err}",
+                        startup_retry_timeout.as_secs_f32()
+                    ));
+                }
+
+                if !retry_announced {
+                    eprintln!(
+                        "edgepad daemon: startup not ready; retrying for up to {:.1}s: {err}",
+                        startup_retry_timeout.as_secs_f32()
+                    );
+                    retry_announced = true;
+                }
+
+                let remaining = startup_retry_timeout.saturating_sub(elapsed);
+                let retry_delay = DAEMON_STARTUP_RETRY_INTERVAL.min(remaining);
+                if !wait_for_daemon_startup_retry(&stop, retry_delay) {
+                    eprintln!("edgepad daemon: stopped before startup completed");
+                    return Ok(None);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn wait_for_daemon_startup_retry(stop: &StopToken, delay: Duration) -> bool {
+    let started_at = Instant::now();
+    while started_at.elapsed() < delay {
+        if stop.is_stopped() {
+            return false;
+        }
+        let remaining = delay.saturating_sub(started_at.elapsed());
+        thread::sleep(DAEMON_SIGNAL_POLL_INTERVAL.min(remaining));
+    }
+    !stop.is_stopped()
+}
+
+fn should_retry_daemon_startup_error(err: &str) -> bool {
+    err.starts_with("device=auto found no event devices")
+        || err.starts_with("device=auto found no readable event devices")
+        || err.starts_with("device=auto found no touchpad candidates")
+        || err.starts_with("failed to list ")
+        || err.starts_with("failed to open device ")
+        || err.starts_with("failed to read touchpad capabilities from ")
+        || err.starts_with(
+            "failed to create virtual touchpad via /dev/uinput before grabbing physical device",
+        )
+        || err.starts_with("failed to grab device ")
 }
 
 fn install_daemon_signal_handlers(stop: StopToken) -> Result<(), String> {
@@ -924,5 +1031,33 @@ mod tests {
             .expect_err("unknown option should fail");
 
         assert_eq!(err, "unknown doctor option --wat");
+    }
+
+    #[test]
+    fn daemon_startup_retry_timeout_env_parses_millis() {
+        assert_eq!(
+            parse_daemon_startup_retry_timeout_ms("250").expect("timeout should parse"),
+            Duration::from_millis(250)
+        );
+        assert!(parse_daemon_startup_retry_timeout_ms("wat").is_err());
+    }
+
+    #[test]
+    fn daemon_startup_retry_classifies_boot_race_errors() {
+        assert!(should_retry_daemon_startup_error(
+            "device=auto found no readable event devices under /dev/input"
+        ));
+        assert!(should_retry_daemon_startup_error(
+            "failed to open device /dev/input/event7: Permission denied"
+        ));
+        assert!(should_retry_daemon_startup_error(
+            "failed to create virtual touchpad via /dev/uinput before grabbing physical device: Permission denied"
+        ));
+        assert!(!should_retry_daemon_startup_error(
+            "device=auto matched multiple touchpad candidates under /dev/input"
+        ));
+        assert!(!should_retry_daemon_startup_error(
+            "touchpad is already touched on /dev/input/event7; release all fingers and retry live proxy"
+        ));
     }
 }

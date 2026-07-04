@@ -87,11 +87,22 @@ pub fn run_doctor(config: &DoctorConfig) -> DoctorReport {
     let mut report = DoctorReport::default();
     let touchpad_path = check_touchpad_selection(config, &mut report);
 
-    check_touchpad_readable(touchpad_path.as_deref(), &mut report);
-    check_uinput(&config.uinput_path, &mut report);
-    check_uaccess_tags(touchpad_path.as_deref(), &config.uinput_path, &mut report);
-    check_uaccess_acl(touchpad_path.as_deref(), &config.uinput_path, &mut report);
-    check_logind_seat(&mut report);
+    let touchpad_readable = check_touchpad_readable(touchpad_path.as_deref(), &mut report);
+    let uinput_readable = check_uinput(&config.uinput_path, &mut report);
+    let device_access_ok = touchpad_readable && uinput_readable;
+    check_uaccess_tags(
+        touchpad_path.as_deref(),
+        &config.uinput_path,
+        device_access_ok,
+        &mut report,
+    );
+    check_uaccess_acl(
+        touchpad_path.as_deref(),
+        &config.uinput_path,
+        device_access_ok,
+        &mut report,
+    );
+    check_logind_seat(device_access_ok, &mut report);
     let systemd_user_available = check_systemd_user(&mut report);
     check_service_status(&config.service_name, systemd_user_available, &mut report);
 
@@ -186,54 +197,74 @@ fn check_touchpad_selection(config: &DoctorConfig, report: &mut DoctorReport) ->
     }
 }
 
-fn check_touchpad_readable(path: Option<&Path>, report: &mut DoctorReport) {
+fn check_touchpad_readable(path: Option<&Path>, report: &mut DoctorReport) -> bool {
     let Some(path) = path else {
         report.checks.push(DoctorCheck {
             status: CheckStatus::Fail,
             name: "touchpad readable",
             detail: "skipped because no touchpad event node is selected".to_string(),
         });
-        return;
+        return false;
     };
 
     match Device::open(path) {
-        Ok(_) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Ok,
-            name: "touchpad readable",
-            detail: format!("{} can be opened by current user", path.display()),
-        }),
-        Err(err) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
-            name: "touchpad readable",
-            detail: format!("failed to open {}: {err}", path.display()),
-        }),
+        Ok(_) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Ok,
+                name: "touchpad readable",
+                detail: format!("{} can be opened by current user", path.display()),
+            });
+            true
+        }
+        Err(err) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Fail,
+                name: "touchpad readable",
+                detail: format!("failed to open {}: {err}", path.display()),
+            });
+            false
+        }
     }
 }
 
-fn check_uinput(path: &Path, report: &mut DoctorReport) {
+fn check_uinput(path: &Path, report: &mut DoctorReport) -> bool {
     match OpenOptions::new().read(true).write(true).open(path) {
-        Ok(_) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Ok,
-            name: "/dev/uinput",
-            detail: format!("{} is readable and writable", path.display()),
-        }),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
-            name: "/dev/uinput",
-            detail: format!(
-                "{} is missing; load the uinput kernel module",
-                path.display()
-            ),
-        }),
-        Err(err) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
-            name: "/dev/uinput",
-            detail: format!("failed to open {} read/write: {err}", path.display()),
-        }),
+        Ok(_) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Ok,
+                name: "/dev/uinput",
+                detail: format!("{} is readable and writable", path.display()),
+            });
+            true
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Fail,
+                name: "/dev/uinput",
+                detail: format!(
+                    "{} is missing; load the uinput kernel module",
+                    path.display()
+                ),
+            });
+            false
+        }
+        Err(err) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Fail,
+                name: "/dev/uinput",
+                detail: format!("failed to open {} read/write: {err}", path.display()),
+            });
+            false
+        }
     }
 }
 
-fn check_uaccess_tags(touchpad_path: Option<&Path>, uinput_path: &Path, report: &mut DoctorReport) {
+fn check_uaccess_tags(
+    touchpad_path: Option<&Path>,
+    uinput_path: &Path,
+    device_access_ok: bool,
+    report: &mut DoctorReport,
+) {
     let Some(touchpad_path) = touchpad_path else {
         report.checks.push(DoctorCheck {
             status: CheckStatus::Fail,
@@ -265,10 +296,11 @@ fn check_uaccess_tags(touchpad_path: Option<&Path>, uinput_path: &Path, report: 
         }
         (Ok(touchpad_tags), Ok(uinput_tags)) => {
             report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
+                status: fallback_sensitive_status(device_access_ok),
                 name: "uaccess tags",
                 detail: format!(
-                    "missing seat/uaccess current tags; touchpad={touchpad_tags:?} uinput={uinput_tags:?}"
+                    "missing seat/uaccess current tags; touchpad={touchpad_tags:?} uinput={uinput_tags:?}{}",
+                    fallback_context(device_access_ok),
                 ),
             });
         }
@@ -303,7 +335,12 @@ fn udevadm_current_tags(path: &Path) -> Result<Vec<String>, String> {
     Ok(parse_udev_current_tags(&output.stdout))
 }
 
-fn check_uaccess_acl(touchpad_path: Option<&Path>, uinput_path: &Path, report: &mut DoctorReport) {
+fn check_uaccess_acl(
+    touchpad_path: Option<&Path>,
+    uinput_path: &Path,
+    device_access_ok: bool,
+    report: &mut DoctorReport,
+) {
     let Some(touchpad_path) = touchpad_path else {
         report.checks.push(DoctorCheck {
             status: CheckStatus::Fail,
@@ -337,10 +374,11 @@ fn check_uaccess_acl(touchpad_path: Option<&Path>, uinput_path: &Path, report: &
             ),
         }),
         (Ok(touchpad_ok), Ok(uinput_ok)) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
+            status: fallback_sensitive_status(device_access_ok),
             name: "uaccess ACL",
             detail: format!(
-                "missing rw ACL for user {username}; touchpad_acl={touchpad_ok} uinput_acl={uinput_ok}"
+                "missing rw ACL for user {username}; touchpad_acl={touchpad_ok} uinput_acl={uinput_ok}{}",
+                fallback_context(device_access_ok),
             ),
         }),
         (Err(err), _) | (_, Err(err)) => report.checks.push(DoctorCheck {
@@ -377,7 +415,7 @@ fn getfacl_grants_user(path: &Path, username: &str) -> Result<bool, String> {
     Ok(acl_output_grants_user(&output.stdout, username))
 }
 
-fn check_logind_seat(report: &mut DoctorReport) {
+fn check_logind_seat(device_access_ok: bool, report: &mut DoctorReport) {
     match command_output("loginctl", &["session-status", "--no-pager"]) {
         Ok(output)
             if output.status_success
@@ -391,23 +429,43 @@ fn check_logind_seat(report: &mut DoctorReport) {
             });
         }
         Ok(output) if output.status_success => report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
-            name: "logind seat",
-            detail: "current loginctl session is not active on a local seat".to_string(),
-        }),
-        Ok(output) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
+            status: fallback_sensitive_status(device_access_ok),
             name: "logind seat",
             detail: format!(
-                "loginctl session-status failed: {}",
-                output.stderr_or_stdout()
+                "current loginctl session is not active on a local seat{}",
+                fallback_context(device_access_ok)
+            ),
+        }),
+        Ok(output) => report.checks.push(DoctorCheck {
+            status: fallback_sensitive_status(device_access_ok),
+            name: "logind seat",
+            detail: format!(
+                "loginctl session-status failed: {}{}",
+                output.stderr_or_stdout(),
+                fallback_context(device_access_ok)
             ),
         }),
         Err(err) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
+            status: fallback_sensitive_status(device_access_ok),
             name: "logind seat",
-            detail: err,
+            detail: format!("{err}{}", fallback_context(device_access_ok)),
         }),
+    }
+}
+
+fn fallback_sensitive_status(device_access_ok: bool) -> CheckStatus {
+    if device_access_ok {
+        CheckStatus::Warn
+    } else {
+        CheckStatus::Fail
+    }
+}
+
+fn fallback_context(device_access_ok: bool) -> &'static str {
+    if device_access_ok {
+        "; device access is currently functional, so group or broader filesystem permissions may be masking this"
+    } else {
+        ""
     }
 }
 
@@ -613,6 +671,18 @@ mod tests {
             "user::rw-\nuser:use:r--\ngroup::---\n",
             "use"
         ));
+    }
+
+    #[test]
+    fn fallback_sensitive_status_warns_when_device_access_is_functional() {
+        assert_eq!(fallback_sensitive_status(true), CheckStatus::Warn);
+        assert_eq!(fallback_sensitive_status(false), CheckStatus::Fail);
+    }
+
+    #[test]
+    fn fallback_context_explains_functional_non_uaccess_access() {
+        assert!(fallback_context(true).contains("device access is currently functional"));
+        assert_eq!(fallback_context(false), "");
     }
 
     #[test]

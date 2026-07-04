@@ -11,6 +11,7 @@ fn daemon_cli_accepts_explicit_device_before_device_open() {
     let _ = std::fs::remove_file(&missing_device);
 
     let output = edgepad()
+        .env("EDGEPAD_DAEMON_STARTUP_RETRY_MS", "0")
         .arg("daemon")
         .arg("--device")
         .arg(&missing_device)
@@ -40,6 +41,7 @@ fn daemon_cli_rejects_invalid_edge_width_before_auto_discovery() {
     std::fs::create_dir_all(&root).expect("temp root should be created");
 
     let output = edgepad()
+        .env("EDGEPAD_DAEMON_STARTUP_RETRY_MS", "0")
         .arg("daemon")
         .arg("--device")
         .arg("auto")
@@ -70,6 +72,7 @@ fn daemon_cli_reports_empty_auto_input_root_without_touching_real_hardware() {
     std::fs::create_dir_all(&root).expect("temp root should be created");
 
     let output = edgepad()
+        .env("EDGEPAD_DAEMON_STARTUP_RETRY_MS", "0")
         .arg("daemon")
         .arg("--device")
         .arg("auto")
@@ -86,6 +89,35 @@ fn daemon_cli_reports_empty_auto_input_root_without_touching_real_hardware() {
     );
     assert!(
         stderr.contains(&root.display().to_string()),
+        "stderr was: {stderr}"
+    );
+
+    std::fs::remove_dir_all(root).expect("temp root should be removed");
+}
+
+#[test]
+fn daemon_cli_times_out_startup_retry_with_clear_error() {
+    let root = unique_temp_dir("edgepad-daemon-retry-empty-input-root");
+    std::fs::create_dir_all(&root).expect("temp root should be created");
+
+    let output = edgepad()
+        .env("EDGEPAD_DAEMON_STARTUP_RETRY_MS", "1")
+        .arg("daemon")
+        .arg("--device")
+        .arg("auto")
+        .arg("--input-root")
+        .arg(&root)
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(!output.status.success(), "empty auto root should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("edgepad daemon startup timed out"),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains("last error: device=auto found no event devices"),
         "stderr was: {stderr}"
     );
 
@@ -117,6 +149,7 @@ action = ["notify-send", "edgepad", "left-right"]
     .expect("config should be written");
 
     let output = edgepad()
+        .env("EDGEPAD_DAEMON_STARTUP_RETRY_MS", "0")
         .arg("daemon")
         .arg("--config")
         .arg(&config_path)
