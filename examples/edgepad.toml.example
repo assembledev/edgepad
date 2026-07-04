@@ -1,0 +1,42 @@
+device = "auto"
+edge_width = 0.10
+
+[[gestures]]
+zone = "right"
+direction = "up"
+action = ["notify-send", "edgepad", "right-up"]
+
+[[gestures]]
+zone = "right"
+direction = "down"
+action = ["notify-send", "edgepad", "right-down"]
+
+[[gestures]]
+zone = "left"
+direction = "up"
+action = ["notify-send", "edgepad", "left-up"]
+
+[[gestures]]
+zone = "left"
+direction = "down"
+action = ["notify-send", "edgepad", "left-down"]
+
+[[gestures]]
+zone = "top"
+direction = "left"
+action = ["notify-send", "edgepad", "top-left"]
+
+[[gestures]]
+zone = "top"
+direction = "right"
+action = ["notify-send", "edgepad", "top-right"]
+
+[[gestures]]
+zone = "bottom"
+direction = "left"
+action = ["notify-send", "edgepad", "bottom-left"]
+
+[[gestures]]
+zone = "bottom"
+direction = "right"
+action = ["notify-send", "edgepad", "bottom-right"]

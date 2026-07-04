@@ -31,6 +31,20 @@ Implemented:
 
 ## Quick start
 
+### Linux
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh
+```
+
+Dry run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --dry-run
+```
+
+The installer sets up the latest release binary, udev access, the default config, and a systemd user service, then runs `edgepad doctor`.
+
 ### Nix
 
 ```bash

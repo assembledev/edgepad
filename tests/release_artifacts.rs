@@ -1,0 +1,81 @@
+use edgepad::config::{DeviceConfig, EdgepadConfig, GestureActionConfig};
+use edgepad::core::{GestureDirection, Zone};
+
+#[test]
+fn release_example_config_parses_and_uses_axis_appropriate_gestures() {
+    let config = EdgepadConfig::parse(include_str!("../examples/edgepad.toml.example"))
+        .expect("release example config should parse");
+
+    assert_eq!(config.device, DeviceConfig::Auto);
+    assert_eq!(config.gestures.len(), 8);
+
+    for binding in &config.gestures {
+        match binding.zone {
+            Zone::Left | Zone::Right => {
+                assert!(
+                    matches!(
+                        binding.direction,
+                        GestureDirection::Up | GestureDirection::Down
+                    ),
+                    "left/right examples should use vertical gestures: {binding:?}"
+                );
+            }
+            Zone::Top | Zone::Bottom => {
+                assert!(
+                    matches!(
+                        binding.direction,
+                        GestureDirection::Left | GestureDirection::Right
+                    ),
+                    "top/bottom examples should use horizontal gestures: {binding:?}"
+                );
+            }
+        }
+        assert!(
+            matches!(binding.action, GestureActionConfig::Command { .. }),
+            "example gestures should run command argv actions: {binding:?}"
+        );
+    }
+}
+
+#[test]
+fn release_udev_rules_use_uaccess_for_touchpad_and_uinput() {
+    let rules = include_str!("../packaging/70-edgepad.rules");
+
+    assert!(rules.contains(r#"ENV{ID_INPUT_TOUCHPAD}=="1""#));
+    assert!(rules.contains(r#"TAG+="uaccess""#));
+    assert!(rules.contains(r#"KERNEL=="uinput""#));
+    assert!(rules.contains(r#"OPTIONS+="static_node=uinput""#));
+}
+
+#[test]
+fn release_user_service_runs_installed_user_binary_with_config() {
+    let service = include_str!("../packaging/edgepad.service");
+
+    assert!(
+        service.contains(
+            "ExecStart=%h/.local/bin/edgepad daemon --config %h/.config/edgepad/edgepad.toml"
+        ),
+        "service was: {service}"
+    );
+    assert!(service.contains("WantedBy=default.target"));
+    assert!(service.contains("Restart=on-failure"));
+}
+
+#[test]
+fn release_workflow_publishes_required_assets_and_checksums() {
+    let workflow = include_str!("../.github/workflows/release.yml");
+
+    for required in [
+        "edgepad-x86_64-unknown-linux-gnu",
+        "70-edgepad.rules",
+        "edgepad.service",
+        "edgepad.toml.example",
+        "checksums",
+        "gh release create",
+    ] {
+        assert!(
+            workflow.contains(required),
+            "release workflow should mention {required}"
+        );
+    }
+}

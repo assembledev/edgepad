@@ -26,6 +26,12 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
+      - name: Check installer shell syntax
+        run: sh -n install.sh
+
+      - name: Check installer dry run
+        run: ./install.sh --dry-run
+
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 
