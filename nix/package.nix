@@ -10,16 +10,19 @@ rustPlatform.buildRustPackage {
 
   src = lib.cleanSourceWith {
     src = ../.;
-    filter = path: _type:
+    filter =
+      path: _type:
       let
         rel = lib.removePrefix ((toString ../.) + "/") (toString path);
       in
-      !(rel == "target"
+      !(
+        rel == "target"
         || lib.hasPrefix "target/" rel
         || rel == ".git"
         || lib.hasPrefix ".git/" rel
         || rel == "result"
-        || lib.hasPrefix "result-" rel);
+        || lib.hasPrefix "result-" rel
+      );
   };
 
   cargoLock.lockFile = ../Cargo.lock;

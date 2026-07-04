@@ -244,6 +244,10 @@ impl<W> UinputRawOutputSink<W> {
         }
     }
 
+    pub fn discard_buffered_events(&mut self) {
+        self.current.clear();
+    }
+
     pub fn into_inner(self) -> W {
         self.writer
     }

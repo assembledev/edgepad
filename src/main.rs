@@ -616,7 +616,7 @@ fn proxy_uinput_grab(
     device
         .grab()
         .map_err(|err| format!("failed to grab device {}: {err}", device_path.display()))?;
-    let mut stats = run_proxy_loop(
+    let run_result = run_proxy_loop(
         &mut device,
         capabilities,
         edge_widths,
@@ -624,12 +624,13 @@ fn proxy_uinput_grab(
         StopAfterFrameLimit::WhenIdle,
         Some(UINPUT_IDLE_DRAIN_TIMEOUT),
         &mut sink,
-    )?;
-    emit_proxy_settle_output(capabilities, &mut sink, &mut stats)?;
+    );
+    let settle_result = settle_after_uinput_proxy_run(capabilities, &mut sink, run_result);
     std::thread::sleep(UINPUT_UNGRAB_SETTLE_DELAY);
-    device
+    let ungrab_result = device
         .ungrab()
-        .map_err(|err| format!("failed to ungrab device {}: {err}", device_path.display()))?;
+        .map_err(|err| format!("failed to ungrab device {}: {err}", device_path.display()));
+    let stats = combine_proxy_run_and_ungrab_result(settle_result, ungrab_result)?;
     print_proxy_summary(
         ProxyMode::UinputGrab,
         device_path,
@@ -639,6 +640,52 @@ fn proxy_uinput_grab(
         &stats,
     );
     Ok(())
+}
+
+fn settle_after_uinput_proxy_run<W>(
+    capabilities: Capabilities,
+    sink: &mut UinputRawOutputSink<W>,
+    run_result: Result<ProxyDryRunStats, String>,
+) -> Result<ProxyDryRunStats, String>
+where
+    W: edgepad::uinput::UinputEventWriter,
+    W::Error: std::fmt::Debug,
+{
+    match run_result {
+        Ok(mut stats) => {
+            emit_proxy_settle_output(capabilities, sink, &mut stats)?;
+            Ok(stats)
+        }
+        Err(err) => {
+            sink.discard_buffered_events();
+            let mut settle_stats = ProxyDryRunStats::default();
+            emit_proxy_settle_output(capabilities, sink, &mut settle_stats).map_err(
+                |settle_err| {
+                    append_additional_error(
+                        err.clone(),
+                        format!("failed to emit neutral settle frame before ungrab: {settle_err}"),
+                    )
+                },
+            )?;
+            Err(err)
+        }
+    }
+}
+
+fn combine_proxy_run_and_ungrab_result(
+    run_result: Result<ProxyDryRunStats, String>,
+    ungrab_result: Result<(), String>,
+) -> Result<ProxyDryRunStats, String> {
+    match (run_result, ungrab_result) {
+        (Ok(stats), Ok(())) => Ok(stats),
+        (Err(err), Ok(())) => Err(err),
+        (Ok(_), Err(ungrab_err)) => Err(ungrab_err),
+        (Err(err), Err(ungrab_err)) => Err(append_additional_error(err, ungrab_err)),
+    }
+}
+
+fn append_additional_error(primary: String, additional: String) -> String {
+    format!("{primary}; additionally {additional}")
 }
 
 fn run_proxy_loop<S>(
@@ -1312,6 +1359,98 @@ mod tests {
                 RawEvent::btn_tool_quadtap(false),
                 RawEvent::btn_tool_quinttap(false),
             ]
+        );
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingUinputWriter {
+        batches: Vec<Vec<evdev::InputEvent>>,
+    }
+
+    impl edgepad::uinput::UinputEventWriter for RecordingUinputWriter {
+        type Error = std::convert::Infallible;
+
+        fn emit_events(&mut self, events: &[evdev::InputEvent]) -> Result<(), Self::Error> {
+            self.batches.push(events.to_vec());
+            Ok(())
+        }
+    }
+
+    fn input_event_triples(events: &[evdev::InputEvent]) -> Vec<(u16, u16, i32)> {
+        events
+            .iter()
+            .map(|event| (event.event_type().0, event.code(), event.value()))
+            .collect()
+    }
+
+    #[test]
+    fn failed_uinput_proxy_run_discards_buffered_frame_before_settle() {
+        let capabilities = Capabilities {
+            slot_min: 0,
+            slot_max: 1,
+            ..default_capabilities()
+        };
+        let mut sink = UinputRawOutputSink::new(RecordingUinputWriter::default());
+        sink.emit(RawEvent::abs_mt_tracking_id(777))
+            .expect("test event should buffer");
+
+        let result = settle_after_uinput_proxy_run(
+            capabilities,
+            &mut sink,
+            Err("proxy loop failed".to_string()),
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("proxy loop failed")
+        );
+        let writer = sink.into_inner();
+        assert_eq!(writer.batches.len(), 1);
+        assert_eq!(
+            input_event_triples(&writer.batches[0]),
+            vec![
+                (EV_ABS, ABS_MT_SLOT, 0),
+                (EV_ABS, ABS_MT_TRACKING_ID, -1),
+                (EV_ABS, ABS_MT_SLOT, 1),
+                (EV_ABS, ABS_MT_TRACKING_ID, -1),
+                (EV_KEY, BTN_TOUCH, 0),
+                (EV_KEY, edgepad::raw::BTN_TOOL_FINGER, 0),
+                (EV_KEY, edgepad::raw::BTN_TOOL_DOUBLETAP, 0),
+                (EV_KEY, edgepad::raw::BTN_TOOL_TRIPLETAP, 0),
+                (EV_KEY, edgepad::raw::BTN_TOOL_QUADTAP, 0),
+                (EV_KEY, edgepad::raw::BTN_TOOL_QUINTTAP, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn successful_uinput_proxy_run_records_settle_output_in_stats() {
+        let capabilities = Capabilities {
+            slot_min: 0,
+            slot_max: 1,
+            ..default_capabilities()
+        };
+        let mut sink = UinputRawOutputSink::new(RecordingUinputWriter::default());
+
+        let stats =
+            settle_after_uinput_proxy_run(capabilities, &mut sink, Ok(ProxyDryRunStats::default()))
+                .expect("settle after successful proxy run should succeed");
+
+        assert_eq!(stats.settle_output_frames, 1);
+        assert_eq!(stats.settle_output_events, 10);
+        assert_eq!(sink.into_inner().batches.len(), 1);
+    }
+
+    #[test]
+    fn post_grab_ungrab_error_is_reported_with_primary_failure() {
+        let result = combine_proxy_run_and_ungrab_result(
+            Err("proxy loop failed".to_string()),
+            Err("failed to ungrab device /dev/input/event5: EIO".to_string()),
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("proxy loop failed; additionally failed to ungrab device /dev/input/event5: EIO")
         );
     }
 

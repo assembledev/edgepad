@@ -26,13 +26,15 @@
       cargoToml = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       version = cargoToml.package.version;
 
-      pkgsFor = system:
+      pkgsFor =
+        system:
         import nixpkgs {
           inherit system;
           overlays = [ rust-overlay.overlays.default ];
         };
 
-      rustPlatformFor = pkgs:
+      rustPlatformFor =
+        pkgs:
         pkgs.makeRustPlatform {
           cargo = pkgs.rust-bin.stable.latest.minimal;
           rustc = pkgs.rust-bin.stable.latest.minimal;
@@ -61,6 +63,7 @@
           edgepadApp = {
             type = "app";
             program = "${edgepad}/bin/edgepad";
+            meta.description = "Correctness-first Linux touchpad edge gesture daemon";
           };
         in
         {
@@ -101,6 +104,21 @@
         }
       );
 
-      formatter = forAllSystems (system: (pkgsFor system).nixfmt-rfc-style);
+      formatter = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        pkgs.writeShellApplication {
+          name = "edgepad-nixfmt";
+          runtimeInputs = [ pkgs.nixfmt ];
+          text = ''
+            if [ "$#" -eq 0 ]; then
+              set -- flake.nix nix/package.nix
+            fi
+            exec nixfmt "$@"
+          '';
+        }
+      );
     };
 }
