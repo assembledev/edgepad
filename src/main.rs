@@ -821,7 +821,7 @@ extern "C" fn handle_daemon_signal(_signal: libc::c_int) {
 
 fn print_action_summary(stats: &ActionDispatcherStats) {
     println!(
-        "actions: matched={} unmatched={} log={} queued={} dropped={} started={} succeeded={} failed={} worker_panics={}",
+        "actions: matched={} unmatched={} log={} queued={} dropped={} started={} succeeded={} failed={} worker_panics={} worker_shutdown_timeouts={}",
         stats.matched_gestures,
         stats.unmatched_gestures,
         stats.log_actions,
@@ -830,7 +830,8 @@ fn print_action_summary(stats: &ActionDispatcherStats) {
         stats.started_commands,
         stats.succeeded_commands,
         stats.failed_commands,
-        stats.worker_panics
+        stats.worker_panics,
+        stats.worker_shutdown_timeouts
     );
 }
 

@@ -1,13 +1,22 @@
-use std::process::Command;
+use std::io;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command};
 use std::sync::{
+    atomic::{AtomicBool, Ordering},
     mpsc::{sync_channel, Receiver, SyncSender, TrySendError},
     Arc, Mutex,
 };
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::config::{GestureActionConfig, GestureBindingConfig};
 use crate::core::{Gesture, GestureDirection, Zone};
 use crate::proxy::GestureHandler;
+
+const ACTION_COMMAND_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const ACTION_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+const ACTION_WORKER_SHUTDOWN_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ActionDispatcherStats {
@@ -20,6 +29,7 @@ pub struct ActionDispatcherStats {
     pub succeeded_commands: usize,
     pub failed_commands: usize,
     pub worker_panics: usize,
+    pub worker_shutdown_timeouts: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,30 +48,127 @@ impl ActionCommandStatus {
 }
 
 pub trait ActionCommandRunner: Send + 'static {
-    fn run(&mut self, argv: &[String]) -> Result<ActionCommandStatus, String>;
+    fn run(
+        &mut self,
+        argv: &[String],
+        shutdown: &ActionShutdownToken,
+    ) -> Result<ActionCommandStatus, String>;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ActionShutdownToken {
+    requested: Arc<AtomicBool>,
+}
+
+impl ActionShutdownToken {
+    pub fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct ProcessCommandRunner;
 
 impl ActionCommandRunner for ProcessCommandRunner {
-    fn run(&mut self, argv: &[String]) -> Result<ActionCommandStatus, String> {
+    fn run(
+        &mut self,
+        argv: &[String],
+        shutdown: &ActionShutdownToken,
+    ) -> Result<ActionCommandStatus, String> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| "command action argv must not be empty".to_string())?;
-        let mut child = Command::new(program)
-            .args(args)
-            .spawn()
-            .map_err(|err| format!("failed to spawn action command {program:?}: {err}"))?;
+        let mut child = spawn_action_command(program, args)?;
 
-        // Always wait for the child in the worker. Dropping Child after spawn would
-        // leave short-lived commands as zombies until the daemon exits.
-        let status = child
-            .wait()
-            .map_err(|err| format!("failed to wait for action command {program:?}: {err}"))?;
-        Ok(ActionCommandStatus {
-            success: status.success(),
-        })
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|err| format!("failed to poll action command {program:?}: {err}"))?
+            {
+                return Ok(ActionCommandStatus {
+                    success: status.success(),
+                });
+            }
+
+            if shutdown.is_requested() {
+                if let Some(status) = child.try_wait().map_err(|err| {
+                    format!("failed to poll action command {program:?} before shutdown kill: {err}")
+                })? {
+                    return Ok(ActionCommandStatus {
+                        success: status.success(),
+                    });
+                }
+
+                match kill_action_child(&mut child, program) {
+                    Ok(true) => {
+                        child.wait().map_err(|err| {
+                            format!("failed to wait for killed action command {program:?}: {err}")
+                        })?;
+                        return Err(format!(
+                            "action command {program:?} interrupted by daemon shutdown"
+                        ));
+                    }
+                    Ok(false) => {
+                        let status = child.wait().map_err(|err| {
+                            format!("failed to wait for action command {program:?}: {err}")
+                        })?;
+                        return Ok(ActionCommandStatus {
+                            success: status.success(),
+                        });
+                    }
+                    Err(err) => {
+                        return Err(err);
+                    }
+                }
+            }
+
+            thread::sleep(ACTION_COMMAND_SHUTDOWN_POLL_INTERVAL);
+        }
+    }
+}
+
+fn spawn_action_command(program: &str, args: &[String]) -> Result<Child, String> {
+    let mut command = Command::new(program);
+    command.args(args);
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+        .spawn()
+        .map_err(|err| format!("failed to spawn action command {program:?}: {err}"))
+}
+
+fn kill_action_child(child: &mut Child, program: &str) -> Result<bool, String> {
+    #[cfg(unix)]
+    {
+        let process_group = child.id() as libc::pid_t;
+        let result = unsafe { libc::kill(-process_group, libc::SIGKILL) };
+        if result == 0 {
+            return Ok(true);
+        }
+
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(false);
+        }
+
+        Err(format!(
+            "failed to kill action command process group {program:?} during daemon shutdown: {err}"
+        ))
+    }
+
+    #[cfg(not(unix))]
+    {
+        match child.kill() {
+            Ok(()) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::InvalidInput => Ok(false),
+            Err(err) => Err(format!(
+                "failed to kill action command {program:?} during daemon shutdown: {err}"
+            )),
+        }
     }
 }
 
@@ -71,6 +178,7 @@ pub struct ActionDispatcher {
     sender: Option<SyncSender<ActionCommand>>,
     stats: SharedActionStats,
     worker: Option<JoinHandle<()>>,
+    shutdown: ActionShutdownToken,
 }
 
 impl ActionDispatcher {
@@ -89,9 +197,11 @@ impl ActionDispatcher {
         let (sender, receiver) = sync_channel(queue_capacity);
         let stats = SharedActionStats::default();
         let worker_stats = stats.clone();
+        let shutdown = ActionShutdownToken::default();
+        let worker_shutdown = shutdown.clone();
         let worker = thread::Builder::new()
             .name("edgepad-action-worker".to_string())
-            .spawn(move || run_action_worker(receiver, runner, worker_stats))
+            .spawn(move || run_action_worker(receiver, runner, worker_stats, worker_shutdown))
             .map_err(|err| format!("failed to start edgepad action worker: {err}"))?;
 
         Ok(Self {
@@ -99,6 +209,7 @@ impl ActionDispatcher {
             sender: Some(sender),
             stats,
             worker: Some(worker),
+            shutdown,
         })
     }
 
@@ -133,10 +244,19 @@ impl ActionDispatcher {
     }
 
     pub fn shutdown(mut self) -> ActionDispatcherStats {
+        self.shutdown.request();
         self.sender.take();
         if let Some(worker) = self.worker.take() {
-            if worker.join().is_err() {
-                self.stats.increment_worker_panics();
+            if wait_for_action_worker_shutdown(&worker, ACTION_WORKER_SHUTDOWN_TIMEOUT) {
+                if worker.join().is_err() {
+                    self.stats.increment_worker_panics();
+                }
+            } else {
+                self.stats.increment_worker_shutdown_timeouts();
+                eprintln!(
+                    "edgepad action worker did not stop within {:.1}s; daemon shutdown will continue",
+                    ACTION_WORKER_SHUTDOWN_TIMEOUT.as_secs_f32()
+                );
             }
         }
         self.stats.snapshot()
@@ -168,13 +288,24 @@ struct ActionCommand {
     argv: Vec<String>,
 }
 
-fn run_action_worker<R>(receiver: Receiver<ActionCommand>, mut runner: R, stats: SharedActionStats)
-where
+fn run_action_worker<R>(
+    receiver: Receiver<ActionCommand>,
+    mut runner: R,
+    stats: SharedActionStats,
+    shutdown: ActionShutdownToken,
+) where
     R: ActionCommandRunner,
 {
-    while let Ok(command) = receiver.recv() {
+    while !shutdown.is_requested() {
+        let Ok(command) = receiver.recv() else {
+            break;
+        };
+        if shutdown.is_requested() {
+            break;
+        }
+
         stats.increment_started_commands();
-        match runner.run(&command.argv) {
+        match runner.run(&command.argv, &shutdown) {
             Ok(status) if status.success => stats.increment_succeeded_commands(),
             Ok(_) => {
                 stats.increment_failed_commands();
@@ -189,6 +320,19 @@ where
             }
         }
     }
+}
+
+fn wait_for_action_worker_shutdown(worker: &JoinHandle<()>, timeout: Duration) -> bool {
+    let started_at = Instant::now();
+    while !worker.is_finished() {
+        if started_at.elapsed() >= timeout {
+            return false;
+        }
+
+        let remaining = timeout.saturating_sub(started_at.elapsed());
+        thread::sleep(ACTION_WORKER_SHUTDOWN_JOIN_POLL_INTERVAL.min(remaining));
+    }
+    true
 }
 
 #[derive(Debug, Clone, Default)]
@@ -247,6 +391,10 @@ impl SharedActionStats {
     fn increment_worker_panics(&self) {
         self.update(|stats| stats.worker_panics += 1);
     }
+
+    fn increment_worker_shutdown_timeouts(&self) {
+        self.update(|stats| stats.worker_shutdown_timeouts += 1);
+    }
 }
 
 fn zone_name(zone: Zone) -> &'static str {
@@ -271,7 +419,7 @@ fn direction_name(direction: GestureDirection) -> &'static str {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -282,7 +430,11 @@ mod tests {
     }
 
     impl ActionCommandRunner for RecordingRunner {
-        fn run(&mut self, argv: &[String]) -> Result<ActionCommandStatus, String> {
+        fn run(
+            &mut self,
+            argv: &[String],
+            _shutdown: &ActionShutdownToken,
+        ) -> Result<ActionCommandStatus, String> {
             self.sender
                 .send(argv.to_vec())
                 .expect("recording runner receiver should be alive");
@@ -416,6 +568,48 @@ mod tests {
         assert_eq!(stats.started_commands, 1);
         assert_eq!(stats.succeeded_commands, 0);
         assert_eq!(stats.failed_commands, 1);
+    }
+
+    #[test]
+    fn shutdown_interrupts_running_process_action() {
+        let mut dispatcher = ActionDispatcher::with_runner(
+            vec![binding(
+                Zone::Right,
+                GestureDirection::Down,
+                GestureActionConfig::Command {
+                    argv: vec!["sleep".to_string(), "10".to_string()],
+                },
+            )],
+            4,
+            ProcessCommandRunner,
+        )
+        .expect("dispatcher should start");
+
+        dispatcher.dispatch_gesture(gesture(Zone::Right, GestureDirection::Down));
+        wait_for_started_command(&dispatcher);
+
+        let started_at = Instant::now();
+        let stats = dispatcher.shutdown();
+
+        assert!(
+            started_at.elapsed() < Duration::from_secs(2),
+            "shutdown should not wait for the full action command duration"
+        );
+        assert_eq!(stats.started_commands, 1);
+        assert_eq!(stats.succeeded_commands, 0);
+        assert_eq!(stats.failed_commands, 1);
+        assert_eq!(stats.worker_shutdown_timeouts, 0);
+    }
+
+    fn wait_for_started_command(dispatcher: &ActionDispatcher) {
+        let started_at = Instant::now();
+        while dispatcher.stats().started_commands == 0 {
+            assert!(
+                started_at.elapsed() < Duration::from_secs(1),
+                "worker should start queued action command"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     fn binding(
