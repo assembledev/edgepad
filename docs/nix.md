@@ -77,6 +77,57 @@ direction = "right"
 action = ["notify-send", "edgepad", "top-right"]
 ```
 
+## NixOS and Home Manager modules
+
+The flake exposes two modules:
+
+- `nixosModules.default` / `nixosModules.edgepad`
+- `homeManagerModules.default` / `homeManagerModules.edgepad`
+
+The NixOS module is intentionally system-only. It installs the package, loads `uinput`, creates the input group if needed, grants configured users access to that group, and installs a `/dev/uinput` udev rule.
+
+```nix
+{
+  imports = [ inputs.edgepad.nixosModules.default ];
+
+  services.edgepad = {
+    enable = true;
+    users = [ "alice" ];
+  };
+}
+```
+
+After adding a user to the input group, restart that login session before expecting the group membership to be visible.
+
+The Home Manager module generates `~/.config/edgepad/edgepad.toml` and starts a user service bound to `graphical-session.target`:
+
+```nix
+{
+  imports = [ inputs.edgepad.homeManagerModules.default ];
+
+  services.edgepad = {
+    enable = true;
+    device = "auto";
+    edgeWidth = 0.10;
+
+    gestures = [
+      {
+        zone = "left";
+        direction = "up";
+        action = [ "notify-send" "edgepad" "left-up" ];
+      }
+      {
+        zone = "top";
+        direction = "right";
+        action = [ "notify-send" "edgepad" "top-right" ];
+      }
+    ];
+  };
+}
+```
+
+Gesture actions are argv arrays and are not run through a shell. Use full paths or packages in your Home Manager config when you do not want to rely on the user service environment's `PATH`.
+
 ## Development shell
 
 ```bash
@@ -115,6 +166,7 @@ The flake exposes:
 - `apps.<system>.edgepad`
 - `apps.<system>.default`
 - `checks.<system>.edgepad`
+- `checks.<system>.module-tests`
 - `devShells.<system>.default`
 - `formatter.<system>`
 
@@ -125,4 +177,4 @@ Supported systems in the flake:
 
 ## Scope
 
-The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later.
+The flake packages the CLI, provides a dev shell, exposes NixOS/Home Manager modules, and validates module output with `checks.<system>.module-tests`.

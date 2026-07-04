@@ -27,11 +27,7 @@ Implemented:
 - raw output composition that synthesizes `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` from unclaimed passthrough contacts;
 - tested raw output sink and buffered uinput sink plumbing;
 - virtual touchpad capability spec for future uinput device creation;
-- Nix flake for `nix build`, `nix run`, and `nix develop`.
-
-Not implemented yet:
-
-- NixOS/Home Manager service module.
+- Nix flake for `nix build`, `nix run`, `nix develop`, NixOS system support, and a Home Manager user service.
 
 ## Quick start
 
@@ -57,6 +53,49 @@ cargo test
 ```
 
 See [`docs/nix.md`](docs/nix.md).
+
+### NixOS/Home Manager Service
+
+The NixOS module prepares system access to `/dev/input` and `/dev/uinput`; the Home Manager module runs `edgepad` as a user service so gesture actions inherit the user session.
+
+```nix
+{
+  inputs.edgepad.url = "github:assembledev/edgepad";
+
+  outputs = { nixpkgs, edgepad, ... }: {
+    nixosConfigurations.host = nixpkgs.lib.nixosSystem {
+      modules = [
+        edgepad.nixosModules.default
+        {
+          services.edgepad = {
+            enable = true;
+            users = [ "alice" ];
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+```nix
+{
+  imports = [ inputs.edgepad.homeManagerModules.default ];
+
+  services.edgepad = {
+    enable = true;
+    device = "auto";
+    edgeWidth = 0.10;
+    gestures = [
+      {
+        zone = "right";
+        direction = "down";
+        action = [ "notify-send" "edgepad" "right-down" ];
+      }
+    ];
+  };
+}
+```
 
 ### Cargo
 

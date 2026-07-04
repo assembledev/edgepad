@@ -16,10 +16,7 @@ Implemented:
 8. `proxy --uinput --grab` creates a virtual touchpad, explicitly grabs the physical device, forwards composed passthrough frames to uinput, then ungrabs after the requested frame budget.
 9. `daemon` reuses the same live proxy runtime without a frame budget and stops through Ctrl+C/SIGTERM.
 10. Daemon gesture actions are dispatched through a bounded worker queue, and argv commands are waited on after spawn.
-
-Still outside this layer:
-
-- NixOS/Home Manager service wiring.
+11. NixOS/Home Manager modules can prepare device permissions and run `daemon` as a user service.
 
 ## Live dry-run proxy
 

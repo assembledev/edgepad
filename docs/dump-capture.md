@@ -83,6 +83,6 @@ Reading `/dev/input/event*` may require `sudo`, group `input`, or seat/logind AC
 
 - `dump` still requires an explicit `--device`; `daemon --device auto` has automatic touchpad selection.
 - No duration/time limit yet; use `--frames N` or `Ctrl+C` for capture commands.
-- Live proxy output through `uinput` is available as a bounded explicit grab test: `proxy --uinput --grab --frames N`. Long-running live proxy mode is available as `daemon`; service-manager wiring is not implemented yet.
+- Live proxy output through `uinput` is available as a bounded explicit grab test: `proxy --uinput --grab --frames N`. Long-running live proxy mode is available as `daemon`; NixOS/Home Manager modules can wire it into a user service.
 
 The capture path stays read-only so samples can be collected independently from live proxy/grab testing.

@@ -39,8 +39,21 @@
           cargo = pkgs.rust-bin.stable.latest.minimal;
           rustc = pkgs.rust-bin.stable.latest.minimal;
         };
+
+      nixosModule = import ./nix/nixos-module.nix self;
+      homeManagerModule = import ./nix/home-manager-module.nix self;
     in
     {
+      nixosModules = {
+        edgepad = nixosModule;
+        default = nixosModule;
+      };
+
+      homeManagerModules = {
+        edgepad = homeManagerModule;
+        default = homeManagerModule;
+      };
+
       packages = forAllSystems (
         system:
         let
@@ -72,9 +85,22 @@
         }
       );
 
-      checks = forAllSystems (system: {
-        edgepad = self.packages.${system}.edgepad;
-      });
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor system;
+        in
+        {
+          edgepad = self.packages.${system}.edgepad;
+          module-tests = import ./nix/module-tests.nix {
+            inherit
+              self
+              pkgs
+              ;
+            inherit (pkgs) lib;
+          };
+        }
+      );
 
       devShells = forAllSystems (
         system:
@@ -114,7 +140,7 @@
           runtimeInputs = [ pkgs.nixfmt ];
           text = ''
             if [ "$#" -eq 0 ]; then
-              set -- flake.nix nix/package.nix
+              set -- flake.nix nix/package.nix nix/nixos-module.nix nix/home-manager-module.nix nix/module-tests.nix
             fi
             exec nixfmt "$@"
           '';
