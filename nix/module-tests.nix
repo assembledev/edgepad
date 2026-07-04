@@ -5,50 +5,62 @@
 }:
 
 let
-  nixosEval = lib.evalModules {
-    specialArgs = {
-      inherit pkgs;
+  nixosBaseModule = {
+    options = {
+      environment.systemPackages = lib.mkOption {
+        type = lib.types.listOf lib.types.package;
+        default = [ ];
+      };
+      boot.kernelModules = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ ];
+      };
+      users.groups = lib.mkOption {
+        type = lib.types.attrsOf lib.types.attrs;
+        default = { };
+      };
+      users.users = lib.mkOption {
+        type = lib.types.attrsOf (
+          lib.types.submodule {
+            options.extraGroups = lib.mkOption {
+              type = lib.types.listOf lib.types.str;
+              default = [ ];
+            };
+          }
+        );
+        default = { };
+      };
+      services.udev.packages = lib.mkOption {
+        type = lib.types.listOf lib.types.package;
+        default = [ ];
+      };
+    };
+  };
+
+  evalNixosModule =
+    edgepadConfig:
+    lib.evalModules {
+      specialArgs = {
+        inherit pkgs;
+      };
+
+      modules = [
+        (import ./nixos-module.nix self)
+        nixosBaseModule
+        {
+          config.services.edgepad = edgepadConfig;
+        }
+      ];
     };
 
-    modules = [
-      (import ./nixos-module.nix self)
-      {
-        options = {
-          environment.systemPackages = lib.mkOption {
-            type = lib.types.listOf lib.types.package;
-            default = [ ];
-          };
-          boot.kernelModules = lib.mkOption {
-            type = lib.types.listOf lib.types.str;
-            default = [ ];
-          };
-          users.groups = lib.mkOption {
-            type = lib.types.attrsOf lib.types.attrs;
-            default = { };
-          };
-          users.users = lib.mkOption {
-            type = lib.types.attrsOf (
-              lib.types.submodule {
-                options.extraGroups = lib.mkOption {
-                  type = lib.types.listOf lib.types.str;
-                  default = [ ];
-                };
-              }
-            );
-            default = { };
-          };
-          services.udev.extraRules = lib.mkOption {
-            type = lib.types.lines;
-            default = "";
-          };
-        };
+  nixosUaccessEval = evalNixosModule {
+    enable = true;
+  };
 
-        config.services.edgepad = {
-          enable = true;
-          users = [ "alice" ];
-        };
-      }
-    ];
+  nixosGroupEval = evalNixosModule {
+    enable = true;
+    accessMode = "group";
+    users = [ "alice" ];
   };
 
   homeEval = lib.evalModules {
@@ -105,12 +117,16 @@ let
 
   homeConfigFile = homeEval.config.xdg.configFile."edgepad/edgepad.toml".source;
   homeService = homeEval.config.systemd.user.services.edgepad;
+  uaccessUdevRulesPackage = lib.head nixosUaccessEval.config.services.udev.packages;
+  groupUdevRulesPackage = lib.head nixosGroupEval.config.services.udev.packages;
 
   checked =
-    assert lib.elem "uinput" nixosEval.config.boot.kernelModules;
-    assert lib.hasAttr "input" nixosEval.config.users.groups;
-    assert lib.elem "input" nixosEval.config.users.users.alice.extraGroups;
-    assert lib.hasInfix ''KERNEL=="uinput"'' nixosEval.config.services.udev.extraRules;
+    assert lib.elem "uinput" nixosUaccessEval.config.boot.kernelModules;
+    assert lib.length nixosUaccessEval.config.services.udev.packages == 1;
+    assert lib.elem "uinput" nixosGroupEval.config.boot.kernelModules;
+    assert lib.hasAttr "input" nixosGroupEval.config.users.groups;
+    assert lib.elem "input" nixosGroupEval.config.users.users.alice.extraGroups;
+    assert lib.length nixosGroupEval.config.services.udev.packages == 1;
     assert lib.hasInfix "daemon --config" (
       builtins.unsafeDiscardStringContext homeService.Service.ExecStart
     );
@@ -125,6 +141,10 @@ let
       grep -F 'zone = "top"' ${homeConfigFile}
       grep -F 'direction = "right"' ${homeConfigFile}
       grep -F 'action = ["notify-send", "edgepad", "top-right"]' ${homeConfigFile}
+      grep -F 'ENV{ID_INPUT_TOUCHPAD}=="1"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules
+      grep -F 'TAG+="uaccess"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules
+      grep -F 'KERNEL=="uinput"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules
+      grep -F 'GROUP="input"' ${groupUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules
       touch $out
     '';
 in

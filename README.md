@@ -56,7 +56,7 @@ See [`docs/nix.md`](docs/nix.md).
 
 ### NixOS/Home Manager Service
 
-The NixOS module prepares system access to `/dev/input` and `/dev/uinput`; the Home Manager module runs `edgepad` as a user service so gesture actions inherit the user session.
+The NixOS module prepares system access to `/dev/input` and `/dev/uinput`; the Home Manager module runs `edgepad` as a user service so gesture actions inherit the user session. The default access mode uses logind seat ACLs through `uaccess`, which avoids permanent input-group membership on desktop systems.
 
 ```nix
 {
@@ -69,7 +69,6 @@ The NixOS module prepares system access to `/dev/input` and `/dev/uinput`; the H
         {
           services.edgepad = {
             enable = true;
-            users = [ "alice" ];
           };
         }
       ];

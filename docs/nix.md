@@ -84,7 +84,9 @@ The flake exposes two modules:
 - `nixosModules.default` / `nixosModules.edgepad`
 - `homeManagerModules.default` / `homeManagerModules.edgepad`
 
-The NixOS module is intentionally system-only. It installs the package, loads `uinput`, creates the input group if needed, grants configured users access to that group, and installs a `/dev/uinput` udev rule.
+The NixOS module is intentionally system-only. It installs the package, loads `uinput`, and prepares access to the touchpad event node and `/dev/uinput`.
+
+By default, access uses systemd-logind seat ACLs through `TAG+="uaccess"`. This is the preferred desktop/user-service mode because the active local user gets device access without permanent membership in the `input` group. The module installs this as `70-edgepad.rules` so systemd's seat ACL rule can process it during udev handling.
 
 ```nix
 {
@@ -92,6 +94,17 @@ The NixOS module is intentionally system-only. It installs the package, loads `u
 
   services.edgepad = {
     enable = true;
+  };
+}
+```
+
+For systems without a normal local seat/logind session, use the group fallback:
+
+```nix
+{
+  services.edgepad = {
+    enable = true;
+    accessMode = "group";
     users = [ "alice" ];
   };
 }
