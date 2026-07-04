@@ -1,27 +1,25 @@
 # Nix
 
-`edgepad` provides a project flake so Nix/NixOS users can build and run it without relying on binaries built on another distribution.
+`edgepad` ships a Nix flake for local builds, development shells, NixOS device access, and a Home Manager user service.
 
 The flake uses `rust-overlay` for an explicit Rust toolchain, reads the package version from `Cargo.toml`, and keeps the package definition in `nix/package.nix`.
 
-## Build
+## Build and run
 
 ```bash
 nix build .#edgepad
-./result/bin/edgepad replay tests/fixtures/left-edge-swipe-right.ev
+./result/bin/edgepad --help
 ```
 
-`buildRustPackage` runs the Rust test suite during the check phase.
-
-## Run
+Run commands without installing:
 
 ```bash
-nix run .#edgepad -- replay tests/fixtures/left-edge-swipe-right.ev
 nix run .#edgepad -- devices
-nix run .#edgepad -- devices --all
+nix run .#edgepad -- doctor
+nix run .#edgepad -- replay tests/fixtures/left-edge-swipe-right.ev
 ```
 
-For read-only capture from `/dev/input/event*`, permissions may require `sudo`, membership in the `input` group, or active seat/logind ACLs:
+For read-only capture from `/dev/input/event*`, permissions may require `sudo`, group access, or active seat ACLs:
 
 ```bash
 sudo ./result/bin/edgepad devices
@@ -29,64 +27,18 @@ sudo ./result/bin/edgepad dump --device /dev/input/eventX --out bug.ev --frames 
 ./result/bin/edgepad replay bug.ev
 ```
 
-For raw passthrough/output inspection:
-
-```bash
-sudo ./result/bin/edgepad dump --raw --device /dev/input/eventX --out bug.raw.ev --frames 300
-./result/bin/edgepad replay-raw bug.raw.ev
-```
-
-For bounded live dry-run inspection without forwarding input:
+For live diagnostics:
 
 ```bash
 sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
-```
-
-Tune the edge zone for hardware validation when needed:
-
-```bash
-sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --edge-width 0.20 --dry-run
-```
-
-For bounded live passthrough through a virtual touchpad:
-
-```bash
 sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
 ```
 
-For long-running live proxy mode with auto-detection:
+For normal desktop gesture use, prefer the NixOS + Home Manager modules below. They run the daemon as a user service instead of a root shell command.
 
-```bash
-sudo ./result/bin/edgepad daemon --device auto
-```
+## NixOS module
 
-Daemon config files use TOML:
-
-```toml
-device = "auto"
-edge_width = 0.10
-
-[[gestures]]
-zone = "left"
-direction = "up"
-action = ["notify-send", "edgepad", "left-up"]
-
-[[gestures]]
-zone = "top"
-direction = "right"
-action = ["notify-send", "edgepad", "top-right"]
-```
-
-## NixOS and Home Manager modules
-
-The flake exposes two modules:
-
-- `nixosModules.default` / `nixosModules.edgepad`
-- `homeManagerModules.default` / `homeManagerModules.edgepad`
-
-The NixOS module is intentionally system-only. It installs the package, loads `uinput`, and prepares access to the touchpad event node and `/dev/uinput`.
-
-By default, access uses systemd-logind seat ACLs through `TAG+="uaccess"`. This is the preferred desktop/user-service mode because the active local user gets device access without permanent membership in the `input` group. The module installs this as `70-edgepad.rules` so systemd's seat ACL rule can process it during udev handling.
+The NixOS module prepares system access. It installs the package, loads `uinput`, and installs udev rules for the touchpad event node and `/dev/uinput`.
 
 ```nix
 {
@@ -97,6 +49,8 @@ By default, access uses systemd-logind seat ACLs through `TAG+="uaccess"`. This 
   };
 }
 ```
+
+The default access mode uses systemd-logind seat ACLs through `TAG+="uaccess"`. This is the preferred desktop mode because the active local user gets device access without permanent membership in the `input` group.
 
 For systems without a normal local seat/logind session, use the group fallback:
 
@@ -110,9 +64,11 @@ For systems without a normal local seat/logind session, use the group fallback:
 }
 ```
 
-After adding a user to the input group, restart that login session before expecting the group membership to be visible.
+After adding a user to the input group, start a new login session before expecting group membership to be visible.
 
-The Home Manager module generates `~/.config/edgepad/edgepad.toml` and starts a user service bound to `graphical-session.target`:
+## Home Manager module
+
+The Home Manager module writes `~/.config/edgepad/edgepad.toml` and starts a systemd user service bound to `graphical-session.target`.
 
 ```nix
 {
@@ -125,9 +81,9 @@ The Home Manager module generates `~/.config/edgepad/edgepad.toml` and starts a 
 
     gestures = [
       {
-        zone = "left";
+        zone = "right";
         direction = "up";
-        action = [ "notify-send" "edgepad" "left-up" ];
+        action = [ "notify-send" "edgepad" "right-up" ];
       }
       {
         zone = "top";
@@ -139,7 +95,21 @@ The Home Manager module generates `~/.config/edgepad/edgepad.toml` and starts a 
 }
 ```
 
-Gesture actions are argv arrays and are not run through a shell. Use full paths or packages in your Home Manager config when you do not want to rely on the user service environment's `PATH`.
+Gesture actions are argv arrays and are not run through a shell. Use full paths or add packages to the user environment when you do not want to rely on `PATH`.
+
+## Device selection
+
+`device = "auto"` scans readable `/dev/input/event*` nodes and succeeds only when exactly one touchpad candidate is present. If there are multiple candidates, list them:
+
+```bash
+edgepad devices
+```
+
+and configure the explicit path:
+
+```nix
+services.edgepad.device = "/dev/input/event7";
+```
 
 ## Development shell
 
@@ -148,46 +118,42 @@ nix develop
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test
-cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
 ```
 
-The dev shell includes:
-
-- stable Rust from `rust-overlay`;
-- `rust-src` and `rust-analyzer`;
-- `clippy` and `rustfmt`;
-- `evtest` and `libinput` for manual input-device debugging.
-
-To load the dev environment through direnv:
-
-```bash
-direnv allow
-```
-
-Or run one command without entering a shell:
+Or run one command inside the shell:
 
 ```bash
 nix develop -c cargo test
 ```
 
-## Outputs
+The dev shell includes stable Rust from `rust-overlay`, `rust-src`, `rust-analyzer`, `clippy`, `rustfmt`, `evtest`, and `libinput`.
 
-The flake exposes:
+For direnv:
 
-- `packages.<system>.edgepad`
-- `packages.<system>.default`
-- `apps.<system>.edgepad`
-- `apps.<system>.default`
-- `checks.<system>.edgepad`
-- `checks.<system>.module-tests`
-- `devShells.<system>.default`
-- `formatter.<system>`
+```bash
+direnv allow
+```
 
-Supported systems in the flake:
+## Flake outputs
 
-- `x86_64-linux`
-- `aarch64-linux`
+```text
+packages.<system>.edgepad
+packages.<system>.default
+apps.<system>.edgepad
+apps.<system>.default
+checks.<system>.edgepad
+checks.<system>.module-tests
+devShells.<system>.default
+formatter.<system>
+nixosModules.default
+nixosModules.edgepad
+homeManagerModules.default
+homeManagerModules.edgepad
+```
 
-## Scope
+Supported systems:
 
-The flake packages the CLI, provides a dev shell, exposes NixOS/Home Manager modules, and validates module output with `checks.<system>.module-tests`.
+```text
+x86_64-linux
+aarch64-linux
+```

@@ -1,30 +1,42 @@
-# Dump Capture
+# Dump capture
 
-`edgepad dump` captures `.ev` samples from a real touchpad without grabbing or suppressing the device.
+`edgepad dump` records touchpad samples without grabbing, suppressing, or forwarding input. Use it when you want a real device trace that can be replayed, shared, or turned into a regression test.
+
+## Find the touchpad
+
+```bash
+edgepad devices
+```
+
+Show every readable event node when the filtered list is not enough:
+
+```bash
+edgepad devices --all
+```
+
+Reading `/dev/input/event*` may require `sudo`, the `input` group, or seat/logind ACLs.
 
 ## Replay-format capture
 
-Replay-format capture keeps only recognizer-relevant Type-B multitouch events:
+Replay-format capture keeps the Type-B multitouch events used by the recognizer:
 
 ```bash
-edgepad devices              # touchpad candidates only
-edgepad devices --all        # optional full device list
 edgepad dump --device /dev/input/event5 --out bug.ev --frames 300
 edgepad replay bug.ev
 ```
 
-The output format is the same text fixture format used by replay tests, so a useful bug capture can later be copied into `tests/fixtures/` and turned into a regression test.
+The output uses the same text fixture format as the replay tests. A useful bug capture can be copied into `tests/fixtures/` and promoted into a regression test.
 
 ## Raw capture
 
-Raw capture keeps the real evdev event shape needed for passthrough/output policy work:
+Raw capture keeps the evdev event shape needed for passthrough and virtual touchpad output:
 
 ```bash
 edgepad dump --raw --device /dev/input/event5 --out bug.raw.ev --frames 300
 edgepad replay-raw bug.raw.ev
 ```
 
-Use raw capture when investigating virtual-device passthrough behavior. It preserves frame boundaries and names known touchpad-relevant events such as:
+Known touchpad-relevant events are written by name:
 
 ```text
 EV_ABS ABS_MT_SLOT 0
@@ -39,11 +51,18 @@ EV_MSC MSC_TIMESTAMP 123456
 EV_SYN SYN_REPORT 0
 ```
 
-Unknown event types/codes are kept with numeric fallback instead of being silently dropped.
+Unknown event types and codes are kept with numeric fallback instead of being silently dropped.
 
-## Frame limits and capture flow
+## Frame limits
 
-With `--frames N`, capture stops after N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`) and prints a short summary: output path, device path, captured capabilities, written frame boundaries, written events, and the next command.
+With `--frames N`, capture stops after N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`) and prints a summary:
+
+- output path;
+- device path;
+- captured capabilities;
+- written frame boundaries;
+- written events;
+- next replay command.
 
 For frame-limited edge gesture captures, a useful flow is:
 
@@ -52,37 +71,37 @@ For frame-limited edge gesture captures, a useful flow is:
 3. release the gesture finger;
 4. place a finger in the center until the frame budget finishes.
 
-This captures the edge gesture release while keeping the event stream active. Without `--frames`, stop capture manually with `Ctrl+C` after reproducing the gesture.
+That captures the gesture release while keeping the event stream active. Without `--frames`, stop capture manually with Ctrl+C after reproducing the gesture.
 
 ## Capability metadata
 
-The capture header includes real device capabilities when evdev exposes them:
+Captures include real device ranges when evdev exposes them:
 
 ```text
+# edgepad .ev dump
+# device: /dev/input/event5
 # slots: 0..=4
 # x: 10..=1210
 # y: 20..=820
 ```
 
-`edgepad replay` and `edgepad replay-raw` use this metadata when present instead of temporary defaults.
+`edgepad replay` and `edgepad replay-raw` use this metadata for slot and edge-zone decisions. Handwritten fixtures without metadata still work with default ranges.
 
 ## Safety
 
-Current `dump` behavior is read-only:
+`dump` is read-only:
 
 - opens the event node for reading;
-- uses raw evdev reads so `SYN_DROPPED` is preserved instead of silently hidden;
-- writes to the requested output file only;
-- does **not** call `EVIOCGRAB`;
-- does **not** create `uinput` devices;
-- does **not** forward or suppress real input.
+- preserves `SYN_DROPPED` instead of hiding it;
+- writes only to the requested output file;
+- does not call `EVIOCGRAB`;
+- does not create `uinput` devices;
+- does not forward or suppress real input.
 
-Reading `/dev/input/event*` may require `sudo`, group `input`, or seat/logind ACLs.
+## Related commands
 
-## Current limitations
-
-- `dump` still requires an explicit `--device`; `daemon --device auto` has automatic touchpad selection.
-- No duration/time limit yet; use `--frames N` or `Ctrl+C` for capture commands.
-- Live proxy output through `uinput` is available as a bounded explicit grab test: `proxy --uinput --grab --frames N`. Long-running live proxy mode is available as `daemon`; NixOS/Home Manager modules can wire it into a user service.
-
-The capture path stays read-only so samples can be collected independently from live proxy/grab testing.
+```bash
+edgepad replay bug.ev
+edgepad replay-raw bug.raw.ev
+edgepad proxy --device /dev/input/event5 --frames 300 --dry-run
+```
