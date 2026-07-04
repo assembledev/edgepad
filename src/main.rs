@@ -100,6 +100,7 @@ Usage:
 
 Options:
       --config <file>             TOML config path
+                                  [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
       --device auto|<event-node>  Touchpad device selection [default: auto]
       --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
       --edge-width F              Edge zone width as a fraction of the touchpad axis
@@ -250,6 +251,7 @@ struct ProxyArgs {
 
 struct DaemonArgs {
     config: EdgepadConfig,
+    config_path: PathBuf,
     input_root: PathBuf,
 }
 
@@ -404,18 +406,67 @@ fn parse_daemon_args(mut args: impl Iterator<Item = String>) -> Result<DaemonArg
         }
     }
 
-    let mut config = match config_path {
-        Some(path) => load_edgepad_config(&path)?,
-        None => EdgepadConfig::default(),
+    let config_path = match config_path {
+        Some(path) => path,
+        None => default_daemon_config_path()?,
     };
+    let mut config = load_daemon_config(&config_path)?;
     if let Some(device) = device_override {
         config.device = device;
     }
     if let Some(edge_width) = edge_width_override {
         config.edge_width = edge_width;
     }
+    validate_daemon_config(&config, &config_path)?;
 
-    Ok(DaemonArgs { config, input_root })
+    Ok(DaemonArgs {
+        config,
+        config_path,
+        input_root,
+    })
+}
+
+fn default_daemon_config_path() -> Result<PathBuf, String> {
+    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(config_home).join("edgepad/edgepad.toml"));
+    }
+
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home).join(".config/edgepad/edgepad.toml"));
+    }
+
+    Err(
+        "daemon config path was not provided; pass --config <file> or set XDG_CONFIG_HOME/HOME"
+            .to_string(),
+    )
+}
+
+fn load_daemon_config(path: &Path) -> Result<EdgepadConfig, String> {
+    match fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => {
+            Err(format!("daemon config path is not a file: {}", path.display()))
+        }
+        Ok(_) => load_edgepad_config(path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "daemon config not found: {}; pass --config <file> or create it from edgepad.toml.example",
+            path.display()
+        )),
+        Err(err) => Err(format!(
+            "failed to inspect daemon config {}: {err}",
+            path.display()
+        )),
+    }
+}
+
+fn validate_daemon_config(config: &EdgepadConfig, config_path: &Path) -> Result<(), String> {
+    if config.gestures.is_empty() {
+        return Err(format!(
+            "daemon config {} has no gesture bindings; add at least one [[gestures]] entry",
+            config_path.display()
+        ));
+    }
+
+    Ok(())
 }
 
 fn parse_positive_frame_limit(raw_value: &str) -> Result<usize, String> {
@@ -643,6 +694,7 @@ fn daemon(args: &DaemonArgs) -> Result<(), String> {
     install_daemon_signal_handlers(stop.clone())?;
     let mut action_dispatcher =
         ActionDispatcher::new(args.config.gestures.clone(), DAEMON_ACTION_QUEUE_CAPACITY)?;
+    eprintln!("edgepad daemon: config={}", args.config_path.display());
     eprintln!("edgepad daemon: press Ctrl+C to stop");
 
     let run_result = run_daemon_proxy_with_startup_retry(

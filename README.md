@@ -132,6 +132,8 @@ Watch logs:
 journalctl --user -u edgepad.service -f
 ```
 
+For a foreground run, `edgepad daemon` reads `~/.config/edgepad/edgepad.toml` by default.
+
 ## Gesture config
 
 `device` can be `"auto"` or an explicit event node:
