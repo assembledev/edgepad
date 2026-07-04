@@ -1,16 +1,24 @@
+use std::collections::BTreeMap;
 use std::env;
-use std::fs::OpenOptions;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use evdev::Device;
 
-use crate::config::DeviceConfig;
+use crate::config::{
+    default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
+    GestureActionConfig,
+};
+use crate::core::{GestureDirection, Zone};
 use crate::device::{discover_device_report, format_device_line, touchpad_candidates};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorConfig {
-    pub device: DeviceConfig,
+    pub config_path: Option<PathBuf>,
+    pub device_override: Option<DeviceConfig>,
     pub input_root: PathBuf,
     pub uinput_path: PathBuf,
     pub service_name: String,
@@ -19,7 +27,8 @@ pub struct DoctorConfig {
 impl Default for DoctorConfig {
     fn default() -> Self {
         Self {
-            device: DeviceConfig::Auto,
+            config_path: None,
+            device_override: None,
             input_root: PathBuf::from("/dev/input"),
             uinput_path: PathBuf::from("/dev/uinput"),
             service_name: "edgepad.service".to_string(),
@@ -85,7 +94,18 @@ pub struct DoctorCounts {
 
 pub fn run_doctor(config: &DoctorConfig) -> DoctorReport {
     let mut report = DoctorReport::default();
-    let touchpad_path = check_touchpad_selection(config, &mut report);
+    let loaded_config = check_config(config, &mut report);
+    let effective_device = check_config_device(
+        loaded_config.as_ref(),
+        config.device_override.as_ref(),
+        &mut report,
+    );
+    if let Some(loaded_config) = loaded_config.as_ref() {
+        check_action_executables(loaded_config, &mut report);
+    }
+
+    let touchpad_path =
+        check_touchpad_selection(&effective_device, &config.input_root, &mut report);
 
     let touchpad_readable = check_touchpad_readable(touchpad_path.as_deref(), &mut report);
     let uinput_readable = check_uinput(&config.uinput_path, &mut report);
@@ -109,8 +129,283 @@ pub fn run_doctor(config: &DoctorConfig) -> DoctorReport {
     report
 }
 
-fn check_touchpad_selection(config: &DoctorConfig, report: &mut DoctorReport) -> Option<PathBuf> {
-    match &config.device {
+fn check_config(config: &DoctorConfig, report: &mut DoctorReport) -> Option<EdgepadConfig> {
+    let path = match &config.config_path {
+        Some(path) => path.clone(),
+        None => match default_edgepad_config_path() {
+            Ok(path) => path,
+            Err(err) => {
+                report.checks.push(DoctorCheck {
+                    status: CheckStatus::Fail,
+                    name: "config path",
+                    detail: err,
+                });
+                return None;
+            }
+        },
+    };
+
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => report.checks.push(DoctorCheck {
+            status: CheckStatus::Ok,
+            name: "config path",
+            detail: format!("{}", path.display()),
+        }),
+        Ok(_) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Fail,
+                name: "config path",
+                detail: format!("not a file: {}", path.display()),
+            });
+            return None;
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Fail,
+                name: "config path",
+                detail: format!(
+                    "not found: {}; pass --config <file> or create ~/.config/edgepad/edgepad.toml",
+                    path.display()
+                ),
+            });
+            return None;
+        }
+        Err(err) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Fail,
+                name: "config path",
+                detail: format!("failed to inspect {}: {err}", path.display()),
+            });
+            return None;
+        }
+    }
+
+    match load_edgepad_config(&path) {
+        Ok(edgepad_config) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Ok,
+                name: "config parse",
+                detail: format!(
+                    "device={} edge_width={:.3} gesture_bindings={}",
+                    device_config_label(&edgepad_config.device),
+                    edgepad_config.edge_width,
+                    edgepad_config.gestures.len()
+                ),
+            });
+            check_gesture_bindings(&edgepad_config, report);
+            Some(edgepad_config)
+        }
+        Err(err) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Fail,
+                name: "config parse",
+                detail: err,
+            });
+            None
+        }
+    }
+}
+
+fn check_gesture_bindings(config: &EdgepadConfig, report: &mut DoctorReport) {
+    if config.gestures.is_empty() {
+        report.checks.push(DoctorCheck {
+            status: CheckStatus::Fail,
+            name: "gesture bindings",
+            detail: "no gesture bindings configured; add at least one [[gestures]] entry"
+                .to_string(),
+        });
+        return;
+    }
+
+    report.checks.push(DoctorCheck {
+        status: CheckStatus::Ok,
+        name: "gesture bindings",
+        detail: format!("{} gesture binding(s) configured", config.gestures.len()),
+    });
+}
+
+fn check_config_device(
+    loaded_config: Option<&EdgepadConfig>,
+    device_override: Option<&DeviceConfig>,
+    report: &mut DoctorReport,
+) -> DeviceConfig {
+    match (loaded_config, device_override) {
+        (_, Some(device)) => {
+            let detail = match loaded_config {
+                Some(config) => format!(
+                    "{} from config overridden by --device {}",
+                    device_config_label(&config.device),
+                    device_config_label(device)
+                ),
+                None => format!("using --device {}", device_config_label(device)),
+            };
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Warn,
+                name: "config device",
+                detail,
+            });
+            device.clone()
+        }
+        (Some(config), None) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Ok,
+                name: "config device",
+                detail: format!("using {}", device_config_label(&config.device)),
+            });
+            config.device.clone()
+        }
+        (None, None) => {
+            report.checks.push(DoctorCheck {
+                status: CheckStatus::Warn,
+                name: "config device",
+                detail: "using device=auto because config was not loaded".to_string(),
+            });
+            DeviceConfig::Auto
+        }
+    }
+}
+
+fn check_action_executables(config: &EdgepadConfig, report: &mut DoctorReport) {
+    if config.gestures.is_empty() {
+        return;
+    }
+
+    let mut usages = BTreeMap::<String, Vec<String>>::new();
+    for (index, binding) in config.gestures.iter().enumerate() {
+        if let GestureActionConfig::Command { argv } = &binding.action {
+            if let Some(program) = argv.first() {
+                usages
+                    .entry(program.clone())
+                    .or_default()
+                    .push(gesture_binding_label(
+                        index,
+                        binding.zone,
+                        binding.direction,
+                    ));
+            }
+        }
+    }
+
+    if usages.is_empty() {
+        report.checks.push(DoctorCheck {
+            status: CheckStatus::Ok,
+            name: "action executable",
+            detail: "no command actions configured".to_string(),
+        });
+        return;
+    }
+
+    for (program, bindings) in usages {
+        let usage = format_binding_usage(&bindings);
+        match action_executable_status(&program) {
+            ActionExecutableStatus::Found(path) => report.checks.push(DoctorCheck {
+                status: CheckStatus::Ok,
+                name: "action executable",
+                detail: format!("{program} found at {} for {usage}", path.display()),
+            }),
+            ActionExecutableStatus::AbsolutePathExecutable => report.checks.push(DoctorCheck {
+                status: CheckStatus::Ok,
+                name: "action executable",
+                detail: format!("{program} is executable for {usage}"),
+            }),
+            ActionExecutableStatus::RelativePathExecutable => report.checks.push(DoctorCheck {
+                status: CheckStatus::Warn,
+                name: "action executable",
+                detail: format!(
+                    "{program} is a relative executable path for {usage}; user services may run from a different directory"
+                ),
+            }),
+            ActionExecutableStatus::Missing(message) => report.checks.push(DoctorCheck {
+                status: CheckStatus::Fail,
+                name: "action executable",
+                detail: format!("{message} for {usage}"),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ActionExecutableStatus {
+    Found(PathBuf),
+    AbsolutePathExecutable,
+    RelativePathExecutable,
+    Missing(String),
+}
+
+fn action_executable_status(program: &str) -> ActionExecutableStatus {
+    if program.contains('/') {
+        return path_executable_status(Path::new(program));
+    }
+
+    match find_executable_in_path(program, env::var_os("PATH")) {
+        Some(path) => ActionExecutableStatus::Found(path),
+        None => ActionExecutableStatus::Missing(format!("{program} not found in PATH")),
+    }
+}
+
+fn path_executable_status(path: &Path) -> ActionExecutableStatus {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() && metadata.permissions().mode() & 0o111 != 0 => {
+            if path.is_absolute() {
+                ActionExecutableStatus::AbsolutePathExecutable
+            } else {
+                ActionExecutableStatus::RelativePathExecutable
+            }
+        }
+        Ok(metadata) if metadata.is_file() => ActionExecutableStatus::Missing(format!(
+            "{} exists but is not executable",
+            path.display()
+        )),
+        Ok(_) => ActionExecutableStatus::Missing(format!("{} is not a file", path.display())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            ActionExecutableStatus::Missing(format!("{} not found", path.display()))
+        }
+        Err(err) => {
+            ActionExecutableStatus::Missing(format!("failed to inspect {}: {err}", path.display()))
+        }
+    }
+}
+
+fn find_executable_in_path(program: &str, path_env: Option<OsString>) -> Option<PathBuf> {
+    let path_env = path_env?;
+    env::split_paths(&path_env)
+        .map(|dir| dir.join(program))
+        .find(|candidate| {
+            fs::metadata(candidate)
+                .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        })
+}
+
+fn format_binding_usage(bindings: &[String]) -> String {
+    match bindings {
+        [] => "0 binding(s)".to_string(),
+        [binding] => binding.clone(),
+        _ => format!("{} binding(s): {}", bindings.len(), bindings.join(", ")),
+    }
+}
+
+fn gesture_binding_label(index: usize, zone: Zone, direction: GestureDirection) -> String {
+    format!(
+        "gestures[{index}] {}.{}",
+        zone_name(zone),
+        direction_name(direction)
+    )
+}
+
+fn device_config_label(device: &DeviceConfig) -> String {
+    match device {
+        DeviceConfig::Auto => "device=auto".to_string(),
+        DeviceConfig::Path(path) => format!("device={}", path.display()),
+    }
+}
+
+fn check_touchpad_selection(
+    device: &DeviceConfig,
+    input_root: &Path,
+    report: &mut DoctorReport,
+) -> Option<PathBuf> {
+    match device {
         DeviceConfig::Path(path) => {
             report.checks.push(DoctorCheck {
                 status: CheckStatus::Warn,
@@ -122,15 +417,12 @@ fn check_touchpad_selection(config: &DoctorConfig, report: &mut DoctorReport) ->
             });
             Some(path.clone())
         }
-        DeviceConfig::Auto => match discover_device_report(&config.input_root) {
+        DeviceConfig::Auto => match discover_device_report(input_root) {
             Ok(discovery) if discovery.event_node_count == 0 => {
                 report.checks.push(DoctorCheck {
                     status: CheckStatus::Fail,
                     name: "touchpad auto-detect",
-                    detail: format!(
-                        "no event devices found under {}",
-                        config.input_root.display()
-                    ),
+                    detail: format!("no event devices found under {}", input_root.display()),
                 });
                 None
             }
@@ -141,7 +433,7 @@ fn check_touchpad_selection(config: &DoctorConfig, report: &mut DoctorReport) ->
                     detail: format!(
                         "{} event node(s) found under {}, but none were readable",
                         discovery.event_node_count,
-                        config.input_root.display()
+                        input_root.display()
                     ),
                 });
                 None
@@ -189,7 +481,7 @@ fn check_touchpad_selection(config: &DoctorConfig, report: &mut DoctorReport) ->
                 report.checks.push(DoctorCheck {
                     status: CheckStatus::Fail,
                     name: "touchpad auto-detect",
-                    detail: format!("failed to list {}: {err}", config.input_root.display()),
+                    detail: format!("failed to list {}: {err}", input_root.display()),
                 });
                 None
             }
@@ -641,9 +933,29 @@ fn property_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
         .find_map(|line| line.strip_prefix(&format!("{key}=")))
 }
 
+fn zone_name(zone: Zone) -> &'static str {
+    match zone {
+        Zone::Left => "left",
+        Zone::Right => "right",
+        Zone::Top => "top",
+        Zone::Bottom => "bottom",
+    }
+}
+
+fn direction_name(direction: GestureDirection) -> &'static str {
+    match direction {
+        GestureDirection::Up => "up",
+        GestureDirection::Down => "down",
+        GestureDirection::Left => "left",
+        GestureDirection::Right => "right",
+        GestureDirection::Tap => "tap",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::GestureBindingConfig;
 
     #[test]
     fn parses_current_tags_from_udevadm_properties() {
@@ -686,6 +998,93 @@ mod tests {
     }
 
     #[test]
+    fn config_device_uses_config_when_no_cli_override_is_present() {
+        let mut report = DoctorReport::default();
+        let config = EdgepadConfig {
+            device: DeviceConfig::Path(PathBuf::from("/dev/input/event7")),
+            edge_width: 0.10,
+            gestures: Vec::new(),
+        };
+
+        let device = check_config_device(Some(&config), None, &mut report);
+
+        assert_eq!(
+            device,
+            DeviceConfig::Path(PathBuf::from("/dev/input/event7"))
+        );
+        assert_eq!(report.checks[0].status, CheckStatus::Ok);
+        assert!(report.checks[0].detail.contains("/dev/input/event7"));
+    }
+
+    #[test]
+    fn config_device_uses_cli_override_when_present() {
+        let mut report = DoctorReport::default();
+        let config = EdgepadConfig {
+            device: DeviceConfig::Auto,
+            edge_width: 0.10,
+            gestures: Vec::new(),
+        };
+
+        let device = check_config_device(
+            Some(&config),
+            Some(&DeviceConfig::Path(PathBuf::from("/dev/input/event9"))),
+            &mut report,
+        );
+
+        assert_eq!(
+            device,
+            DeviceConfig::Path(PathBuf::from("/dev/input/event9"))
+        );
+        assert_eq!(report.checks[0].status, CheckStatus::Warn);
+        assert!(report.checks[0].detail.contains("overridden by --device"));
+    }
+
+    #[test]
+    fn action_executable_check_reports_missing_path_command() {
+        let mut report = DoctorReport::default();
+        let config = EdgepadConfig {
+            device: DeviceConfig::Auto,
+            edge_width: 0.10,
+            gestures: vec![GestureBindingConfig {
+                zone: Zone::Right,
+                direction: GestureDirection::Up,
+                action: GestureActionConfig::Command {
+                    argv: vec!["/tmp/edgepad-definitely-missing-command".to_string()],
+                },
+            }],
+        };
+
+        check_action_executables(&config, &mut report);
+
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].status, CheckStatus::Fail);
+        assert!(report.checks[0].detail.contains("not found"));
+        assert!(report.checks[0].detail.contains("gestures[0] right.up"));
+    }
+
+    #[test]
+    fn find_executable_in_path_finds_executable_file() {
+        let root = unique_temp_dir("edgepad-doctor-path");
+        let bin_dir = root.join("bin");
+        let program = bin_dir.join("edgepad-test-tool");
+        fs::create_dir_all(&bin_dir).expect("bin dir should be created");
+        fs::write(&program, "#!/bin/sh\n").expect("test executable should be written");
+        let mut permissions = fs::metadata(&program)
+            .expect("metadata should be available")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&program, permissions).expect("permissions should be updated");
+
+        let found = find_executable_in_path(
+            "edgepad-test-tool",
+            Some(OsString::from(bin_dir.display().to_string())),
+        );
+
+        assert_eq!(found, Some(program));
+        fs::remove_dir_all(root).expect("temp dir should be removed");
+    }
+
+    #[test]
     fn report_counts_failures_warnings_and_successes() {
         let report = DoctorReport {
             checks: vec![
@@ -716,5 +1115,9 @@ mod tests {
                 fail: 1
             }
         );
+    }
+
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()))
     }
 }

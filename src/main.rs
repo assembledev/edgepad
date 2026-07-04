@@ -8,7 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use edgepad::actions::{ActionDispatcher, ActionDispatcherStats};
-use edgepad::config::{load_edgepad_config, DeviceConfig, EdgepadConfig};
+use edgepad::config::{
+    default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
+};
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
 use edgepad::doctor::{run_doctor, DoctorConfig, DoctorReport};
@@ -27,7 +29,7 @@ use edgepad::raw::{
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const HELP: &str = "\
 Usage:
   edgepad <command> [options]
@@ -105,13 +107,15 @@ Options:
       --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
       --edge-width F              Edge zone width as a fraction of the touchpad axis
 ";
-const DOCTOR_USAGE: &str = "usage: edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]";
+const DOCTOR_USAGE: &str = "usage: edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]";
 const DOCTOR_HELP: &str = "\
 Usage:
-  edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]
+  edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]
 
 Options:
-      --device auto|<event-node>  Touchpad device selection [default: auto]
+      --config <file>             TOML config path
+                                  [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
+      --device auto|<event-node>  Override touchpad device selection from config
       --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
       --uinput <path>             uinput device path [default: /dev/uinput]
       --service <unit>            systemd user unit to inspect [default: edgepad.service]
@@ -277,9 +281,13 @@ fn parse_doctor_args(mut args: impl Iterator<Item = String>) -> Result<DoctorCon
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--config" => {
+                config.config_path =
+                    Some(args.next().ok_or_else(|| DOCTOR_USAGE.to_string())?.into());
+            }
             "--device" => {
                 let raw_value = args.next().ok_or_else(|| DOCTOR_USAGE.to_string())?;
-                config.device = DeviceConfig::parse(&raw_value)?;
+                config.device_override = Some(DeviceConfig::parse(&raw_value)?);
             }
             "--input-root" => {
                 config.input_root = args.next().ok_or_else(|| DOCTOR_USAGE.to_string())?.into();
@@ -408,7 +416,7 @@ fn parse_daemon_args(mut args: impl Iterator<Item = String>) -> Result<DaemonArg
 
     let config_path = match config_path {
         Some(path) => path,
-        None => default_daemon_config_path()?,
+        None => default_edgepad_config_path()?,
     };
     let mut config = load_daemon_config(&config_path)?;
     if let Some(device) = device_override {
@@ -424,21 +432,6 @@ fn parse_daemon_args(mut args: impl Iterator<Item = String>) -> Result<DaemonArg
         config_path,
         input_root,
     })
-}
-
-fn default_daemon_config_path() -> Result<PathBuf, String> {
-    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(config_home).join("edgepad/edgepad.toml"));
-    }
-
-    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(home).join(".config/edgepad/edgepad.toml"));
-    }
-
-    Err(
-        "daemon config path was not provided; pass --config <file> or set XDG_CONFIG_HOME/HOME"
-            .to_string(),
-    )
 }
 
 fn load_daemon_config(path: &Path) -> Result<EdgepadConfig, String> {
@@ -1181,7 +1174,8 @@ mod tests {
     fn doctor_args_default_to_auto_device_and_system_paths() {
         let args = parse_doctor_args(Vec::<String>::new().into_iter()).expect("doctor args parse");
 
-        assert_eq!(args.device, DeviceConfig::Auto);
+        assert_eq!(args.config_path, None);
+        assert_eq!(args.device_override, None);
         assert_eq!(args.input_root, PathBuf::from("/dev/input"));
         assert_eq!(args.uinput_path, PathBuf::from("/dev/uinput"));
         assert_eq!(args.service_name, "edgepad.service");
@@ -1191,6 +1185,8 @@ mod tests {
     fn doctor_args_accept_overrides() {
         let args = parse_doctor_args(
             [
+                "--config",
+                "/tmp/edgepad.toml",
                 "--device",
                 "/tmp/input/event7",
                 "--input-root",
@@ -1205,9 +1201,10 @@ mod tests {
         )
         .expect("doctor args parse");
 
+        assert_eq!(args.config_path, Some(PathBuf::from("/tmp/edgepad.toml")));
         assert_eq!(
-            args.device,
-            DeviceConfig::Path(PathBuf::from("/tmp/input/event7"))
+            args.device_override,
+            Some(DeviceConfig::Path(PathBuf::from("/tmp/input/event7")))
         );
         assert_eq!(args.input_root, PathBuf::from("/tmp/input"));
         assert_eq!(args.uinput_path, PathBuf::from("/tmp/uinput"));
