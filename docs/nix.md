@@ -54,6 +54,24 @@ For bounded live passthrough through a virtual touchpad:
 sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
 ```
 
+For long-running live proxy mode with auto-detection:
+
+```bash
+sudo ./result/bin/edgepad daemon --device auto
+```
+
+Daemon config files use TOML:
+
+```toml
+device = "auto"
+edge_width = 0.10
+
+[[gestures]]
+zone = "left"
+direction = "right"
+action = ["notify-send", "edgepad", "left-right"]
+```
+
 ## Development shell
 
 ```bash
@@ -102,4 +120,4 @@ Supported systems in the flake:
 
 ## Scope
 
-The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later, after daemon/action configuration is ready.
+The flake currently packages the CLI and provides a dev shell. A NixOS/Home Manager service module belongs later, after gesture action dispatch is ready.

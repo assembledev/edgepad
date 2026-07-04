@@ -3,14 +3,21 @@ use std::fs::{self, File};
 use std::io::LineWriter;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::Duration;
 
+use edgepad::config::{load_edgepad_config, DeviceConfig, EdgepadConfig};
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
 use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
     write_raw_events_with_limit, WriteEventsResult,
 };
-use edgepad::proxy::{run_proxy, ProxyMode, ProxyRunConfig, ProxyRunSummary, DEFAULT_EDGE_WIDTH};
+use edgepad::proxy::{
+    run_proxy, ProxyMode, ProxyRunConfig, ProxyRunLimit, ProxyRunSummary, StopAfterFrameLimit,
+    StopToken, DEFAULT_EDGE_WIDTH,
+};
 use edgepad::raw::{
     parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawOutputComposer, RawOutputSink,
     RecordingRawOutputSink,
@@ -18,11 +25,16 @@ use edgepad::raw::{
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
 const PROXY_USAGE: &str =
     "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
+const DAEMON_USAGE: &str = "usage: edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
+const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+static DAEMON_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     if let Err(err) = run() {
@@ -61,6 +73,10 @@ fn run() -> Result<(), String> {
             let args = parse_proxy_args(args)?;
             proxy(&args)
         }
+        Some("daemon") => {
+            let args = parse_daemon_args(args)?;
+            daemon(&args)
+        }
         _ => Err(USAGE.to_string()),
     }
 }
@@ -82,6 +98,11 @@ struct ProxyArgs {
     frames: usize,
     mode: ProxyMode,
     edge_width: f32,
+}
+
+struct DaemonArgs {
+    config: EdgepadConfig,
+    input_root: PathBuf,
 }
 
 fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceArgs, String> {
@@ -176,6 +197,49 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
     })
 }
 
+fn parse_daemon_args(mut args: impl Iterator<Item = String>) -> Result<DaemonArgs, String> {
+    let mut config_path: Option<PathBuf> = None;
+    let mut device_override = None;
+    let mut edge_width_override = None;
+    let mut input_root = PathBuf::from("/dev/input");
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                config_path = Some(args.next().ok_or_else(|| DAEMON_USAGE.to_string())?.into());
+            }
+            "--device" => {
+                let raw_value = args.next().ok_or_else(|| DAEMON_USAGE.to_string())?;
+                device_override = Some(DeviceConfig::parse(&raw_value)?);
+            }
+            "--input-root" => {
+                input_root = args.next().ok_or_else(|| DAEMON_USAGE.to_string())?.into();
+            }
+            "--edge-width" => {
+                let raw_value = args.next().ok_or_else(|| DAEMON_USAGE.to_string())?;
+                edge_width_override = Some(parse_edge_width(&raw_value)?);
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown daemon option {other}"))
+            }
+            _ => return Err(DAEMON_USAGE.to_string()),
+        }
+    }
+
+    let mut config = match config_path {
+        Some(path) => load_edgepad_config(&path)?,
+        None => EdgepadConfig::default(),
+    };
+    if let Some(device) = device_override {
+        config.device = device;
+    }
+    if let Some(edge_width) = edge_width_override {
+        config.edge_width = edge_width;
+    }
+
+    Ok(DaemonArgs { config, input_root })
+}
+
 fn parse_positive_frame_limit(raw_value: &str) -> Result<usize, String> {
     let parsed = raw_value
         .parse::<usize>()
@@ -187,13 +251,7 @@ fn parse_positive_frame_limit(raw_value: &str) -> Result<usize, String> {
 }
 
 fn parse_edge_width(raw_value: &str) -> Result<f32, String> {
-    let parsed = raw_value
-        .parse::<f32>()
-        .map_err(|_| "--edge-width must be > 0 and < 0.5".to_string())?;
-    if !(parsed > 0.0 && parsed < 0.5) {
-        return Err("--edge-width must be > 0 and < 0.5".to_string());
-    }
-    Ok(parsed)
+    edgepad::config::parse_edge_width(raw_value)
 }
 
 fn devices(root: &Path, show_all: bool) -> Result<(), String> {
@@ -356,12 +414,88 @@ fn dump_next_command(format: DumpFormat, out_path: &Path) -> String {
 fn proxy(args: &ProxyArgs) -> Result<(), String> {
     let summary = run_proxy(&ProxyRunConfig {
         device_path: args.device.clone(),
-        frame_limit: args.frames,
+        limit: ProxyRunLimit::Frames {
+            frame_boundaries: args.frames,
+            stop_after_limit: match args.mode {
+                ProxyMode::DryRun => StopAfterFrameLimit::Immediately,
+                ProxyMode::UinputGrab => StopAfterFrameLimit::WhenIdle,
+            },
+        },
         edge_widths: EdgeWidths::all(args.edge_width),
         mode: args.mode,
     })?;
     print_proxy_summary(&summary);
     Ok(())
+}
+
+fn daemon(args: &DaemonArgs) -> Result<(), String> {
+    let device_path = args.config.device.resolve(&args.input_root)?;
+    let stop = StopToken::new();
+    install_daemon_signal_handlers(stop.clone())?;
+
+    eprintln!(
+        "edgepad daemon: device={} edge_width={:.3} gesture_bindings={}",
+        device_path.display(),
+        args.config.edge_width,
+        args.config.gestures.len()
+    );
+    eprintln!("edgepad daemon: press Ctrl+C to stop");
+
+    let summary = run_proxy(&ProxyRunConfig {
+        device_path,
+        limit: ProxyRunLimit::UntilStopped {
+            stop,
+            idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
+        },
+        edge_widths: EdgeWidths::all(args.config.edge_width),
+        mode: ProxyMode::UinputGrab,
+    })?;
+    print_proxy_summary(&summary);
+    Ok(())
+}
+
+fn install_daemon_signal_handlers(stop: StopToken) -> Result<(), String> {
+    DAEMON_STOP_REQUESTED.store(false, Ordering::SeqCst);
+    register_daemon_signal_handler(libc::SIGINT)?;
+    register_daemon_signal_handler(libc::SIGTERM)?;
+    thread::Builder::new()
+        .name("edgepad-daemon-signal".to_string())
+        .spawn(move || {
+            while !stop.is_stopped() {
+                if DAEMON_STOP_REQUESTED.load(Ordering::SeqCst) {
+                    stop.stop();
+                    return;
+                }
+                thread::sleep(DAEMON_SIGNAL_POLL_INTERVAL);
+            }
+        })
+        .map_err(|err| format!("failed to start daemon signal watcher: {err}"))?;
+    Ok(())
+}
+
+fn register_daemon_signal_handler(signal: libc::c_int) -> Result<(), String> {
+    let mut action = unsafe { std::mem::zeroed::<libc::sigaction>() };
+    action.sa_sigaction = handle_daemon_signal as *const () as libc::sighandler_t;
+    action.sa_flags = 0;
+    let sigempty_result = unsafe { libc::sigemptyset(&mut action.sa_mask) };
+    if sigempty_result != 0 {
+        return Err(format!(
+            "failed to initialize daemon signal mask for signal {signal}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let sigaction_result = unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+    if sigaction_result != 0 {
+        return Err(format!(
+            "failed to install daemon signal handler for signal {signal}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+extern "C" fn handle_daemon_signal(_signal: libc::c_int) {
+    DAEMON_STOP_REQUESTED.store(true, Ordering::SeqCst);
 }
 
 fn print_proxy_summary(summary: &ProxyRunSummary) {
@@ -379,10 +513,9 @@ fn print_proxy_summary(summary: &ProxyRunSummary) {
         summary.capabilities.y.min,
         summary.capabilities.y.max
     );
-    println!(
-        "requested_frame_boundaries: {}",
-        summary.requested_frame_boundaries
-    );
+    if let Some(requested_frame_boundaries) = summary.requested_frame_boundaries {
+        println!("requested_frame_boundaries: {requested_frame_boundaries}");
+    }
     println!("edge_width: {:.3}", summary.edge_widths.left);
     let stats = &summary.stats;
     println!("input_frame_boundaries: {}", stats.input_frame_boundaries);

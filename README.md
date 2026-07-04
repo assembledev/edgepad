@@ -20,6 +20,8 @@ Implemented:
 - `edgepad replay-raw <file.raw.ev>` for raw capture routing/output-composer inspection;
 - `edgepad proxy --device <event-node> --frames N --dry-run [--edge-width F]` for bounded live routing/output-composer inspection without forwarding input;
 - `edgepad proxy --device <event-node> --frames N --uinput --grab [--edge-width F]` for bounded live virtual-device passthrough with explicit physical-device grab;
+- `edgepad daemon [--config <file>] [--device auto|<event-node>] [--edge-width F]` for long-running live proxy mode with Ctrl+C/SIGTERM shutdown;
+- TOML config parsing for `device = "auto"|"<event-node>"`, `edge_width = F`, and gesture command arrays;
 - `.ev` metadata headers with real slot/X/Y ranges;
 - raw output composition that synthesizes `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` from unclaimed passthrough contacts;
 - tested raw output sink and buffered uinput sink plumbing;
@@ -28,8 +30,7 @@ Implemented:
 
 Not implemented yet:
 
-- long-running daemon/service mode;
-- gesture/action configuration;
+- gesture action dispatch;
 - NixOS/Home Manager service module.
 
 ## Quick start
@@ -105,6 +106,37 @@ This mode refuses to start if the physical touchpad is already touched, creates 
 Replace `/dev/input/eventX` with the touchpad event node reported by `edgepad devices`.
 
 For frame-limited edge gesture captures, a useful flow is: start capture, perform the edge or mixed gesture, release the gesture finger, then place a finger in the center until the frame budget finishes. This captures the gesture release while keeping the event stream active.
+
+For long-running live proxy mode:
+
+```bash
+sudo edgepad daemon --device auto
+```
+
+`daemon` auto-detects a single readable touchpad candidate by default. If multiple touchpads are present, pass `--device /dev/input/eventX` explicitly. Stop it with Ctrl+C or SIGTERM; it drains briefly until the physical touchpad is idle before ungrabbing.
+
+Minimal TOML config file:
+
+```toml
+device = "auto"
+edge_width = 0.10
+
+[[gestures]]
+zone = "left"
+direction = "right"
+action = ["notify-send", "edgepad", "left-right"]
+
+[[gestures]]
+zone = "right"
+direction = "down"
+action = ["notify-send", "edgepad", "right-down"]
+```
+
+Load it with:
+
+```bash
+sudo edgepad daemon --config edgepad.conf
+```
 
 ## Docs
 

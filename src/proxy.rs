@@ -1,6 +1,10 @@
 use std::collections::BTreeMap;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::{Duration, Instant};
 
 use crate::core::{Capabilities, EdgeWidths, Engine, Gesture, GestureDirection, Zone};
@@ -17,10 +21,11 @@ use evdev::{raw_stream::RawDevice, KeyCode};
 
 nix::ioctl_read_buf!(eviocgmtslots, b'E', 0x0a, u8);
 
-pub const DEFAULT_EDGE_WIDTH: f32 = 0.10;
+pub use crate::config::DEFAULT_EDGE_WIDTH;
 
 const UINPUT_UNGRAB_SETTLE_DELAY: Duration = Duration::from_millis(30);
 const UINPUT_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
+const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyMode {
@@ -28,10 +33,10 @@ pub enum ProxyMode {
     UinputGrab,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct ProxyRunConfig {
     pub device_path: PathBuf,
-    pub frame_limit: usize,
+    pub limit: ProxyRunLimit,
     pub edge_widths: EdgeWidths,
     pub mode: ProxyMode,
 }
@@ -42,8 +47,56 @@ pub struct ProxyRunSummary {
     pub device_path: PathBuf,
     pub capabilities: Capabilities,
     pub edge_widths: EdgeWidths,
-    pub requested_frame_boundaries: usize,
+    pub requested_frame_boundaries: Option<usize>,
     pub stats: ProxyRuntimeStats,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProxyRunLimit {
+    Frames {
+        frame_boundaries: usize,
+        stop_after_limit: StopAfterFrameLimit,
+    },
+    UntilStopped {
+        stop: StopToken,
+        idle_drain_timeout: Duration,
+    },
+}
+
+impl ProxyRunLimit {
+    fn requested_frame_boundaries(&self) -> Option<usize> {
+        match self {
+            Self::Frames {
+                frame_boundaries, ..
+            } => Some(*frame_boundaries),
+            Self::UntilStopped { .. } => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopAfterFrameLimit {
+    Immediately,
+    WhenIdle,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StopToken {
+    stopped: Arc<AtomicBool>,
+}
+
+impl StopToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -76,9 +129,20 @@ pub struct GestureCountKey {
 }
 
 pub fn run_proxy(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
+    validate_run_limit(&config.limit)?;
     match config.mode {
         ProxyMode::DryRun => proxy_dry_run(config),
         ProxyMode::UinputGrab => proxy_uinput_grab(config),
+    }
+}
+
+fn validate_run_limit(limit: &ProxyRunLimit) -> Result<(), String> {
+    match limit {
+        ProxyRunLimit::Frames {
+            frame_boundaries: 0,
+            ..
+        } => Err("proxy frame limit must be a positive integer".to_string()),
+        _ => Ok(()),
     }
 }
 
@@ -89,9 +153,7 @@ fn proxy_dry_run(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
         &mut device,
         capabilities,
         config.edge_widths,
-        config.frame_limit,
-        StopAfterFrameLimit::Immediately,
-        None,
+        &config.limit,
         &mut sink,
     )?;
 
@@ -100,7 +162,7 @@ fn proxy_dry_run(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
         device_path: config.device_path.clone(),
         capabilities,
         edge_widths: config.edge_widths,
-        requested_frame_boundaries: config.frame_limit,
+        requested_frame_boundaries: config.limit.requested_frame_boundaries(),
         stats,
     })
 }
@@ -125,9 +187,7 @@ fn proxy_uinput_grab(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String>
         &mut device,
         capabilities,
         config.edge_widths,
-        config.frame_limit,
-        StopAfterFrameLimit::WhenIdle,
-        Some(UINPUT_IDLE_DRAIN_TIMEOUT),
+        &config.limit,
         &mut sink,
     );
     let settle_result = settle_after_uinput_proxy_run(capabilities, &mut sink, run_result);
@@ -145,7 +205,7 @@ fn proxy_uinput_grab(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String>
         device_path: config.device_path.clone(),
         capabilities,
         edge_widths: config.edge_widths,
-        requested_frame_boundaries: config.frame_limit,
+        requested_frame_boundaries: config.limit.requested_frame_boundaries(),
         stats,
     })
 }
@@ -258,9 +318,7 @@ fn run_proxy_loop<S>(
     device: &mut RawDevice,
     capabilities: Capabilities,
     edge_widths: EdgeWidths,
-    frame_limit: usize,
-    stop_after_frame_limit: StopAfterFrameLimit,
-    drain_timeout: Option<Duration>,
+    limit: &ProxyRunLimit,
     sink: &mut S,
 ) -> Result<ProxyRuntimeStats, String>
 where
@@ -271,17 +329,30 @@ where
     let mut composer = RawOutputComposer::new(capabilities);
     let mut stats = ProxyRuntimeStats::default();
     let mut touch_state = PhysicalTouchState::new(capabilities);
-    let mut stopper = FrameLimitStopper::new(frame_limit, stop_after_frame_limit);
+    let mut stopper = ProxyLoopStopper::new(limit);
     let mut drain_deadline: Option<Instant> = None;
     let mut current = Vec::new();
 
     loop {
-        let timeout =
-            drain_deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let timeout = drain_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+            .or_else(|| stopper.poll_timeout());
         let Some(events) = fetch_proxy_events(device, timeout)? else {
-            stats.idle_drain_timed_out = true;
-            finish_proxy_output(&mut composer, sink, &mut stats)?;
-            return Ok(stats);
+            if drain_deadline.is_some() {
+                stats.idle_drain_timed_out = true;
+                finish_proxy_output(&mut composer, sink, &mut stats)?;
+                return Ok(stats);
+            }
+            if stopper.observe_idle_poll(touch_state.is_touch_down()) {
+                finish_proxy_output(&mut composer, sink, &mut stats)?;
+                return Ok(stats);
+            }
+            if stopper.is_draining() && drain_deadline.is_none() {
+                drain_deadline = stopper
+                    .drain_timeout()
+                    .map(|timeout| Instant::now() + timeout);
+            }
+            continue;
         };
 
         for raw in events {
@@ -302,7 +373,9 @@ where
                         return Ok(stats);
                     }
                     if stopper.is_draining() && drain_deadline.is_none() {
-                        drain_deadline = drain_timeout.map(|timeout| Instant::now() + timeout);
+                        drain_deadline = stopper
+                            .drain_timeout()
+                            .map(|timeout| Instant::now() + timeout);
                     }
                     stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                 }
@@ -325,7 +398,9 @@ where
                         return Ok(stats);
                     }
                     if stopper.is_draining() && drain_deadline.is_none() {
-                        drain_deadline = drain_timeout.map(|timeout| Instant::now() + timeout);
+                        drain_deadline = stopper
+                            .drain_timeout()
+                            .map(|timeout| Instant::now() + timeout);
                     }
                     stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                 }
@@ -530,40 +605,90 @@ fn gesture_count_key(gesture: Gesture) -> GestureCountKey {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StopAfterFrameLimit {
-    Immediately,
-    WhenIdle,
-}
-
 #[derive(Debug, Clone)]
-struct FrameLimitStopper {
-    requested_frame_boundaries: usize,
+struct ProxyLoopStopper<'a> {
+    limit: &'a ProxyRunLimit,
     observed_frame_boundaries: usize,
     extra_frame_boundaries: usize,
-    mode: StopAfterFrameLimit,
     draining: bool,
 }
 
-impl FrameLimitStopper {
-    fn new(requested_frame_boundaries: usize, mode: StopAfterFrameLimit) -> Self {
+impl<'a> ProxyLoopStopper<'a> {
+    fn new(limit: &'a ProxyRunLimit) -> Self {
         Self {
-            requested_frame_boundaries,
+            limit,
             observed_frame_boundaries: 0,
             extra_frame_boundaries: 0,
-            mode,
             draining: false,
         }
     }
 
     fn observe_frame_boundary(&mut self, physical_touch_down: bool) -> bool {
         self.observed_frame_boundaries += 1;
-        if self.observed_frame_boundaries < self.requested_frame_boundaries {
+        match self.limit {
+            ProxyRunLimit::Frames {
+                frame_boundaries,
+                stop_after_limit,
+            } => self.observe_frame_limit_boundary(
+                *frame_boundaries,
+                *stop_after_limit,
+                physical_touch_down,
+            ),
+            ProxyRunLimit::UntilStopped { stop, .. } => {
+                self.observe_stop_token_boundary(stop, physical_touch_down)
+            }
+        }
+    }
+
+    fn observe_idle_poll(&mut self, physical_touch_down: bool) -> bool {
+        match self.limit {
+            ProxyRunLimit::UntilStopped { stop, .. } if stop.is_stopped() => {
+                self.observe_requested_stop(physical_touch_down)
+            }
+            _ => false,
+        }
+    }
+
+    fn poll_timeout(&self) -> Option<Duration> {
+        match self.limit {
+            ProxyRunLimit::UntilStopped { .. } => Some(STOP_POLL_INTERVAL),
+            ProxyRunLimit::Frames { .. } => None,
+        }
+    }
+
+    fn drain_timeout(&self) -> Option<Duration> {
+        match self.limit {
+            ProxyRunLimit::Frames {
+                stop_after_limit: StopAfterFrameLimit::WhenIdle,
+                ..
+            } => Some(UINPUT_IDLE_DRAIN_TIMEOUT),
+            ProxyRunLimit::UntilStopped {
+                idle_drain_timeout, ..
+            } => Some(*idle_drain_timeout),
+            _ => None,
+        }
+    }
+
+    fn is_draining(&self) -> bool {
+        self.draining
+    }
+
+    fn extra_frame_boundaries(&self) -> usize {
+        self.extra_frame_boundaries
+    }
+
+    fn observe_frame_limit_boundary(
+        &mut self,
+        frame_boundaries: usize,
+        stop_after_limit: StopAfterFrameLimit,
+        physical_touch_down: bool,
+    ) -> bool {
+        if self.observed_frame_boundaries < frame_boundaries {
             return false;
         }
 
-        if self.observed_frame_boundaries == self.requested_frame_boundaries {
-            return match self.mode {
+        if self.observed_frame_boundaries == frame_boundaries {
+            return match stop_after_limit {
                 StopAfterFrameLimit::Immediately => true,
                 StopAfterFrameLimit::WhenIdle if !physical_touch_down => true,
                 StopAfterFrameLimit::WhenIdle => {
@@ -574,7 +699,7 @@ impl FrameLimitStopper {
         }
 
         self.extra_frame_boundaries += 1;
-        match self.mode {
+        match stop_after_limit {
             StopAfterFrameLimit::Immediately => true,
             StopAfterFrameLimit::WhenIdle => {
                 self.draining = physical_touch_down;
@@ -583,12 +708,27 @@ impl FrameLimitStopper {
         }
     }
 
-    fn is_draining(&self) -> bool {
-        self.draining
+    fn observe_stop_token_boundary(&mut self, stop: &StopToken, physical_touch_down: bool) -> bool {
+        if self.draining {
+            self.extra_frame_boundaries += 1;
+            self.draining = physical_touch_down;
+            return !physical_touch_down;
+        }
+
+        if stop.is_stopped() {
+            return self.observe_requested_stop(physical_touch_down);
+        }
+
+        false
     }
 
-    fn extra_frame_boundaries(&self) -> usize {
-        self.extra_frame_boundaries
+    fn observe_requested_stop(&mut self, physical_touch_down: bool) -> bool {
+        if physical_touch_down {
+            self.draining = true;
+            false
+        } else {
+            true
+        }
     }
 }
 
@@ -886,7 +1026,11 @@ mod tests {
 
     #[test]
     fn frame_limit_stop_waits_for_idle_after_budget_when_configured() {
-        let mut stopper = FrameLimitStopper::new(2, StopAfterFrameLimit::WhenIdle);
+        let limit = ProxyRunLimit::Frames {
+            frame_boundaries: 2,
+            stop_after_limit: StopAfterFrameLimit::WhenIdle,
+        };
+        let mut stopper = ProxyLoopStopper::new(&limit);
 
         assert!(!stopper.observe_frame_boundary(true));
         assert!(!stopper.observe_frame_boundary(true));
@@ -899,11 +1043,121 @@ mod tests {
 
     #[test]
     fn frame_limit_stop_keeps_exact_budget_for_dry_run() {
-        let mut stopper = FrameLimitStopper::new(2, StopAfterFrameLimit::Immediately);
+        let limit = ProxyRunLimit::Frames {
+            frame_boundaries: 2,
+            stop_after_limit: StopAfterFrameLimit::Immediately,
+        };
+        let mut stopper = ProxyLoopStopper::new(&limit);
 
         assert!(!stopper.observe_frame_boundary(true));
         assert!(stopper.observe_frame_boundary(true));
         assert_eq!(stopper.extra_frame_boundaries(), 0);
+    }
+
+    #[test]
+    fn until_stopped_finishes_at_next_idle_boundary_after_stop_token() {
+        let stop = StopToken::new();
+        let limit = ProxyRunLimit::UntilStopped {
+            stop: stop.clone(),
+            idle_drain_timeout: Duration::from_millis(250),
+        };
+        let mut stopper = ProxyLoopStopper::new(&limit);
+
+        assert!(!stopper.observe_frame_boundary(false));
+        stop.stop();
+
+        assert!(stopper.observe_frame_boundary(false));
+        assert_eq!(stopper.extra_frame_boundaries(), 0);
+    }
+
+    #[test]
+    fn until_stopped_drains_after_stop_token_when_touch_is_active() {
+        let stop = StopToken::new();
+        let limit = ProxyRunLimit::UntilStopped {
+            stop: stop.clone(),
+            idle_drain_timeout: Duration::from_millis(250),
+        };
+        let mut stopper = ProxyLoopStopper::new(&limit);
+
+        assert!(!stopper.observe_frame_boundary(true));
+        stop.stop();
+        assert!(!stopper.observe_frame_boundary(true));
+        assert!(stopper.is_draining());
+        assert_eq!(stopper.drain_timeout(), Some(Duration::from_millis(250)));
+        assert!(!stopper.observe_frame_boundary(true));
+        assert_eq!(stopper.extra_frame_boundaries(), 1);
+
+        assert!(stopper.observe_frame_boundary(false));
+        assert_eq!(stopper.extra_frame_boundaries(), 2);
+    }
+
+    #[test]
+    fn until_stopped_idle_poll_wakes_stopped_idle_loop() {
+        let stop = StopToken::new();
+        let limit = ProxyRunLimit::UntilStopped {
+            stop: stop.clone(),
+            idle_drain_timeout: Duration::from_millis(250),
+        };
+        let mut stopper = ProxyLoopStopper::new(&limit);
+
+        assert_eq!(stopper.poll_timeout(), Some(STOP_POLL_INTERVAL));
+        assert!(!stopper.observe_idle_poll(false));
+        stop.stop();
+
+        assert!(stopper.observe_idle_poll(false));
+    }
+
+    #[test]
+    fn until_stopped_finishes_after_synthetic_frame_sequence_reaches_idle() {
+        let capabilities = test_capabilities();
+        let stop = StopToken::new();
+        let limit = ProxyRunLimit::UntilStopped {
+            stop: stop.clone(),
+            idle_drain_timeout: Duration::from_millis(250),
+        };
+        let mut stopper = ProxyLoopStopper::new(&limit);
+        let mut touch_state = PhysicalTouchState::new(capabilities);
+        let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+        let mut composer = RawOutputComposer::new(capabilities);
+        let mut sink = RecordingRawOutputSink::default();
+        let mut stats = ProxyRuntimeStats::default();
+
+        let start = RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(200),
+            RawEvent::abs_mt_position_x(520),
+            RawEvent::abs_mt_position_y(320),
+        ]);
+        touch_state.observe_frame(&start);
+        process_proxy_frame(&mut engine, &mut composer, &mut sink, &mut stats, &start)
+            .expect("center start should process");
+        assert!(!stopper.observe_frame_boundary(touch_state.is_touch_down()));
+
+        stop.stop();
+        let release = RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(-1),
+        ]);
+        touch_state.observe_frame(&release);
+        process_proxy_frame(&mut engine, &mut composer, &mut sink, &mut stats, &release)
+            .expect("center release should process");
+        assert!(stopper.observe_frame_boundary(touch_state.is_touch_down()));
+        finish_proxy_output(&mut composer, &mut sink, &mut stats)
+            .expect("finished idle composer should not fail");
+
+        assert_eq!(stats.cleanup_output_frames, 0);
+        assert_eq!(sink.frames().len(), 2);
+    }
+
+    #[test]
+    fn frames_limit_rejects_zero_boundaries() {
+        assert_eq!(
+            validate_run_limit(&ProxyRunLimit::Frames {
+                frame_boundaries: 0,
+                stop_after_limit: StopAfterFrameLimit::Immediately,
+            }),
+            Err("proxy frame limit must be a positive integer".to_string())
+        );
     }
 
     #[test]
@@ -965,7 +1219,10 @@ mod tests {
     fn proxy_summary_preserves_runtime_metadata() {
         let config = ProxyRunConfig {
             device_path: PathBuf::from("/dev/input/event7"),
-            frame_limit: 12,
+            limit: ProxyRunLimit::Frames {
+                frame_boundaries: 12,
+                stop_after_limit: StopAfterFrameLimit::Immediately,
+            },
             edge_widths: EdgeWidths::all(0.2),
             mode: ProxyMode::DryRun,
         };
@@ -974,14 +1231,14 @@ mod tests {
             device_path: config.device_path.clone(),
             capabilities: test_capabilities(),
             edge_widths: config.edge_widths,
-            requested_frame_boundaries: config.frame_limit,
+            requested_frame_boundaries: config.limit.requested_frame_boundaries(),
             stats: ProxyRuntimeStats::default(),
         };
 
         assert_eq!(summary.mode, ProxyMode::DryRun);
         assert_eq!(summary.device_path, config.device_path);
         assert_eq!(summary.edge_widths, EdgeWidths::all(0.2));
-        assert_eq!(summary.requested_frame_boundaries, 12);
+        assert_eq!(summary.requested_frame_boundaries, Some(12));
     }
 
     #[test]

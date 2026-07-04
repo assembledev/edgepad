@@ -14,11 +14,12 @@ Implemented:
 6. `VirtualTouchpadSpec` describes the virtual touchpad capability set from the physical device's absolute-axis metadata.
 7. `proxy --dry-run` reads bounded live frames from a physical touchpad, routes/composes them, and prints counters without forwarding input.
 8. `proxy --uinput --grab` creates a virtual touchpad, explicitly grabs the physical device, forwards composed passthrough frames to uinput, then ungrabs after the requested frame budget.
+9. `daemon` reuses the same live proxy runtime without a frame budget and stops through Ctrl+C/SIGTERM.
 
-Not wired into a live forwarding command yet:
+Still outside this layer:
 
-- long-running daemon/service mode;
-- gesture/action configuration.
+- gesture action dispatch;
+- NixOS/Home Manager service wiring.
 
 ## Live dry-run proxy
 
@@ -65,6 +66,45 @@ The idle drain is not an unbounded shutdown lock. It is a short grace period for
 If virtual device creation fails, the physical device is not grabbed. `RawDevice` also ungrabs on drop, so errors during the bounded run do not intentionally leave the device grabbed.
 
 There is no `--no-grab` duplicate-input mode in the main test path because duplicate touchpad streams are too noisy to evaluate by hand. Use `--dry-run` for inspection and `--uinput --grab` for the bounded live proxy test.
+
+## Daemon mode
+
+`daemon` is the long-running live proxy surface. It creates the virtual touchpad, grabs the physical touchpad, proxies until Ctrl+C or SIGTERM, then drains briefly until the physical touchpad is idle before cleanup and ungrab.
+
+```bash
+sudo edgepad daemon --device auto
+```
+
+The default device config is `auto`. Auto-detection scans readable `/dev/input/event*` nodes and succeeds only when exactly one touchpad candidate is present. If auto-detection is ambiguous, pass the event node explicitly:
+
+```bash
+sudo edgepad daemon --device /dev/input/event5
+```
+
+Config files use TOML:
+
+```toml
+device = "auto"
+edge_width = 0.10
+
+[[gestures]]
+zone = "left"
+direction = "right"
+action = ["notify-send", "edgepad", "left-right"]
+
+[[gestures]]
+zone = "right"
+direction = "down"
+action = ["notify-send", "edgepad", "right-down"]
+```
+
+Load a config with:
+
+```bash
+sudo edgepad daemon --config edgepad.conf
+```
+
+Gesture bindings are parsed and validated now; dispatching configured actions is the next layer.
 
 ## Output policy
 

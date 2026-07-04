@@ -44,9 +44,10 @@ This command is read-only:
 - no `EVIOCGRAB`;
 - no `uinput`;
 - no event forwarding;
-- no daemon loop;
 - no command dispatch.
 
 ## Rationale
 
 Before `edgepad dump --device ... --out bug.ev`, users need a way to identify the correct touchpad event node without guessing.
+
+`daemon --device auto` uses the same discovery rules and starts only when exactly one readable touchpad candidate is found. If multiple candidates are present, use `edgepad devices` and pass the chosen path explicitly.
