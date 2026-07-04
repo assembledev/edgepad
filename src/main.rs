@@ -28,12 +28,93 @@ use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use evdev::raw_stream::RawDevice;
 
 const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const HELP: &str = "\
+Usage:
+  edgepad <command> [options]
+
+Commands:
+  devices     List readable input devices and touchpad candidates
+  doctor      Check runtime prerequisites and service health
+  daemon      Run the live edge-gesture proxy
+  dump        Capture touchpad events into a replay fixture
+  proxy       Run a bounded live proxy session for diagnostics
+  replay      Replay a parsed fixture through the recognizer
+  replay-raw  Replay a raw evdev capture through routing and output composition
+
+Global options:
+  -h, --help     Show this help
+  -V, --version  Show version
+";
+const REPLAY_USAGE: &str = "usage: edgepad replay <fixture.ev>";
+const REPLAY_HELP: &str = "\
+Usage:
+  edgepad replay <fixture.ev>
+
+Replay a parsed fixture through the recognizer and print summary statistics.
+";
+const REPLAY_RAW_USAGE: &str = "usage: edgepad replay-raw <raw.ev>";
+const REPLAY_RAW_HELP: &str = "\
+Usage:
+  edgepad replay-raw <raw.ev>
+
+Replay a raw evdev capture through recognizer routing and output composition.
+";
+const DEVICES_USAGE: &str = "usage: edgepad devices [--root <input-root>] [--all]";
+const DEVICES_HELP: &str = "\
+Usage:
+  edgepad devices [--root <input-root>] [--all]
+
+Options:
+      --root <input-root>  Input device directory [default: /dev/input]
+      --all                Show all readable event devices, not only touchpad candidates
+";
 const DUMP_USAGE: &str =
     "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
+const DUMP_HELP: &str = "\
+Usage:
+  edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]
+
+Options:
+      --device <event-node>  Physical touchpad event node to read
+      --out <file.ev>        Output fixture path
+      --frames N             Stop after N frame boundaries
+      --raw                  Write raw evdev events instead of replay fixture events
+";
 const PROXY_USAGE: &str =
     "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
+const PROXY_HELP: &str = "\
+Usage:
+  edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]
+
+Options:
+      --device <event-node>  Physical touchpad event node to proxy
+      --frames N             Stop after N frame boundaries
+      --dry-run              Recognize and report without emitting output
+      --uinput --grab        Grab the physical device and emit through /dev/uinput
+      --edge-width F         Edge zone width as a fraction of the touchpad axis
+";
 const DAEMON_USAGE: &str = "usage: edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const DAEMON_HELP: &str = "\
+Usage:
+  edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]
+
+Options:
+      --config <file>             TOML config path
+      --device auto|<event-node>  Touchpad device selection [default: auto]
+      --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
+      --edge-width F              Edge zone width as a fraction of the touchpad axis
+";
 const DOCTOR_USAGE: &str = "usage: edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]";
+const DOCTOR_HELP: &str = "\
+Usage:
+  edgepad doctor [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]
+
+Options:
+      --device auto|<event-node>  Touchpad device selection [default: auto]
+      --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
+      --uinput <path>             uinput device path [default: /dev/uinput]
+      --service <unit>            systemd user unit to inspect [default: edgepad.service]
+";
 const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DAEMON_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -57,42 +138,95 @@ fn run() -> Result<i32, String> {
     let mut args = env::args().skip(1);
 
     match args.next().as_deref() {
+        Some("--help") | Some("-h") => {
+            print_help(HELP);
+            Ok(0)
+        }
+        Some("--version") | Some("-V") => {
+            println!("edgepad {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
         Some("replay") => {
-            let path = args.next().ok_or_else(|| USAGE.to_string())?;
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(REPLAY_HELP);
+                return Ok(0);
+            }
+            let mut args = args.into_iter();
+            let path = args.next().ok_or_else(|| REPLAY_USAGE.to_string())?;
             if args.next().is_some() {
-                return Err(USAGE.to_string());
+                return Err(REPLAY_USAGE.to_string());
             }
             replay(Path::new(&path)).map(|()| 0)
         }
         Some("replay-raw") => {
-            let path = args.next().ok_or_else(|| USAGE.to_string())?;
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(REPLAY_RAW_HELP);
+                return Ok(0);
+            }
+            let mut args = args.into_iter();
+            let path = args.next().ok_or_else(|| REPLAY_RAW_USAGE.to_string())?;
             if args.next().is_some() {
-                return Err(USAGE.to_string());
+                return Err(REPLAY_RAW_USAGE.to_string());
             }
             replay_raw(Path::new(&path)).map(|()| 0)
         }
         Some("devices") => {
-            let args = parse_devices_args(args)?;
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(DEVICES_HELP);
+                return Ok(0);
+            }
+            let args = parse_devices_args(args.into_iter())?;
             devices(&args.root, args.show_all).map(|()| 0)
         }
         Some("doctor") => {
-            let config = parse_doctor_args(args)?;
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(DOCTOR_HELP);
+                return Ok(0);
+            }
+            let config = parse_doctor_args(args.into_iter())?;
             doctor(&config)
         }
         Some("dump") => {
-            let args = parse_dump_args(args)?;
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(DUMP_HELP);
+                return Ok(0);
+            }
+            let args = parse_dump_args(args.into_iter())?;
             dump(&args.device, &args.out, args.frames, args.raw).map(|()| 0)
         }
         Some("proxy") => {
-            let args = parse_proxy_args(args)?;
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(PROXY_HELP);
+                return Ok(0);
+            }
+            let args = parse_proxy_args(args.into_iter())?;
             proxy(&args).map(|()| 0)
         }
         Some("daemon") => {
-            let args = parse_daemon_args(args)?;
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(DAEMON_HELP);
+                return Ok(0);
+            }
+            let args = parse_daemon_args(args.into_iter())?;
             daemon(&args).map(|()| 0)
         }
         _ => Err(USAGE.to_string()),
     }
+}
+
+fn is_help_request(args: &[String]) -> bool {
+    args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h")
+}
+
+fn print_help(help: &str) {
+    print!("{help}");
 }
 
 struct DeviceArgs {
@@ -125,9 +259,11 @@ fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceAr
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--root" => root = args.next().ok_or_else(|| USAGE.to_string())?.into(),
+            "--root" => {
+                root = args.next().ok_or_else(|| DEVICES_USAGE.to_string())?.into();
+            }
             "--all" => show_all = true,
-            _ => return Err(USAGE.to_string()),
+            _ => return Err(DEVICES_USAGE.to_string()),
         }
     }
 
