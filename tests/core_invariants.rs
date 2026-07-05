@@ -88,6 +88,46 @@ fn claimed_edge_touch_does_not_emit_initial_down_to_passthrough() {
 }
 
 #[test]
+fn inactive_edge_width_passes_edge_touch_through() {
+    let mut engine = Engine::new(
+        test_caps(),
+        EdgeWidths {
+            left: 0.0,
+            right: 0.10,
+            top: 0.0,
+            bottom: 0.0,
+        },
+    );
+
+    let down = engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(21),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left edge contact is valid");
+
+    assert_eq!(
+        down.passthrough,
+        vec![
+            Event::slot(0),
+            Event::tracking_id(21),
+            Event::x(20),
+            Event::y(300)
+        ]
+    );
+    assert!(down.gestures.is_empty());
+
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("inactive edge release passes through");
+
+    assert_eq!(up.passthrough, vec![Event::slot(0), Event::tracking_id(-1)]);
+    assert!(up.gestures.is_empty());
+}
+
+#[test]
 fn center_touch_is_passthrough_from_initial_down_to_release() {
     let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
 

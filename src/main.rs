@@ -740,11 +740,12 @@ fn run_daemon_proxy_with_startup_retry(
         }
 
         let run_result = config.device.resolve(input_root).and_then(|device_path| {
+            let edge_widths = config.active_edge_widths();
             if last_announced_device.as_ref() != Some(&device_path) {
                 eprintln!(
-                    "edgepad daemon: device={} edge_width={:.3} gesture_bindings={}",
+                    "edgepad daemon: device={} edge_widths={} gesture_bindings={}",
                     device_path.display(),
-                    config.edge_width,
+                    edge_widths_label(edge_widths),
                     config.gestures.len()
                 );
                 last_announced_device = Some(device_path.clone());
@@ -757,7 +758,7 @@ fn run_daemon_proxy_with_startup_retry(
                         stop: stop.clone(),
                         idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
                     },
-                    edge_widths: EdgeWidths::all(config.edge_width),
+                    edge_widths,
                     mode: ProxyMode::UinputGrab,
                 },
                 action_dispatcher,
@@ -898,7 +899,7 @@ fn print_proxy_summary(summary: &ProxyRunSummary) {
     if let Some(requested_frame_boundaries) = summary.requested_frame_boundaries {
         println!("requested_frame_boundaries: {requested_frame_boundaries}");
     }
-    println!("edge_width: {:.3}", summary.edge_widths.left);
+    println!("edge_widths: {}", edge_widths_label(summary.edge_widths));
     let stats = &summary.stats;
     println!("input_frame_boundaries: {}", stats.input_frame_boundaries);
     println!("raw_frames: {}", stats.raw_frames);
@@ -956,6 +957,13 @@ fn default_capabilities() -> Capabilities {
         x: AxisRange { min: 0, max: 1000 },
         y: AxisRange { min: 0, max: 700 },
     }
+}
+
+fn edge_widths_label(widths: EdgeWidths) -> String {
+    format!(
+        "left={:.3} right={:.3} top={:.3} bottom={:.3}",
+        widths.left, widths.right, widths.top, widths.bottom
+    )
 }
 
 fn replay(path: &Path) -> Result<(), String> {
@@ -1167,6 +1175,19 @@ mod tests {
         assert_eq!(
             dump_next_command(DumpFormat::Replay, Path::new("bug.ev")),
             "edgepad replay bug.ev"
+        );
+    }
+
+    #[test]
+    fn edge_widths_label_prints_all_zones() {
+        assert_eq!(
+            edge_widths_label(EdgeWidths {
+                left: 0.0,
+                right: 0.1,
+                top: 0.2,
+                bottom: 0.3,
+            }),
+            "left=0.000 right=0.100 top=0.200 bottom=0.300"
         );
     }
 

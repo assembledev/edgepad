@@ -6,7 +6,7 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
-use crate::core::{Gesture, GestureDirection, Zone};
+use crate::core::{EdgeWidths, Gesture, GestureDirection, Zone};
 use crate::device::{
     discover_device_report, format_device_line, touchpad_candidates, DiscoveryReport,
 };
@@ -59,6 +59,23 @@ impl EdgepadConfig {
         }
 
         Ok(config)
+    }
+
+    pub fn active_edge_widths(&self) -> EdgeWidths {
+        EdgeWidths {
+            left: self.zone_edge_width(Zone::Left),
+            right: self.zone_edge_width(Zone::Right),
+            top: self.zone_edge_width(Zone::Top),
+            bottom: self.zone_edge_width(Zone::Bottom),
+        }
+    }
+
+    fn zone_edge_width(&self, zone: Zone) -> f32 {
+        if self.gestures.iter().any(|binding| binding.zone == zone) {
+            self.edge_width
+        } else {
+            0.0
+        }
     }
 }
 
@@ -431,6 +448,36 @@ mod tests {
                     },
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn edgepad_config_activates_only_zones_with_gesture_bindings() {
+        let config = EdgepadConfig::parse(
+            r#"
+            edge_width = 0.20
+
+            [[gestures]]
+            zone = "right"
+            direction = "up"
+            action = ["notify-send", "right-up"]
+
+            [[gestures]]
+            zone = "top"
+            direction = "left"
+            action = ["notify-send", "top-left"]
+            "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(
+            config.active_edge_widths(),
+            EdgeWidths {
+                left: 0.0,
+                right: 0.20,
+                top: 0.20,
+                bottom: 0.0,
+            }
         );
     }
 
