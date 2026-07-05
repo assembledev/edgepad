@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -165,6 +166,21 @@ pub fn load_edgepad_config(path: &Path) -> Result<EdgepadConfig, String> {
         .map_err(|err| format!("failed to read config {}: {err}", path.display()))?;
     EdgepadConfig::parse(&input)
         .map_err(|err| format!("failed to parse config {}: {err}", path.display()))
+}
+
+pub fn default_edgepad_config_path() -> Result<PathBuf, String> {
+    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(config_home).join("edgepad/edgepad.toml"));
+    }
+
+    if let Some(home) = env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home).join(".config/edgepad/edgepad.toml"));
+    }
+
+    Err(
+        "config path was not provided; pass --config <file> or set XDG_CONFIG_HOME/HOME"
+            .to_string(),
+    )
 }
 
 pub fn parse_edge_width(raw_value: &str) -> Result<f32, String> {

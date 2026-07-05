@@ -33,6 +33,18 @@ curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh
 
 The installer downloads the x86_64 Linux release binary, installs udev rules, writes a default config to `~/.config/edgepad/edgepad.toml`, installs a systemd user service, starts it, and runs `edgepad doctor`.
 
+Uninstall files created by the release installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --uninstall
+```
+
+This keeps `~/.config/edgepad/edgepad.toml`. To remove the config too:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --uninstall --purge
+```
+
 ### Nix
 
 Build and run from the repository:
@@ -75,7 +87,7 @@ cargo run -- --help
 
 ## Quick start
 
-Check device access and service state:
+Check config, device access, action executables, and service state:
 
 ```bash
 edgepad doctor
@@ -131,6 +143,8 @@ Watch logs:
 ```bash
 journalctl --user -u edgepad.service -f
 ```
+
+For a foreground run, `edgepad daemon` reads `~/.config/edgepad/edgepad.toml` by default.
 
 ## Gesture config
 
@@ -244,7 +258,7 @@ Replace `/dev/input/eventX` with the touchpad node reported by `edgepad devices`
 
 ```text
 edgepad devices     List readable input devices and touchpad candidates
-edgepad doctor      Check runtime prerequisites and service health
+edgepad doctor      Check config, runtime prerequisites, actions, and service health
 edgepad daemon      Run the live edge-gesture proxy
 edgepad dump        Capture touchpad events into a replay fixture
 edgepad proxy       Run a bounded live proxy session for diagnostics

@@ -63,7 +63,7 @@ fn subcommand_help_flags_print_command_help() {
         ("devices", "edgepad devices [--root <input-root>] [--all]"),
         (
             "doctor",
-            "edgepad doctor [--device auto|<event-node>] [--input-root <input-root>]",
+            "edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>]",
         ),
         (
             "daemon",

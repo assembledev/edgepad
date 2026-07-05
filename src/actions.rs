@@ -220,6 +220,7 @@ impl ActionDispatcher {
             .find(|binding| binding.matches(&gesture))
         else {
             self.stats.increment_unmatched_gestures();
+            eprintln!("edgepad action unmatched: {}", gesture_context(gesture));
             return;
         };
 
@@ -235,7 +236,7 @@ impl ActionDispatcher {
                     gesture.tracking_id
                 );
             }
-            GestureActionConfig::Command { argv } => self.enqueue_command(argv.clone()),
+            GestureActionConfig::Command { argv } => self.enqueue_command(gesture, argv.clone()),
         }
     }
 
@@ -262,13 +263,13 @@ impl ActionDispatcher {
         self.stats.snapshot()
     }
 
-    fn enqueue_command(&self, argv: Vec<String>) {
+    fn enqueue_command(&self, gesture: Gesture, argv: Vec<String>) {
         let Some(sender) = &self.sender else {
             self.stats.increment_dropped_commands();
             return;
         };
 
-        match sender.try_send(ActionCommand { argv }) {
+        match sender.try_send(ActionCommand { gesture, argv }) {
             Ok(()) => self.stats.increment_queued_commands(),
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 self.stats.increment_dropped_commands();
@@ -285,6 +286,7 @@ impl GestureHandler for ActionDispatcher {
 
 #[derive(Debug, Clone)]
 struct ActionCommand {
+    gesture: Gesture,
     argv: Vec<String>,
 }
 
@@ -310,16 +312,35 @@ fn run_action_worker<R>(
             Ok(_) => {
                 stats.increment_failed_commands();
                 eprintln!(
-                    "edgepad action command exited unsuccessfully: {:?}",
+                    "edgepad action command exited unsuccessfully: {} argv={:?}",
+                    action_command_context(&command),
                     command.argv
                 );
             }
             Err(err) => {
                 stats.increment_failed_commands();
-                eprintln!("edgepad action command failed: {err}");
+                eprintln!(
+                    "edgepad action command failed: {} argv={:?}: {err}",
+                    action_command_context(&command),
+                    command.argv
+                );
             }
         }
     }
+}
+
+fn action_command_context(command: &ActionCommand) -> String {
+    gesture_context(command.gesture)
+}
+
+fn gesture_context(gesture: Gesture) -> String {
+    format!(
+        "zone={} direction={} slot={} tracking_id={}",
+        zone_name(gesture.zone),
+        direction_name(gesture.direction),
+        gesture.slot,
+        gesture.tracking_id
+    )
 }
 
 fn wait_for_action_worker_shutdown(worker: &JoinHandle<()>, timeout: Duration) -> bool {
@@ -599,6 +620,27 @@ mod tests {
         assert_eq!(stats.succeeded_commands, 0);
         assert_eq!(stats.failed_commands, 1);
         assert_eq!(stats.worker_shutdown_timeouts, 0);
+    }
+
+    #[test]
+    fn action_command_context_includes_gesture_identity() {
+        let command = ActionCommand {
+            gesture: gesture(Zone::Right, GestureDirection::Up),
+            argv: vec!["notify-send".to_string(), "edgepad".to_string()],
+        };
+
+        assert_eq!(
+            action_command_context(&command),
+            "zone=right direction=up slot=0 tracking_id=42"
+        );
+    }
+
+    #[test]
+    fn gesture_context_includes_gesture_identity() {
+        assert_eq!(
+            gesture_context(gesture(Zone::Top, GestureDirection::Left)),
+            "zone=top direction=left slot=0 tracking_id=42"
+        );
     }
 
     fn wait_for_started_command(dispatcher: &ActionDispatcher) {
