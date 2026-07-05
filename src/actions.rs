@@ -220,6 +220,7 @@ impl ActionDispatcher {
             .find(|binding| binding.matches(&gesture))
         else {
             self.stats.increment_unmatched_gestures();
+            eprintln!("edgepad action unmatched: {}", gesture_context(gesture));
             return;
         };
 
@@ -329,12 +330,16 @@ fn run_action_worker<R>(
 }
 
 fn action_command_context(command: &ActionCommand) -> String {
+    gesture_context(command.gesture)
+}
+
+fn gesture_context(gesture: Gesture) -> String {
     format!(
         "zone={} direction={} slot={} tracking_id={}",
-        zone_name(command.gesture.zone),
-        direction_name(command.gesture.direction),
-        command.gesture.slot,
-        command.gesture.tracking_id
+        zone_name(gesture.zone),
+        direction_name(gesture.direction),
+        gesture.slot,
+        gesture.tracking_id
     )
 }
 
@@ -627,6 +632,14 @@ mod tests {
         assert_eq!(
             action_command_context(&command),
             "zone=right direction=up slot=0 tracking_id=42"
+        );
+    }
+
+    #[test]
+    fn gesture_context_includes_gesture_identity() {
+        assert_eq!(
+            gesture_context(gesture(Zone::Top, GestureDirection::Left)),
+            "zone=top direction=left slot=0 tracking_id=42"
         );
     }
 
