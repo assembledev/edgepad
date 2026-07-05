@@ -32,6 +32,12 @@ jobs:
       - name: Check installer dry run
         run: ./install.sh --dry-run
 
+      - name: Check installer uninstall dry run
+        run: ./install.sh --uninstall --dry-run
+
+      - name: Check installer purge dry run
+        run: ./install.sh --uninstall --purge --dry-run
+
       - name: Run clippy
         run: cargo clippy --all-targets -- -D warnings
 

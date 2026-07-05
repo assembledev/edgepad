@@ -33,6 +33,18 @@ curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh
 
 The installer downloads the x86_64 Linux release binary, installs udev rules, writes a default config to `~/.config/edgepad/edgepad.toml`, installs a systemd user service, starts it, and runs `edgepad doctor`.
 
+Uninstall files created by the release installer:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --uninstall
+```
+
+This keeps `~/.config/edgepad/edgepad.toml`. To remove the config too:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --uninstall --purge
+```
+
 ### Nix
 
 Build and run from the repository:
