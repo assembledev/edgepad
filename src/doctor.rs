@@ -56,8 +56,57 @@ impl CheckStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorCheck {
     pub status: CheckStatus,
-    pub name: &'static str,
+    pub section: DoctorSection,
+    pub label: &'static str,
     pub detail: String,
+}
+
+impl DoctorCheck {
+    fn new(
+        status: CheckStatus,
+        section: DoctorSection,
+        label: &'static str,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            section,
+            label,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoctorSection {
+    Config,
+    Actions,
+    Device,
+    Access,
+    Session,
+    Service,
+}
+
+impl DoctorSection {
+    pub const ALL: [Self; 6] = [
+        Self::Config,
+        Self::Actions,
+        Self::Device,
+        Self::Access,
+        Self::Session,
+        Self::Service,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Config => "Config",
+            Self::Actions => "Actions",
+            Self::Device => "Device",
+            Self::Access => "Access",
+            Self::Session => "Session",
+            Self::Service => "Service",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -135,72 +184,79 @@ fn check_config(config: &DoctorConfig, report: &mut DoctorReport) -> Option<Edge
         None => match default_edgepad_config_path() {
             Ok(path) => path,
             Err(err) => {
-                report.checks.push(DoctorCheck {
-                    status: CheckStatus::Fail,
-                    name: "config path",
-                    detail: err,
-                });
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Config,
+                    "path",
+                    err,
+                ));
                 return None;
             }
         },
     };
 
     match fs::metadata(&path) {
-        Ok(metadata) if metadata.is_file() => report.checks.push(DoctorCheck {
-            status: CheckStatus::Ok,
-            name: "config path",
-            detail: format!("{}", path.display()),
-        }),
+        Ok(metadata) if metadata.is_file() => report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Config,
+            "path",
+            format!("{}", path.display()),
+        )),
         Ok(_) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "config path",
-                detail: format!("not a file: {}", path.display()),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Config,
+                "path",
+                format!("not a file: {}", path.display()),
+            ));
             return None;
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "config path",
-                detail: format!(
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Config,
+                "path",
+                format!(
                     "not found: {}; pass --config <file> or create ~/.config/edgepad/edgepad.toml",
                     path.display()
                 ),
-            });
+            ));
             return None;
         }
         Err(err) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "config path",
-                detail: format!("failed to inspect {}: {err}", path.display()),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Config,
+                "path",
+                format!("failed to inspect {}: {err}", path.display()),
+            ));
             return None;
         }
     }
 
     match load_edgepad_config(&path) {
         Ok(edgepad_config) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "config parse",
-                detail: format!(
-                    "device={} edge_width={:.3} gesture_bindings={}",
-                    device_config_label(&edgepad_config.device),
-                    edgepad_config.edge_width,
-                    edgepad_config.gestures.len()
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Config,
+                "file",
+                format!(
+                    "device {}, edge width {}, {}",
+                    device_config_value_label(&edgepad_config.device),
+                    percent_label(edgepad_config.edge_width),
+                    binding_count_label(edgepad_config.gestures.len())
                 ),
-            });
+            ));
             check_gesture_bindings(&edgepad_config, report);
             Some(edgepad_config)
         }
         Err(err) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "config parse",
-                detail: err,
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Config,
+                "file",
+                err,
+            ));
             None
         }
     }
@@ -208,25 +264,27 @@ fn check_config(config: &DoctorConfig, report: &mut DoctorReport) -> Option<Edge
 
 fn check_gesture_bindings(config: &EdgepadConfig, report: &mut DoctorReport) {
     if config.gestures.is_empty() {
-        report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
-            name: "gesture bindings",
-            detail: "no gesture bindings configured; add at least one [[gestures]] entry"
-                .to_string(),
-        });
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Fail,
+            DoctorSection::Config,
+            "bindings",
+            "no gesture bindings configured; add at least one [[gestures]] entry",
+        ));
         return;
     }
 
-    report.checks.push(DoctorCheck {
-        status: CheckStatus::Ok,
-        name: "gesture bindings",
-        detail: format!("{} gesture binding(s) configured", config.gestures.len()),
-    });
-    report.checks.push(DoctorCheck {
-        status: CheckStatus::Ok,
-        name: "active zones",
-        detail: active_zones_detail(config),
-    });
+    report.checks.push(DoctorCheck::new(
+        CheckStatus::Ok,
+        DoctorSection::Config,
+        "bindings",
+        format!("{} configured", binding_count_label(config.gestures.len())),
+    ));
+    report.checks.push(DoctorCheck::new(
+        CheckStatus::Ok,
+        DoctorSection::Config,
+        "zones",
+        active_zones_detail(config),
+    ));
 }
 
 fn active_zones_detail(config: &EdgepadConfig) -> String {
@@ -242,7 +300,7 @@ fn active_zones_detail(config: &EdgepadConfig) -> String {
         .collect();
 
     format!(
-        "active_zones={} inactive_zones={} edge_widths={}",
+        "claiming {}; passthrough {}; widths: {}",
         zone_list_label(&active_zones),
         zone_list_label(&inactive_zones),
         edge_widths_label(config.active_edge_widths())
@@ -262,14 +320,36 @@ fn zone_list_label(zones: &[Zone]) -> String {
         .iter()
         .map(|zone| zone_name(*zone))
         .collect::<Vec<_>>()
-        .join(",")
+        .join(", ")
 }
 
 fn edge_widths_label(widths: EdgeWidths) -> String {
     format!(
-        "left={:.3} right={:.3} top={:.3} bottom={:.3}",
-        widths.left, widths.right, widths.top, widths.bottom
+        "left {}, right {}, top {}, bottom {}",
+        edge_width_label(widths.left),
+        edge_width_label(widths.right),
+        edge_width_label(widths.top),
+        edge_width_label(widths.bottom)
     )
+}
+
+fn edge_width_label(width: f32) -> String {
+    if width <= f32::EPSILON {
+        "off".to_string()
+    } else {
+        percent_label(width)
+    }
+}
+
+fn percent_label(value: f32) -> String {
+    format!("{:.1}%", value * 100.0)
+}
+
+fn binding_count_label(count: usize) -> String {
+    match count {
+        1 => "1 gesture binding".to_string(),
+        _ => format!("{count} gesture bindings"),
+    }
 }
 
 fn check_config_device(
@@ -281,33 +361,36 @@ fn check_config_device(
         (_, Some(device)) => {
             let detail = match loaded_config {
                 Some(config) => format!(
-                    "{} from config overridden by --device {}",
-                    device_config_label(&config.device),
-                    device_config_label(device)
+                    "config device {} overridden by --device {}",
+                    device_config_value_label(&config.device),
+                    device_config_value_label(device)
                 ),
-                None => format!("using --device {}", device_config_label(device)),
+                None => format!("using --device {}", device_config_value_label(device)),
             };
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Warn,
-                name: "config device",
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Warn,
+                DoctorSection::Config,
+                "device",
                 detail,
-            });
+            ));
             device.clone()
         }
         (Some(config), None) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "config device",
-                detail: format!("using {}", device_config_label(&config.device)),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Config,
+                "device",
+                format!("using {}", device_config_value_label(&config.device)),
+            ));
             config.device.clone()
         }
         (None, None) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Warn,
-                name: "config device",
-                detail: "using device=auto because config was not loaded".to_string(),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Warn,
+                DoctorSection::Config,
+                "device",
+                "using auto because config was not loaded",
+            ));
             DeviceConfig::Auto
         }
     }
@@ -319,57 +402,84 @@ fn check_action_executables(config: &EdgepadConfig, report: &mut DoctorReport) {
     }
 
     let mut usages = BTreeMap::<String, Vec<String>>::new();
-    for (index, binding) in config.gestures.iter().enumerate() {
+    for binding in &config.gestures {
         if let GestureActionConfig::Command { argv } = &binding.action {
             if let Some(program) = argv.first() {
                 usages
                     .entry(program.clone())
                     .or_default()
-                    .push(gesture_binding_label(
-                        index,
-                        binding.zone,
-                        binding.direction,
-                    ));
+                    .push(gesture_binding_label(binding.zone, binding.direction));
             }
         }
     }
 
     if usages.is_empty() {
-        report.checks.push(DoctorCheck {
-            status: CheckStatus::Ok,
-            name: "action executable",
-            detail: "no command actions configured".to_string(),
-        });
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Actions,
+            "command",
+            "no command actions configured",
+        ));
         return;
     }
 
-    for (program, bindings) in usages {
+    let mut usages = usages
+        .into_iter()
+        .map(|(program, bindings)| (action_program_name(&program), program, bindings))
+        .collect::<Vec<_>>();
+    usages.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    for (_program_name, program, bindings) in usages {
         let usage = format_binding_usage(&bindings);
         match action_executable_status(&program) {
-            ActionExecutableStatus::Found(path) => report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "action executable",
-                detail: format!("{program} found at {} for {usage}", path.display()),
-            }),
-            ActionExecutableStatus::AbsolutePathExecutable => report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "action executable",
-                detail: format!("{program} is executable for {usage}"),
-            }),
-            ActionExecutableStatus::RelativePathExecutable => report.checks.push(DoctorCheck {
-                status: CheckStatus::Warn,
-                name: "action executable",
-                detail: format!(
-                    "{program} is a relative executable path for {usage}; user services may run from a different directory"
+            ActionExecutableStatus::Found(path) => report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Actions,
+                "command",
+                action_ok_detail(&program, &usage, &path),
+            )),
+            ActionExecutableStatus::AbsolutePathExecutable => report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Actions,
+                "command",
+                action_ok_detail(&program, &usage, Path::new(&program)),
+            )),
+            ActionExecutableStatus::RelativePathExecutable => report.checks.push(DoctorCheck::new(
+                CheckStatus::Warn,
+                DoctorSection::Actions,
+                "command",
+                format!(
+                    "{}: {usage}\npath: {program}\nwarning: relative executable paths may not work from a user service",
+                    action_program_name(&program)
                 ),
-            }),
-            ActionExecutableStatus::Missing(message) => report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "action executable",
-                detail: format!("{message} for {usage}"),
-            }),
+            )),
+            ActionExecutableStatus::Missing(message) => report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Actions,
+                "command",
+                format!(
+                    "{}: {usage}\nproblem: {message}",
+                    action_program_name(&program)
+                ),
+            )),
         }
     }
+}
+
+fn action_ok_detail(program: &str, usage: &str, path: &Path) -> String {
+    format!(
+        "{}: {usage}\npath: {}",
+        action_program_name(program),
+        path.display()
+    )
+}
+
+fn action_program_name(program: &str) -> String {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -427,24 +537,20 @@ fn find_executable_in_path(program: &str, path_env: Option<OsString>) -> Option<
 
 fn format_binding_usage(bindings: &[String]) -> String {
     match bindings {
-        [] => "0 binding(s)".to_string(),
-        [binding] => binding.clone(),
-        _ => format!("{} binding(s): {}", bindings.len(), bindings.join(", ")),
+        [] => "0 bindings".to_string(),
+        [binding] => format!("1 binding ({binding})"),
+        _ => format!("{} bindings ({})", bindings.len(), bindings.join(", ")),
     }
 }
 
-fn gesture_binding_label(index: usize, zone: Zone, direction: GestureDirection) -> String {
-    format!(
-        "gestures[{index}] {}.{}",
-        zone_name(zone),
-        direction_name(direction)
-    )
+fn gesture_binding_label(zone: Zone, direction: GestureDirection) -> String {
+    format!("{}.{}", zone_name(zone), direction_name(direction))
 }
 
-fn device_config_label(device: &DeviceConfig) -> String {
+fn device_config_value_label(device: &DeviceConfig) -> String {
     match device {
-        DeviceConfig::Auto => "device=auto".to_string(),
-        DeviceConfig::Path(path) => format!("device={}", path.display()),
+        DeviceConfig::Auto => "auto".to_string(),
+        DeviceConfig::Path(path) => format!("{}", path.display()),
     }
 }
 
@@ -455,57 +561,62 @@ fn check_touchpad_selection(
 ) -> Option<PathBuf> {
     match device {
         DeviceConfig::Path(path) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Warn,
-                name: "touchpad auto-detect",
-                detail: format!(
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Warn,
+                DoctorSection::Device,
+                "touchpad",
+                format!(
                     "skipped because explicit device was provided: {}",
                     path.display()
                 ),
-            });
+            ));
             Some(path.clone())
         }
         DeviceConfig::Auto => match discover_device_report(input_root) {
             Ok(discovery) if discovery.event_node_count == 0 => {
-                report.checks.push(DoctorCheck {
-                    status: CheckStatus::Fail,
-                    name: "touchpad auto-detect",
-                    detail: format!("no event devices found under {}", input_root.display()),
-                });
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Device,
+                    "touchpad",
+                    format!("no event devices found under {}", input_root.display()),
+                ));
                 None
             }
             Ok(discovery) if discovery.summaries.is_empty() => {
-                report.checks.push(DoctorCheck {
-                    status: CheckStatus::Fail,
-                    name: "touchpad auto-detect",
-                    detail: format!(
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Device,
+                    "touchpad",
+                    format!(
                         "{} event node(s) found under {}, but none were readable",
                         discovery.event_node_count,
                         input_root.display()
                     ),
-                });
+                ));
                 None
             }
             Ok(discovery) => {
                 let candidates = touchpad_candidates(&discovery.summaries);
                 match candidates.as_slice() {
                     [] => {
-                        report.checks.push(DoctorCheck {
-                            status: CheckStatus::Fail,
-                            name: "touchpad auto-detect",
-                            detail: format!(
+                        report.checks.push(DoctorCheck::new(
+                            CheckStatus::Fail,
+                            DoctorSection::Device,
+                            "touchpad",
+                            format!(
                                 "no touchpad candidates among {} readable event device(s)",
                                 discovery.summaries.len()
                             ),
-                        });
+                        ));
                         None
                     }
                     [candidate] => {
-                        report.checks.push(DoctorCheck {
-                            status: CheckStatus::Ok,
-                            name: "touchpad auto-detect",
-                            detail: format_device_line(candidate),
-                        });
+                        report.checks.push(DoctorCheck::new(
+                            CheckStatus::Ok,
+                            DoctorSection::Device,
+                            "touchpad",
+                            format_device_line(candidate),
+                        ));
                         Some(candidate.path.clone())
                     }
                     _ => {
@@ -514,23 +625,25 @@ fn check_touchpad_selection(
                             .map(|candidate| candidate.path.display().to_string())
                             .collect::<Vec<_>>()
                             .join(", ");
-                        report.checks.push(DoctorCheck {
-                            status: CheckStatus::Fail,
-                            name: "touchpad auto-detect",
-                            detail: format!(
+                        report.checks.push(DoctorCheck::new(
+                            CheckStatus::Fail,
+                            DoctorSection::Device,
+                            "touchpad",
+                            format!(
                                 "multiple touchpad candidates found; pass --device explicitly: {devices}"
                             ),
-                        });
+                        ));
                         None
                     }
                 }
             }
             Err(err) => {
-                report.checks.push(DoctorCheck {
-                    status: CheckStatus::Fail,
-                    name: "touchpad auto-detect",
-                    detail: format!("failed to list {}: {err}", input_root.display()),
-                });
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Device,
+                    "touchpad",
+                    format!("failed to list {}: {err}", input_root.display()),
+                ));
                 None
             }
         },
@@ -539,29 +652,32 @@ fn check_touchpad_selection(
 
 fn check_touchpad_readable(path: Option<&Path>, report: &mut DoctorReport) -> bool {
     let Some(path) = path else {
-        report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
-            name: "touchpad readable",
-            detail: "skipped because no touchpad event node is selected".to_string(),
-        });
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Fail,
+            DoctorSection::Device,
+            "input",
+            "skipped because no touchpad event node is selected",
+        ));
         return false;
     };
 
     match Device::open(path) {
         Ok(_) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "touchpad readable",
-                detail: format!("{} can be opened by current user", path.display()),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Device,
+                "input",
+                format!("{} can be opened by current user", path.display()),
+            ));
             true
         }
         Err(err) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "touchpad readable",
-                detail: format!("failed to open {}: {err}", path.display()),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Device,
+                "input",
+                format!("failed to open {}: {err}", path.display()),
+            ));
             false
         }
     }
@@ -570,30 +686,33 @@ fn check_touchpad_readable(path: Option<&Path>, report: &mut DoctorReport) -> bo
 fn check_uinput(path: &Path, report: &mut DoctorReport) -> bool {
     match OpenOptions::new().read(true).write(true).open(path) {
         Ok(_) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "/dev/uinput",
-                detail: format!("{} is readable and writable", path.display()),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Device,
+                "uinput",
+                format!("{} is readable and writable", path.display()),
+            ));
             true
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "/dev/uinput",
-                detail: format!(
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Device,
+                "uinput",
+                format!(
                     "{} is missing; load the uinput kernel module",
                     path.display()
                 ),
-            });
+            ));
             false
         }
         Err(err) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "/dev/uinput",
-                detail: format!("failed to open {} read/write: {err}", path.display()),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Device,
+                "uinput",
+                format!("failed to open {} read/write: {err}", path.display()),
+            ));
             false
         }
     }
@@ -606,11 +725,12 @@ fn check_uaccess_tags(
     report: &mut DoctorReport,
 ) {
     let Some(touchpad_path) = touchpad_path else {
-        report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
-            name: "uaccess tags",
-            detail: "skipped because no touchpad event node is selected".to_string(),
-        });
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Fail,
+            DoctorSection::Access,
+            "udev tags",
+            "skipped because no touchpad event node is selected",
+        ));
         return;
     };
 
@@ -624,32 +744,35 @@ fn check_uaccess_tags(
                 && has_tag(&uinput_tags, "uaccess")
                 && has_tag(&uinput_tags, "seat") =>
         {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "uaccess tags",
-                detail: format!(
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Access,
+                "udev tags",
+                format!(
                     "{} and {} have current udev tags seat,uaccess",
                     touchpad_path.display(),
                     uinput_path.display()
                 ),
-            });
+            ));
         }
         (Ok(touchpad_tags), Ok(uinput_tags)) => {
-            report.checks.push(DoctorCheck {
-                status: fallback_sensitive_status(device_access_ok),
-                name: "uaccess tags",
-                detail: format!(
+            report.checks.push(DoctorCheck::new(
+                access_model_gap_status(device_access_ok),
+                DoctorSection::Access,
+                "udev tags",
+                format!(
                     "missing seat/uaccess current tags; touchpad={touchpad_tags:?} uinput={uinput_tags:?}{}",
-                    fallback_context(device_access_ok),
+                    access_model_gap_note(device_access_ok),
                 ),
-            });
+            ));
         }
         (Err(err), _) | (_, Err(err)) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "uaccess tags",
-                detail: err,
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Access,
+                "udev tags",
+                err,
+            ));
         }
     }
 }
@@ -682,21 +805,23 @@ fn check_uaccess_acl(
     report: &mut DoctorReport,
 ) {
     let Some(touchpad_path) = touchpad_path else {
-        report.checks.push(DoctorCheck {
-            status: CheckStatus::Fail,
-            name: "uaccess ACL",
-            detail: "skipped because no touchpad event node is selected".to_string(),
-        });
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Fail,
+            DoctorSection::Access,
+            "acl",
+            "skipped because no touchpad event node is selected",
+        ));
         return;
     };
 
     let username = current_username();
     let Some(username) = username else {
-        report.checks.push(DoctorCheck {
-            status: CheckStatus::Warn,
-            name: "uaccess ACL",
-            detail: "could not determine current username for ACL inspection".to_string(),
-        });
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Warn,
+            DoctorSection::Access,
+            "acl",
+            "could not determine current username for ACL inspection",
+        ));
         return;
     };
 
@@ -704,28 +829,31 @@ fn check_uaccess_acl(
     let uinput_acl = getfacl_grants_user(uinput_path, &username);
 
     match (touchpad_acl, uinput_acl) {
-        (Ok(true), Ok(true)) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Ok,
-            name: "uaccess ACL",
-            detail: format!(
+        (Ok(true), Ok(true)) => report.checks.push(DoctorCheck::new(
+            CheckStatus::Ok,
+            DoctorSection::Access,
+            "acl",
+            format!(
                 "user {username} has rw ACL on {} and {}",
                 touchpad_path.display(),
                 uinput_path.display()
             ),
-        }),
-        (Ok(touchpad_ok), Ok(uinput_ok)) => report.checks.push(DoctorCheck {
-            status: fallback_sensitive_status(device_access_ok),
-            name: "uaccess ACL",
-            detail: format!(
+        )),
+        (Ok(touchpad_ok), Ok(uinput_ok)) => report.checks.push(DoctorCheck::new(
+            access_model_gap_status(device_access_ok),
+            DoctorSection::Access,
+            "acl",
+            format!(
                 "missing rw ACL for user {username}; touchpad_acl={touchpad_ok} uinput_acl={uinput_ok}{}",
-                fallback_context(device_access_ok),
+                access_model_gap_note(device_access_ok),
             ),
-        }),
-        (Err(err), _) | (_, Err(err)) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Warn,
-            name: "uaccess ACL",
-            detail: err,
-        }),
+        )),
+        (Err(err), _) | (_, Err(err)) => report.checks.push(DoctorCheck::new(
+            CheckStatus::Warn,
+            DoctorSection::Access,
+            "acl",
+            err,
+        )),
     }
 }
 
@@ -762,38 +890,42 @@ fn check_logind_seat(device_access_ok: bool, report: &mut DoctorReport) {
                 && output.stdout.contains("State: active")
                 && output.stdout.contains("Seat: seat") =>
         {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "logind seat",
-                detail: "current session is active on a local seat".to_string(),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Session,
+                "seat",
+                "current session is active on a local seat",
+            ));
         }
-        Ok(output) if output.status_success => report.checks.push(DoctorCheck {
-            status: fallback_sensitive_status(device_access_ok),
-            name: "logind seat",
-            detail: format!(
+        Ok(output) if output.status_success => report.checks.push(DoctorCheck::new(
+            access_model_gap_status(device_access_ok),
+            DoctorSection::Session,
+            "seat",
+            format!(
                 "current loginctl session is not active on a local seat{}",
-                fallback_context(device_access_ok)
+                access_model_gap_note(device_access_ok)
             ),
-        }),
-        Ok(output) => report.checks.push(DoctorCheck {
-            status: fallback_sensitive_status(device_access_ok),
-            name: "logind seat",
-            detail: format!(
+        )),
+        Ok(output) => report.checks.push(DoctorCheck::new(
+            access_model_gap_status(device_access_ok),
+            DoctorSection::Session,
+            "seat",
+            format!(
                 "loginctl session-status failed: {}{}",
                 output.stderr_or_stdout(),
-                fallback_context(device_access_ok)
+                access_model_gap_note(device_access_ok)
             ),
-        }),
-        Err(err) => report.checks.push(DoctorCheck {
-            status: fallback_sensitive_status(device_access_ok),
-            name: "logind seat",
-            detail: format!("{err}{}", fallback_context(device_access_ok)),
-        }),
+        )),
+        Err(err) => report.checks.push(DoctorCheck::new(
+            access_model_gap_status(device_access_ok),
+            DoctorSection::Session,
+            "seat",
+            format!("{err}{}", access_model_gap_note(device_access_ok)),
+        )),
     }
 }
 
-fn fallback_sensitive_status(device_access_ok: bool) -> CheckStatus {
+fn access_model_gap_status(device_access_ok: bool) -> CheckStatus {
     if device_access_ok {
         CheckStatus::Warn
     } else {
@@ -801,9 +933,9 @@ fn fallback_sensitive_status(device_access_ok: bool) -> CheckStatus {
     }
 }
 
-fn fallback_context(device_access_ok: bool) -> &'static str {
+fn access_model_gap_note(device_access_ok: bool) -> &'static str {
     if device_access_ok {
-        "; device access is currently functional, so group or broader filesystem permissions may be masking this"
+        "; device access is currently functional through another access model"
     } else {
         ""
     }
@@ -812,27 +944,30 @@ fn fallback_context(device_access_ok: bool) -> &'static str {
 fn check_systemd_user(report: &mut DoctorReport) -> bool {
     match command_output("systemctl", &["--user", "show-environment"]) {
         Ok(output) if output.status_success => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Ok,
-                name: "systemd user",
-                detail: "systemctl --user is available".to_string(),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Ok,
+                DoctorSection::Session,
+                "systemd",
+                "systemctl --user is available",
+            ));
             true
         }
         Ok(output) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "systemd user",
-                detail: format!("systemctl --user failed: {}", output.stderr_or_stdout()),
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Session,
+                "systemd",
+                format!("systemctl --user failed: {}", output.stderr_or_stdout()),
+            ));
             false
         }
         Err(err) => {
-            report.checks.push(DoctorCheck {
-                status: CheckStatus::Fail,
-                name: "systemd user",
-                detail: err,
-            });
+            report.checks.push(DoctorCheck::new(
+                CheckStatus::Fail,
+                DoctorSection::Session,
+                "systemd",
+                err,
+            ));
             false
         }
     }
@@ -844,11 +979,12 @@ fn check_service_status(
     report: &mut DoctorReport,
 ) {
     if !systemd_user_available {
-        report.checks.push(DoctorCheck {
-            status: CheckStatus::Warn,
-            name: "edgepad service",
-            detail: "skipped because systemctl --user is not available".to_string(),
-        });
+        report.checks.push(DoctorCheck::new(
+            CheckStatus::Warn,
+            DoctorSection::Service,
+            "unit",
+            "skipped because systemctl --user is not available",
+        ));
         return;
     }
 
@@ -873,44 +1009,52 @@ fn check_service_status(
             let active_state = property_value(&output.stdout, "ActiveState").unwrap_or("unknown");
             let sub_state = property_value(&output.stdout, "SubState").unwrap_or("unknown");
             if load_state == "not-found" {
-                report.checks.push(DoctorCheck {
-                    status: CheckStatus::Warn,
-                    name: "edgepad service",
-                    detail: format!("{service_name} is not installed in the user manager"),
-                });
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Warn,
+                    DoctorSection::Service,
+                    "unit",
+                    format!("{service_name} is not installed in the user manager"),
+                ));
             } else if active_state == "active" {
-                report.checks.push(DoctorCheck {
-                    status: CheckStatus::Ok,
-                    name: "edgepad service",
-                    detail: format!("{service_name} is active ({sub_state})"),
-                });
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Ok,
+                    DoctorSection::Service,
+                    "unit",
+                    format!("{service_name} is active ({sub_state})"),
+                ));
             } else if active_state == "failed" {
-                report.checks.push(DoctorCheck {
-                    status: CheckStatus::Fail,
-                    name: "edgepad service",
-                    detail: format!("{service_name} is failed ({sub_state})"),
-                });
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Fail,
+                    DoctorSection::Service,
+                    "unit",
+                    format!("{service_name} is failed ({sub_state})"),
+                ));
             } else {
-                report.checks.push(DoctorCheck {
-                    status: CheckStatus::Warn,
-                    name: "edgepad service",
-                    detail: format!("{service_name} is loaded={load_state} active={active_state} sub={sub_state}"),
-                });
+                report.checks.push(DoctorCheck::new(
+                    CheckStatus::Warn,
+                    DoctorSection::Service,
+                    "unit",
+                    format!(
+                        "{service_name} is loaded={load_state} active={active_state} sub={sub_state}"
+                    ),
+                ));
             }
         }
-        Ok(output) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Warn,
-            name: "edgepad service",
-            detail: format!(
+        Ok(output) => report.checks.push(DoctorCheck::new(
+            CheckStatus::Warn,
+            DoctorSection::Service,
+            "unit",
+            format!(
                 "could not inspect {service_name}: {}",
                 output.stderr_or_stdout()
             ),
-        }),
-        Err(err) => report.checks.push(DoctorCheck {
-            status: CheckStatus::Warn,
-            name: "edgepad service",
-            detail: err,
-        }),
+        )),
+        Err(err) => report.checks.push(DoctorCheck::new(
+            CheckStatus::Warn,
+            DoctorSection::Service,
+            "unit",
+            err,
+        )),
     }
 }
 
@@ -1015,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn falls_back_to_static_tags_when_current_tags_are_absent() {
+    fn uses_static_tags_when_current_tags_are_absent() {
         let tags = parse_udev_current_tags("DEVNAME=/dev/uinput\nTAGS=:seat:uaccess:\n");
 
         assert_eq!(tags, vec!["seat", "uaccess"]);
@@ -1034,15 +1178,15 @@ mod tests {
     }
 
     #[test]
-    fn fallback_sensitive_status_warns_when_device_access_is_functional() {
-        assert_eq!(fallback_sensitive_status(true), CheckStatus::Warn);
-        assert_eq!(fallback_sensitive_status(false), CheckStatus::Fail);
+    fn access_model_gap_status_warns_when_device_access_is_functional() {
+        assert_eq!(access_model_gap_status(true), CheckStatus::Warn);
+        assert_eq!(access_model_gap_status(false), CheckStatus::Fail);
     }
 
     #[test]
-    fn fallback_context_explains_functional_non_uaccess_access() {
-        assert!(fallback_context(true).contains("device access is currently functional"));
-        assert_eq!(fallback_context(false), "");
+    fn access_model_gap_note_explains_functional_non_uaccess_access() {
+        assert!(access_model_gap_note(true).contains("another access model"));
+        assert_eq!(access_model_gap_note(false), "");
     }
 
     #[test]
@@ -1066,7 +1210,7 @@ mod tests {
 
         assert_eq!(
             active_zones_detail(&config),
-            "active_zones=right,top inactive_zones=left,bottom edge_widths=left=0.000 right=0.200 top=0.200 bottom=0.000"
+            "claiming right, top; passthrough left, bottom; widths: left off, right 20.0%, top 20.0%, bottom off"
         );
     }
 
@@ -1132,7 +1276,7 @@ mod tests {
         assert_eq!(report.checks.len(), 1);
         assert_eq!(report.checks[0].status, CheckStatus::Fail);
         assert!(report.checks[0].detail.contains("not found"));
-        assert!(report.checks[0].detail.contains("gestures[0] right.up"));
+        assert!(report.checks[0].detail.contains("right.up"));
     }
 
     #[test]
@@ -1161,21 +1305,9 @@ mod tests {
     fn report_counts_failures_warnings_and_successes() {
         let report = DoctorReport {
             checks: vec![
-                DoctorCheck {
-                    status: CheckStatus::Ok,
-                    name: "a",
-                    detail: String::new(),
-                },
-                DoctorCheck {
-                    status: CheckStatus::Warn,
-                    name: "b",
-                    detail: String::new(),
-                },
-                DoctorCheck {
-                    status: CheckStatus::Fail,
-                    name: "c",
-                    detail: String::new(),
-                },
+                DoctorCheck::new(CheckStatus::Ok, DoctorSection::Config, "a", ""),
+                DoctorCheck::new(CheckStatus::Warn, DoctorSection::Config, "b", ""),
+                DoctorCheck::new(CheckStatus::Fail, DoctorSection::Config, "c", ""),
             ],
         };
 

@@ -33,37 +33,37 @@ fn doctor_cli_checks_config_and_action_executables() {
 
     assert!(!output.status.success(), "doctor should report failures");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("config path"), "stdout was: {stdout}");
+    assert!(stdout.contains("Config"), "stdout was: {stdout}");
+    assert!(stdout.contains("path"), "stdout was: {stdout}");
     assert!(
         stdout.contains(&config_path.display().to_string()),
         "stdout was: {stdout}"
     );
-    assert!(stdout.contains("config parse"), "stdout was: {stdout}");
+    assert!(stdout.contains("file"), "stdout was: {stdout}");
     assert!(
-        stdout.contains("gesture_bindings=1"),
+        stdout.contains("device auto, edge width 10.0%, 1 gesture binding"),
         "stdout was: {stdout}"
     );
-    assert!(stdout.contains("active zones"), "stdout was: {stdout}");
+    assert!(stdout.contains("zones"), "stdout was: {stdout}");
     assert!(
-        stdout.contains("active_zones=right"),
-        "stdout was: {stdout}"
-    );
-    assert!(
-        stdout.contains("inactive_zones=left,top,bottom"),
+        stdout.contains("claiming right; passthrough left, top, bottom"),
         "stdout was: {stdout}"
     );
     assert!(
-        stdout.contains("edge_widths=left=0.000 right=0.100 top=0.000 bottom=0.000"),
+        stdout.contains("widths: left off, right 10.0%, top off, bottom off"),
         "stdout was: {stdout}"
     );
-    assert!(stdout.contains("action executable"), "stdout was: {stdout}");
+    assert!(stdout.contains("Actions"), "stdout was: {stdout}");
+    assert!(stdout.contains("command"), "stdout was: {stdout}");
     assert!(
         stdout.contains(&missing_action.display().to_string()),
         "stdout was: {stdout}"
     );
-    assert!(stdout.contains("not found"), "stdout was: {stdout}");
+    assert!(stdout.contains("problem:"), "stdout was: {stdout}");
+    assert!(stdout.contains("right.up"), "stdout was: {stdout}");
+    assert!(stdout.contains("Summary"), "stdout was: {stdout}");
     assert!(
-        stdout.contains("gestures[0] right.up"),
+        stdout.contains("result: problems found"),
         "stdout was: {stdout}"
     );
 
@@ -98,7 +98,8 @@ fn doctor_cli_uses_config_device_without_cli_override() {
 
     assert!(!output.status.success(), "doctor should report failures");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("config device"), "stdout was: {stdout}");
+    assert!(stdout.contains("Config"), "stdout was: {stdout}");
+    assert!(stdout.contains("device"), "stdout was: {stdout}");
     assert!(
         stdout.contains(&missing_device.display().to_string()),
         "stdout was: {stdout}"

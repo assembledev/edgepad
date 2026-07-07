@@ -13,7 +13,7 @@ use edgepad::config::{
 };
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
-use edgepad::doctor::{run_doctor, DoctorConfig, DoctorReport};
+use edgepad::doctor::{run_doctor, DoctorCheck, DoctorConfig, DoctorReport, DoctorSection};
 use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
     write_raw_events_with_limit, WriteEventsResult,
@@ -530,22 +530,56 @@ fn doctor(config: &DoctorConfig) -> Result<i32, String> {
 
 fn print_doctor_report(report: &DoctorReport) {
     println!("edgepad doctor");
-    for check in &report.checks {
-        println!(
-            "{:<4} {:<22} {}",
-            check.status.label(),
-            check.name,
-            check.detail
-        );
+
+    for section in DoctorSection::ALL {
+        let checks = report
+            .checks
+            .iter()
+            .filter(|check| check.section == section)
+            .collect::<Vec<_>>();
+        if checks.is_empty() {
+            continue;
+        }
+
+        println!();
+        println!("{}", section.title());
+        for check in checks {
+            print_doctor_check(check);
+        }
     }
+
     let counts = report.counts();
+    println!();
+    println!("Summary");
     println!(
-        "summary: ok={} warn={} fail={}",
+        "  ok={} warn={} fail={}",
         counts.ok, counts.warn, counts.fail
     );
-    match report.has_failures() {
-        true => println!("result: problems found"),
-        false => println!("result: ok"),
+    println!("  result: {}", doctor_result_label(report));
+}
+
+fn print_doctor_check(check: &DoctorCheck) {
+    let mut detail_lines = check.detail.lines();
+    let first_detail = detail_lines.next().unwrap_or("");
+    println!(
+        "  {:<5} {:<10} {}",
+        check.status.label(),
+        check.label,
+        first_detail
+    );
+    for line in detail_lines {
+        println!("  {:<5} {:<10} {}", "", "", line);
+    }
+}
+
+fn doctor_result_label(report: &DoctorReport) -> &'static str {
+    let counts = report.counts();
+    if counts.fail > 0 {
+        "problems found"
+    } else if counts.warn > 0 {
+        "usable with warnings"
+    } else {
+        "ready"
     }
 }
 
