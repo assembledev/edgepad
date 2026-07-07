@@ -62,6 +62,10 @@ fn subcommand_help_flags_print_command_help() {
     for (command, usage) in [
         ("devices", "edgepad devices [--root <input-root>] [--all]"),
         (
+            "status",
+            "edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>]",
+        ),
+        (
             "doctor",
             "edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>]",
         ),

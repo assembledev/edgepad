@@ -27,15 +27,17 @@ use edgepad::raw::{
     RecordingRawOutputSink,
 };
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
+use edgepad::status::{run_status, StatusConfig, StatusReport};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const HELP: &str = "\
 Usage:
   edgepad <command> [options]
 
 Commands:
   devices     List readable input devices and touchpad candidates
+  status      Show a short daemon/config/device summary
   doctor      Check runtime prerequisites and service health
   daemon      Run the live edge-gesture proxy
   dump        Capture touchpad events into a replay fixture
@@ -120,6 +122,18 @@ Options:
       --uinput <path>             uinput device path [default: /dev/uinput]
       --service <unit>            systemd user unit to inspect [default: edgepad.service]
 ";
+const STATUS_USAGE: &str = "usage: edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>]";
+const STATUS_HELP: &str = "\
+Usage:
+  edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>]
+
+Options:
+      --config <file>             TOML config path
+                                  [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
+      --device auto|<event-node>  Override touchpad device selection from config
+      --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
+      --service <unit>            systemd user unit to inspect [default: edgepad.service]
+";
 const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DAEMON_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -194,6 +208,15 @@ fn run() -> Result<i32, String> {
             }
             let config = parse_doctor_args(args.into_iter())?;
             doctor(&config)
+        }
+        Some("status") => {
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(STATUS_HELP);
+                return Ok(0);
+            }
+            let config = parse_status_args(args.into_iter())?;
+            status(&config)
         }
         Some("dump") => {
             let args = args.collect::<Vec<_>>();
@@ -302,6 +325,35 @@ fn parse_doctor_args(mut args: impl Iterator<Item = String>) -> Result<DoctorCon
                 return Err(format!("unknown doctor option {other}"));
             }
             _ => return Err(DOCTOR_USAGE.to_string()),
+        }
+    }
+
+    Ok(config)
+}
+
+fn parse_status_args(mut args: impl Iterator<Item = String>) -> Result<StatusConfig, String> {
+    let mut config = StatusConfig::default();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                config.config_path =
+                    Some(args.next().ok_or_else(|| STATUS_USAGE.to_string())?.into());
+            }
+            "--device" => {
+                let raw_value = args.next().ok_or_else(|| STATUS_USAGE.to_string())?;
+                config.device_override = Some(DeviceConfig::parse(&raw_value)?);
+            }
+            "--input-root" => {
+                config.input_root = args.next().ok_or_else(|| STATUS_USAGE.to_string())?.into();
+            }
+            "--service" => {
+                config.service_name = args.next().ok_or_else(|| STATUS_USAGE.to_string())?;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown status option {other}"));
+            }
+            _ => return Err(STATUS_USAGE.to_string()),
         }
     }
 
@@ -526,6 +578,24 @@ fn doctor(config: &DoctorConfig) -> Result<i32, String> {
     } else {
         Ok(0)
     }
+}
+
+fn status(config: &StatusConfig) -> Result<i32, String> {
+    let report = run_status(config);
+    print_status_report(&report);
+    Ok(report.result.exit_code())
+}
+
+fn print_status_report(report: &StatusReport) {
+    println!("edgepad status");
+    println!();
+
+    for line in &report.lines {
+        println!("{:<8} {}", line.subject.label(), line.detail);
+    }
+
+    println!();
+    println!("{:<8} {}", "Result", report.result.label());
 }
 
 fn print_doctor_report(report: &DoctorReport) {

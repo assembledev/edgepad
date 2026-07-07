@@ -10,6 +10,7 @@ pub mod doctor;
 pub mod dump;
 pub mod proxy;
 pub mod raw;
+pub mod status;
 pub mod uinput;
 
 pub mod core {
