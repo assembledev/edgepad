@@ -87,7 +87,13 @@ cargo run -- --help
 
 ## Quick start
 
-Check config, device access, action executables, and service state:
+Check the current daemon, config, device, zones, and actions:
+
+```bash
+edgepad status
+```
+
+Run deeper diagnostics for device access, action executables, and service state:
 
 ```bash
 edgepad doctor
@@ -258,6 +264,7 @@ Replace `/dev/input/eventX` with the touchpad node reported by `edgepad devices`
 
 ```text
 edgepad devices     List readable input devices and touchpad candidates
+edgepad status      Show a short daemon/config/device summary
 edgepad doctor      Check config, runtime prerequisites, actions, and service health
 edgepad daemon      Run the live edge-gesture proxy
 edgepad dump        Capture touchpad events into a replay fixture

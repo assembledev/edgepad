@@ -13,7 +13,7 @@ use edgepad::config::{
 };
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
-use edgepad::doctor::{run_doctor, DoctorConfig, DoctorReport};
+use edgepad::doctor::{run_doctor, DoctorCheck, DoctorConfig, DoctorReport, DoctorSection};
 use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
     write_raw_events_with_limit, WriteEventsResult,
@@ -27,15 +27,17 @@ use edgepad::raw::{
     RecordingRawOutputSink,
 };
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
+use edgepad::status::{run_status, StatusConfig, StatusReport};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const HELP: &str = "\
 Usage:
   edgepad <command> [options]
 
 Commands:
   devices     List readable input devices and touchpad candidates
+  status      Show a short daemon/config/device summary
   doctor      Check runtime prerequisites and service health
   daemon      Run the live edge-gesture proxy
   dump        Capture touchpad events into a replay fixture
@@ -120,6 +122,18 @@ Options:
       --uinput <path>             uinput device path [default: /dev/uinput]
       --service <unit>            systemd user unit to inspect [default: edgepad.service]
 ";
+const STATUS_USAGE: &str = "usage: edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>]";
+const STATUS_HELP: &str = "\
+Usage:
+  edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>]
+
+Options:
+      --config <file>             TOML config path
+                                  [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
+      --device auto|<event-node>  Override touchpad device selection from config
+      --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
+      --service <unit>            systemd user unit to inspect [default: edgepad.service]
+";
 const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DAEMON_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -194,6 +208,15 @@ fn run() -> Result<i32, String> {
             }
             let config = parse_doctor_args(args.into_iter())?;
             doctor(&config)
+        }
+        Some("status") => {
+            let args = args.collect::<Vec<_>>();
+            if is_help_request(&args) {
+                print_help(STATUS_HELP);
+                return Ok(0);
+            }
+            let config = parse_status_args(args.into_iter())?;
+            status(&config)
         }
         Some("dump") => {
             let args = args.collect::<Vec<_>>();
@@ -302,6 +325,35 @@ fn parse_doctor_args(mut args: impl Iterator<Item = String>) -> Result<DoctorCon
                 return Err(format!("unknown doctor option {other}"));
             }
             _ => return Err(DOCTOR_USAGE.to_string()),
+        }
+    }
+
+    Ok(config)
+}
+
+fn parse_status_args(mut args: impl Iterator<Item = String>) -> Result<StatusConfig, String> {
+    let mut config = StatusConfig::default();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                config.config_path =
+                    Some(args.next().ok_or_else(|| STATUS_USAGE.to_string())?.into());
+            }
+            "--device" => {
+                let raw_value = args.next().ok_or_else(|| STATUS_USAGE.to_string())?;
+                config.device_override = Some(DeviceConfig::parse(&raw_value)?);
+            }
+            "--input-root" => {
+                config.input_root = args.next().ok_or_else(|| STATUS_USAGE.to_string())?.into();
+            }
+            "--service" => {
+                config.service_name = args.next().ok_or_else(|| STATUS_USAGE.to_string())?;
+            }
+            other if other.starts_with('-') => {
+                return Err(format!("unknown status option {other}"));
+            }
+            _ => return Err(STATUS_USAGE.to_string()),
         }
     }
 
@@ -528,24 +580,76 @@ fn doctor(config: &DoctorConfig) -> Result<i32, String> {
     }
 }
 
+fn status(config: &StatusConfig) -> Result<i32, String> {
+    let report = run_status(config);
+    print_status_report(&report);
+    Ok(report.result.exit_code())
+}
+
+fn print_status_report(report: &StatusReport) {
+    println!("edgepad status");
+    println!();
+
+    for line in &report.lines {
+        println!("{:<8} {}", line.subject.label(), line.detail);
+    }
+
+    println!();
+    println!("{:<8} {}", "Result", report.result.label());
+}
+
 fn print_doctor_report(report: &DoctorReport) {
     println!("edgepad doctor");
-    for check in &report.checks {
-        println!(
-            "{:<4} {:<22} {}",
-            check.status.label(),
-            check.name,
-            check.detail
-        );
+
+    for section in DoctorSection::ALL {
+        let checks = report
+            .checks
+            .iter()
+            .filter(|check| check.section == section)
+            .collect::<Vec<_>>();
+        if checks.is_empty() {
+            continue;
+        }
+
+        println!();
+        println!("{}", section.title());
+        for check in checks {
+            print_doctor_check(check);
+        }
     }
+
     let counts = report.counts();
+    println!();
+    println!("Summary");
     println!(
-        "summary: ok={} warn={} fail={}",
+        "  ok={} warn={} fail={}",
         counts.ok, counts.warn, counts.fail
     );
-    match report.has_failures() {
-        true => println!("result: problems found"),
-        false => println!("result: ok"),
+    println!("  result: {}", doctor_result_label(report));
+}
+
+fn print_doctor_check(check: &DoctorCheck) {
+    let mut detail_lines = check.detail.lines();
+    let first_detail = detail_lines.next().unwrap_or("");
+    println!(
+        "  {:<5} {:<10} {}",
+        check.status.label(),
+        check.label,
+        first_detail
+    );
+    for line in detail_lines {
+        println!("  {:<5} {:<10} {}", "", "", line);
+    }
+}
+
+fn doctor_result_label(report: &DoctorReport) -> &'static str {
+    let counts = report.counts();
+    if counts.fail > 0 {
+        "problems found"
+    } else if counts.warn > 0 {
+        "usable with warnings"
+    } else {
+        "ready"
     }
 }
 
@@ -740,11 +844,12 @@ fn run_daemon_proxy_with_startup_retry(
         }
 
         let run_result = config.device.resolve(input_root).and_then(|device_path| {
+            let edge_widths = config.active_edge_widths();
             if last_announced_device.as_ref() != Some(&device_path) {
                 eprintln!(
-                    "edgepad daemon: device={} edge_width={:.3} gesture_bindings={}",
+                    "edgepad daemon: device={} edge_widths={} gesture_bindings={}",
                     device_path.display(),
-                    config.edge_width,
+                    edge_widths_label(edge_widths),
                     config.gestures.len()
                 );
                 last_announced_device = Some(device_path.clone());
@@ -757,7 +862,7 @@ fn run_daemon_proxy_with_startup_retry(
                         stop: stop.clone(),
                         idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
                     },
-                    edge_widths: EdgeWidths::all(config.edge_width),
+                    edge_widths,
                     mode: ProxyMode::UinputGrab,
                 },
                 action_dispatcher,
@@ -898,7 +1003,7 @@ fn print_proxy_summary(summary: &ProxyRunSummary) {
     if let Some(requested_frame_boundaries) = summary.requested_frame_boundaries {
         println!("requested_frame_boundaries: {requested_frame_boundaries}");
     }
-    println!("edge_width: {:.3}", summary.edge_widths.left);
+    println!("edge_widths: {}", edge_widths_label(summary.edge_widths));
     let stats = &summary.stats;
     println!("input_frame_boundaries: {}", stats.input_frame_boundaries);
     println!("raw_frames: {}", stats.raw_frames);
@@ -956,6 +1061,13 @@ fn default_capabilities() -> Capabilities {
         x: AxisRange { min: 0, max: 1000 },
         y: AxisRange { min: 0, max: 700 },
     }
+}
+
+fn edge_widths_label(widths: EdgeWidths) -> String {
+    format!(
+        "left={:.3} right={:.3} top={:.3} bottom={:.3}",
+        widths.left, widths.right, widths.top, widths.bottom
+    )
 }
 
 fn replay(path: &Path) -> Result<(), String> {
@@ -1167,6 +1279,19 @@ mod tests {
         assert_eq!(
             dump_next_command(DumpFormat::Replay, Path::new("bug.ev")),
             "edgepad replay bug.ev"
+        );
+    }
+
+    #[test]
+    fn edge_widths_label_prints_all_zones() {
+        assert_eq!(
+            edge_widths_label(EdgeWidths {
+                left: 0.0,
+                right: 0.1,
+                top: 0.2,
+                bottom: 0.3,
+            }),
+            "left=0.000 right=0.100 top=0.200 bottom=0.300"
         );
     }
 
