@@ -43,6 +43,19 @@ fn doctor_cli_checks_config_and_action_executables() {
         stdout.contains("gesture_bindings=1"),
         "stdout was: {stdout}"
     );
+    assert!(stdout.contains("active zones"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("active_zones=right"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("inactive_zones=left,top,bottom"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("edge_widths=left=0.000 right=0.100 top=0.000 bottom=0.000"),
+        "stdout was: {stdout}"
+    );
     assert!(stdout.contains("action executable"), "stdout was: {stdout}");
     assert!(
         stdout.contains(&missing_action.display().to_string()),

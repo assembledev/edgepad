@@ -12,7 +12,7 @@ use crate::config::{
     default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
     GestureActionConfig,
 };
-use crate::core::{GestureDirection, Zone};
+use crate::core::{EdgeWidths, GestureDirection, Zone};
 use crate::device::{discover_device_report, format_device_line, touchpad_candidates};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +222,54 @@ fn check_gesture_bindings(config: &EdgepadConfig, report: &mut DoctorReport) {
         name: "gesture bindings",
         detail: format!("{} gesture binding(s) configured", config.gestures.len()),
     });
+    report.checks.push(DoctorCheck {
+        status: CheckStatus::Ok,
+        name: "active zones",
+        detail: active_zones_detail(config),
+    });
+}
+
+fn active_zones_detail(config: &EdgepadConfig) -> String {
+    let active_zones: Vec<Zone> = ordered_zones()
+        .iter()
+        .copied()
+        .filter(|zone| config.gestures.iter().any(|binding| binding.zone == *zone))
+        .collect();
+    let inactive_zones: Vec<Zone> = ordered_zones()
+        .iter()
+        .copied()
+        .filter(|zone| !active_zones.contains(zone))
+        .collect();
+
+    format!(
+        "active_zones={} inactive_zones={} edge_widths={}",
+        zone_list_label(&active_zones),
+        zone_list_label(&inactive_zones),
+        edge_widths_label(config.active_edge_widths())
+    )
+}
+
+fn ordered_zones() -> [Zone; 4] {
+    [Zone::Left, Zone::Right, Zone::Top, Zone::Bottom]
+}
+
+fn zone_list_label(zones: &[Zone]) -> String {
+    if zones.is_empty() {
+        return "none".to_string();
+    }
+
+    zones
+        .iter()
+        .map(|zone| zone_name(*zone))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn edge_widths_label(widths: EdgeWidths) -> String {
+    format!(
+        "left={:.3} right={:.3} top={:.3} bottom={:.3}",
+        widths.left, widths.right, widths.top, widths.bottom
+    )
 }
 
 fn check_config_device(
@@ -955,7 +1003,7 @@ fn direction_name(direction: GestureDirection) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::GestureBindingConfig;
+    use crate::config::{GestureActionConfig, GestureBindingConfig};
 
     #[test]
     fn parses_current_tags_from_udevadm_properties() {
@@ -995,6 +1043,31 @@ mod tests {
     fn fallback_context_explains_functional_non_uaccess_access() {
         assert!(fallback_context(true).contains("device access is currently functional"));
         assert_eq!(fallback_context(false), "");
+    }
+
+    #[test]
+    fn active_zones_detail_reports_daemon_claim_widths() {
+        let config = EdgepadConfig {
+            device: DeviceConfig::Auto,
+            edge_width: 0.20,
+            gestures: vec![
+                GestureBindingConfig {
+                    zone: Zone::Right,
+                    direction: GestureDirection::Up,
+                    action: GestureActionConfig::Log,
+                },
+                GestureBindingConfig {
+                    zone: Zone::Top,
+                    direction: GestureDirection::Left,
+                    action: GestureActionConfig::Log,
+                },
+            ],
+        };
+
+        assert_eq!(
+            active_zones_detail(&config),
+            "active_zones=right,top inactive_zones=left,bottom edge_widths=left=0.000 right=0.200 top=0.200 bottom=0.000"
+        );
     }
 
     #[test]
