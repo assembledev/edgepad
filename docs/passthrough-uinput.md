@@ -22,7 +22,7 @@ Tune the edge zone for hardware validation:
 edgepad proxy --device /dev/input/event5 --frames 300 --edge-width 0.20 --dry-run
 ```
 
-The summary includes raw event volume, recognizer volume, passthrough frames, claimed-edge frames, composed output, cleanup output, settle output, gestures, and gesture counts by zone/direction.
+The summary includes raw event volume, recognizer volume, passthrough frames, claimed-edge frames, composed output, cleanup output, settle output, gestures, slider steps, and counts by zone/direction.
 
 ### Bounded grab/uinput proxy
 
@@ -67,14 +67,14 @@ device = "auto"
 edge_width = 0.10
 
 [[gestures]]
-zone = "right"
-direction = "up"
-action = ["notify-send", "edgepad", "right-up"]
-
-[[gestures]]
 zone = "top"
-direction = "right"
-action = ["notify-send", "edgepad", "top-right"]
+direction = "tap"
+action = ["notify-send", "edgepad", "play-pause"]
+
+[[sliders]]
+zone = "right"
+up = ["notify-send", "edgepad", "brightness-up"]
+down = ["notify-send", "edgepad", "brightness-down"]
 ```
 
 `device = "auto"` succeeds only when exactly one readable touchpad candidate is present. If auto-detection is ambiguous, choose a device from:

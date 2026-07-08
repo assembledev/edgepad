@@ -7,7 +7,12 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use crate::core::{Capabilities, EdgeWidths, Engine, Gesture, GestureDirection, Zone};
+#[cfg(test)]
+use crate::core::SliderAxis;
+use crate::core::{
+    Capabilities, EdgeWidths, Engine, Gesture, GestureDirection, SliderDirection, SliderSpec,
+    SliderStep, Zone,
+};
 use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
     extract_core_events, route_raw_frame, RawEvent, RawFrame, RawOutputComposer, RawOutputSink,
@@ -38,6 +43,7 @@ pub struct ProxyRunConfig {
     pub device_path: PathBuf,
     pub limit: ProxyRunLimit,
     pub edge_widths: EdgeWidths,
+    pub slider_specs: Vec<SliderSpec>,
     pub mode: ProxyMode,
 }
 
@@ -119,6 +125,8 @@ pub struct ProxyRuntimeStats {
     pub idle_drain_timed_out: bool,
     pub gestures: Vec<Gesture>,
     pub gesture_counts: BTreeMap<GestureCountKey, usize>,
+    pub slider_steps: Vec<SliderStep>,
+    pub slider_step_counts: BTreeMap<SliderStepCountKey, usize>,
     pub resync_required: bool,
 }
 
@@ -128,8 +136,16 @@ pub struct GestureCountKey {
     pub direction: GestureDirection,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SliderStepCountKey {
+    pub zone: Zone,
+    pub direction: SliderDirection,
+}
+
 pub trait GestureHandler {
     fn handle_gesture(&mut self, gesture: Gesture);
+
+    fn handle_slider_step(&mut self, _step: SliderStep) {}
 }
 
 #[derive(Debug, Default)]
@@ -181,6 +197,7 @@ where
         &config.limit,
         &mut sink,
         handler,
+        config.slider_specs.clone(),
     )?;
 
     Ok(ProxyRunSummary {
@@ -219,6 +236,7 @@ where
         &config.limit,
         &mut sink,
         handler,
+        config.slider_specs.clone(),
     );
     let settle_result = settle_after_uinput_proxy_run(capabilities, &mut sink, run_result);
     std::thread::sleep(UINPUT_UNGRAB_SETTLE_DELAY);
@@ -351,13 +369,14 @@ fn run_proxy_loop<S, H>(
     limit: &ProxyRunLimit,
     sink: &mut S,
     handler: &mut H,
+    slider_specs: Vec<SliderSpec>,
 ) -> Result<ProxyRuntimeStats, String>
 where
     S: RawOutputSink,
     S::Error: std::fmt::Debug,
     H: GestureHandler,
 {
-    let mut engine = Engine::new(capabilities, edge_widths);
+    let mut engine = Engine::with_sliders(capabilities, edge_widths, slider_specs);
     let mut composer = RawOutputComposer::new(capabilities);
     let mut stats = ProxyRuntimeStats::default();
     let mut touch_state = PhysicalTouchState::new(capabilities);
@@ -570,6 +589,14 @@ where
         stats.gestures.push(gesture);
         handler.handle_gesture(gesture);
     }
+    for step in routed.slider_steps.iter().copied() {
+        *stats
+            .slider_step_counts
+            .entry(slider_step_count_key(step))
+            .or_default() += 1;
+        stats.slider_steps.push(step);
+        handler.handle_slider_step(step);
+    }
 
     let output_frame = composer
         .compose_frame(&routed)
@@ -664,6 +691,13 @@ fn gesture_count_key(gesture: Gesture) -> GestureCountKey {
     GestureCountKey {
         zone: gesture.zone,
         direction: gesture.direction,
+    }
+}
+
+fn slider_step_count_key(step: SliderStep) -> SliderStepCountKey {
+    SliderStepCountKey {
+        zone: step.zone,
+        direction: step.direction,
     }
 }
 
@@ -979,11 +1013,16 @@ mod tests {
     #[derive(Debug, Default)]
     struct RecordingGestureHandler {
         gestures: Vec<Gesture>,
+        slider_steps: Vec<SliderStep>,
     }
 
     impl GestureHandler for RecordingGestureHandler {
         fn handle_gesture(&mut self, gesture: Gesture) {
             self.gestures.push(gesture);
+        }
+
+        fn handle_slider_step(&mut self, step: SliderStep) {
+            self.slider_steps.push(step);
         }
     }
 
@@ -1333,6 +1372,63 @@ mod tests {
     }
 
     #[test]
+    fn proxy_handler_receives_slider_steps_live() {
+        let capabilities = test_capabilities();
+        let mut engine = Engine::with_sliders(
+            capabilities,
+            EdgeWidths::all(0.10),
+            vec![SliderSpec {
+                zone: Zone::Right,
+                axis: SliderAxis::Vertical,
+                step: 0.09,
+            }],
+        );
+        let mut composer = RawOutputComposer::new(capabilities);
+        let mut sink = RecordingRawOutputSink::default();
+        let mut stats = ProxyRuntimeStats::default();
+        let mut handler = RecordingGestureHandler::default();
+        let frames = [
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(300),
+                RawEvent::abs_mt_position_x(980),
+                RawEvent::abs_mt_position_y(400),
+            ]),
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_position_y(610),
+            ]),
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(-1),
+            ]),
+        ];
+
+        for frame in &frames {
+            process_proxy_frame_with_handler(
+                &mut engine,
+                &mut composer,
+                &mut sink,
+                &mut stats,
+                frame,
+                &mut handler,
+            )
+            .expect("slider frames should process");
+        }
+
+        assert_eq!(handler.slider_steps, stats.slider_steps);
+        assert_eq!(handler.slider_steps.len(), 3);
+        assert!(stats.gestures.is_empty());
+        assert_eq!(
+            stats.slider_step_counts.get(&SliderStepCountKey {
+                zone: Zone::Right,
+                direction: SliderDirection::Down,
+            }),
+            Some(&3)
+        );
+    }
+
+    #[test]
     fn proxy_summary_preserves_runtime_metadata() {
         let config = ProxyRunConfig {
             device_path: PathBuf::from("/dev/input/event7"),
@@ -1341,6 +1437,7 @@ mod tests {
                 stop_after_limit: StopAfterFrameLimit::Immediately,
             },
             edge_widths: EdgeWidths::all(0.2),
+            slider_specs: Vec::new(),
             mode: ProxyMode::DryRun,
         };
         let summary = ProxyRunSummary {

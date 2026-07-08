@@ -170,6 +170,7 @@ fn sink_emit_errors_are_returned_without_syncing_partial_frames() {
                 RawEvent::abs_mt_position_y(300),
             ],
             gestures: vec![],
+            slider_steps: vec![],
             resync_required: false,
         },
         &mut sink,

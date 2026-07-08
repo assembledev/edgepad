@@ -11,7 +11,9 @@ use edgepad::actions::{ActionDispatcher, ActionDispatcherStats};
 use edgepad::config::{
     default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
 };
-use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
+use edgepad::core::{
+    AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, SliderDirection, Zone,
+};
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
 use edgepad::doctor::{run_doctor, DoctorCheck, DoctorConfig, DoctorReport, DoctorSection};
 use edgepad::dump::{
@@ -504,9 +506,9 @@ fn load_daemon_config(path: &Path) -> Result<EdgepadConfig, String> {
 }
 
 fn validate_daemon_config(config: &EdgepadConfig, config_path: &Path) -> Result<(), String> {
-    if config.gestures.is_empty() {
+    if config.gestures.is_empty() && config.sliders.is_empty() {
         return Err(format!(
-            "daemon config {} has no gesture bindings; add at least one [[gestures]] entry",
+            "daemon config {} has no bindings; add at least one [[gestures]] or [[sliders]] entry",
             config_path.display()
         ));
     }
@@ -779,6 +781,7 @@ fn proxy(args: &ProxyArgs) -> Result<(), String> {
             },
         },
         edge_widths: EdgeWidths::all(args.edge_width),
+        slider_specs: Vec::new(),
         mode: args.mode,
     })?;
     print_proxy_summary(&summary);
@@ -789,8 +792,11 @@ fn daemon(args: &DaemonArgs) -> Result<(), String> {
     let startup_retry_timeout = daemon_startup_retry_timeout()?;
     let stop = StopToken::new();
     install_daemon_signal_handlers(stop.clone())?;
-    let mut action_dispatcher =
-        ActionDispatcher::new(args.config.gestures.clone(), DAEMON_ACTION_QUEUE_CAPACITY)?;
+    let mut action_dispatcher = ActionDispatcher::new_with_sliders(
+        args.config.gestures.clone(),
+        args.config.sliders.clone(),
+        DAEMON_ACTION_QUEUE_CAPACITY,
+    )?;
     eprintln!("edgepad daemon: config={}", args.config_path.display());
     eprintln!("edgepad daemon: press Ctrl+C to stop");
 
@@ -847,10 +853,11 @@ fn run_daemon_proxy_with_startup_retry(
             let edge_widths = config.active_edge_widths();
             if last_announced_device.as_ref() != Some(&device_path) {
                 eprintln!(
-                    "edgepad daemon: device={} edge_widths={} gesture_bindings={}",
+                    "edgepad daemon: device={} edge_widths={} gesture_bindings={} sliders={}",
                     device_path.display(),
                     edge_widths_label(edge_widths),
-                    config.gestures.len()
+                    config.gestures.len(),
+                    config.sliders.len()
                 );
                 last_announced_device = Some(device_path.clone());
             }
@@ -863,6 +870,7 @@ fn run_daemon_proxy_with_startup_retry(
                         idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
                     },
                     edge_widths,
+                    slider_specs: config.slider_specs(),
                     mode: ProxyMode::UinputGrab,
                 },
                 action_dispatcher,
@@ -971,9 +979,11 @@ extern "C" fn handle_daemon_signal(_signal: libc::c_int) {
 
 fn print_action_summary(stats: &ActionDispatcherStats) {
     println!(
-        "actions: matched={} unmatched={} log={} queued={} dropped={} started={} succeeded={} failed={} worker_panics={} worker_shutdown_timeouts={}",
+        "actions: matched={} unmatched={} slider_matched={} slider_unmatched={} log={} queued={} dropped={} started={} succeeded={} failed={} worker_panics={} worker_shutdown_timeouts={}",
         stats.matched_gestures,
         stats.unmatched_gestures,
+        stats.matched_slider_steps,
+        stats.unmatched_slider_steps,
         stats.log_actions,
         stats.queued_commands,
         stats.dropped_commands,
@@ -1047,6 +1057,26 @@ fn print_proxy_summary(summary: &ProxyRunSummary) {
             direction_name(gesture.direction)
         );
     }
+    println!("slider_steps: {}", stats.slider_steps.len());
+    if !stats.slider_step_counts.is_empty() {
+        println!("slider_step_counts:");
+        for (key, count) in &stats.slider_step_counts {
+            println!(
+                "  zone={} direction={} count={count}",
+                zone_name(key.zone),
+                slider_direction_name(key.direction)
+            );
+        }
+    }
+    for step in &stats.slider_steps {
+        println!(
+            "slider_step slot={} tracking_id={} zone={} direction={}",
+            step.slot,
+            step.tracking_id,
+            zone_name(step.zone),
+            slider_direction_name(step.direction)
+        );
+    }
     println!("resync_required: {}", stats.resync_required);
     match summary.mode {
         ProxyMode::DryRun => println!("output: not emitted (--dry-run)"),
@@ -1092,6 +1122,10 @@ fn replay(path: &Path) -> Result<(), String> {
         .iter()
         .flat_map(|output| output.gestures.iter())
         .collect::<Vec<_>>();
+    let slider_steps = outputs
+        .iter()
+        .flat_map(|output| output.slider_steps.iter())
+        .collect::<Vec<_>>();
     let resync_required = outputs.iter().any(|output| output.resync_required);
 
     println!(
@@ -1130,8 +1164,19 @@ fn replay(path: &Path) -> Result<(), String> {
             direction_name(gesture.direction)
         );
     }
+    let slider_step_count = slider_steps.len();
+    println!("slider_steps: {slider_step_count}");
+    for step in slider_steps {
+        println!(
+            "slider_step slot={} tracking_id={} zone={} direction={}",
+            step.slot,
+            step.tracking_id,
+            zone_name(step.zone),
+            slider_direction_name(step.direction)
+        );
+    }
     println!("resync_required: {resync_required}");
-    print_replay_diagnosis(&stats, passthrough_events, gesture_count);
+    print_replay_diagnosis(&stats, passthrough_events, gesture_count, slider_step_count);
 
     Ok(())
 }
@@ -1155,6 +1200,7 @@ fn replay_raw(path: &Path) -> Result<(), String> {
         .sum::<usize>();
     let mut recognizer_passthrough_events = 0;
     let mut gestures = Vec::new();
+    let mut slider_steps = Vec::new();
     let mut resync_required = false;
     let mut sink = RecordingRawOutputSink::default();
 
@@ -1164,6 +1210,7 @@ fn replay_raw(path: &Path) -> Result<(), String> {
         recognizer_passthrough_events += routed.passthrough.len();
         resync_required |= routed.resync_required;
         gestures.extend(routed.gestures.iter().copied());
+        slider_steps.extend(routed.slider_steps.iter().copied());
 
         write_raw_output_frame(&mut composer, &routed, &mut sink)
             .map_err(|err| format!("raw output write failed: {err:?}"))?;
@@ -1210,6 +1257,16 @@ fn replay_raw(path: &Path) -> Result<(), String> {
             direction_name(gesture.direction)
         );
     }
+    println!("slider_steps: {}", slider_steps.len());
+    for step in slider_steps {
+        println!(
+            "slider_step slot={} tracking_id={} zone={} direction={}",
+            step.slot,
+            step.tracking_id,
+            zone_name(step.zone),
+            slider_direction_name(step.direction)
+        );
+    }
     println!("resync_required: {resync_required}");
 
     Ok(())
@@ -1219,6 +1276,7 @@ fn print_replay_diagnosis(
     stats: &edgepad::replay::ReplayStats,
     passthrough_events: usize,
     gestures: usize,
+    slider_steps: usize,
 ) {
     if stats.tracking_starts == 0 && (stats.x_events > 0 || stats.y_events > 0) {
         println!(
@@ -1236,9 +1294,9 @@ fn print_replay_diagnosis(
         );
     } else if stats.tracking_starts == 0 && stats.total_events == 0 {
         println!("diagnosis: no replay-relevant touch events found");
-    } else if passthrough_events == 0 && gestures == 0 {
+    } else if passthrough_events == 0 && gestures == 0 && slider_steps == 0 {
         println!(
-            "diagnosis: complete contacts were parsed, but current recognizer produced no passthrough events or gestures"
+            "diagnosis: complete contacts were parsed, but current recognizer produced no passthrough events, gestures, or slider steps"
         );
     }
 }
@@ -1259,6 +1317,15 @@ fn direction_name(direction: GestureDirection) -> &'static str {
         GestureDirection::Left => "left",
         GestureDirection::Right => "right",
         GestureDirection::Tap => "tap",
+    }
+}
+
+fn slider_direction_name(direction: SliderDirection) -> &'static str {
+    match direction {
+        SliderDirection::Up => "up",
+        SliderDirection::Down => "down",
+        SliderDirection::Left => "left",
+        SliderDirection::Right => "right",
     }
 }
 

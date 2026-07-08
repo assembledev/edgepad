@@ -1,42 +1,49 @@
 device = "auto"
 edge_width = 0.10
 
-[[gestures]]
-zone = "right"
-direction = "up"
-action = ["notify-send", "edgepad", "right-up"]
-
-[[gestures]]
-zone = "right"
-direction = "down"
-action = ["notify-send", "edgepad", "right-down"]
+[[sliders]]
+zone = "left"
+step = 0.04
+up = ["notify-send", "edgepad", "volume-up"]
+down = ["notify-send", "edgepad", "volume-down"]
 
 [[gestures]]
 zone = "left"
-direction = "up"
-action = ["notify-send", "edgepad", "left-up"]
+direction = "tap"
+action = ["notify-send", "edgepad", "volume-mute"]
+
+[[sliders]]
+zone = "right"
+step = 0.04
+up = ["notify-send", "edgepad", "brightness-up"]
+down = ["notify-send", "edgepad", "brightness-down"]
 
 [[gestures]]
-zone = "left"
-direction = "down"
-action = ["notify-send", "edgepad", "left-down"]
+zone = "right"
+direction = "tap"
+action = ["notify-send", "edgepad", "brightness-toggle"]
 
 [[gestures]]
 zone = "top"
 direction = "left"
-action = ["notify-send", "edgepad", "top-left"]
+action = ["notify-send", "edgepad", "media-previous"]
 
 [[gestures]]
 zone = "top"
 direction = "right"
-action = ["notify-send", "edgepad", "top-right"]
+action = ["notify-send", "edgepad", "media-next"]
+
+[[gestures]]
+zone = "top"
+direction = "tap"
+action = ["notify-send", "edgepad", "media-play-pause"]
 
 [[gestures]]
 zone = "bottom"
 direction = "left"
-action = ["notify-send", "edgepad", "bottom-left"]
+action = ["notify-send", "edgepad", "workspace-previous"]
 
 [[gestures]]
 zone = "bottom"
 direction = "right"
-action = ["notify-send", "edgepad", "bottom-right"]
+action = ["notify-send", "edgepad", "workspace-next"]

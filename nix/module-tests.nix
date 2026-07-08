@@ -110,6 +110,21 @@ let
               ];
             }
           ];
+          sliders = [
+            {
+              zone = "left";
+              up = [
+                "pamixer"
+                "-i"
+                "3"
+              ];
+              down = [
+                "pamixer"
+                "-d"
+                "3"
+              ];
+            }
+          ];
         };
       }
     ];
@@ -141,6 +156,11 @@ let
       grep -F 'zone = "top"' ${homeConfigFile}
       grep -F 'direction = "right"' ${homeConfigFile}
       grep -F 'action = ["notify-send", "edgepad", "top-right"]' ${homeConfigFile}
+      grep -F '[[sliders]]' ${homeConfigFile}
+      grep -F 'zone = "left"' ${homeConfigFile}
+      grep -F 'step = 0.04' ${homeConfigFile}
+      grep -F 'up = ["pamixer", "-i", "3"]' ${homeConfigFile}
+      grep -F 'down = ["pamixer", "-d", "3"]' ${homeConfigFile}
       grep -F 'ENV{ID_INPUT_TOUCHPAD}=="1"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules
       grep -F 'TAG+="uaccess"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules
       grep -F 'KERNEL=="uinput"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules

@@ -255,7 +255,10 @@ fn zones_status_line(config: &EdgepadConfig) -> StatusLine {
     let active_zones: Vec<Zone> = ordered_zones()
         .iter()
         .copied()
-        .filter(|zone| config.gestures.iter().any(|binding| binding.zone == *zone))
+        .filter(|zone| {
+            config.gestures.iter().any(|binding| binding.zone == *zone)
+                || config.sliders.iter().any(|binding| binding.zone == *zone)
+        })
         .collect();
     let inactive_zones: Vec<Zone> = ordered_zones()
         .iter()
@@ -279,29 +282,43 @@ fn zones_status_line(config: &EdgepadConfig) -> StatusLine {
 }
 
 fn actions_status_line(config: &EdgepadConfig) -> StatusLine {
-    if config.gestures.is_empty() {
-        return StatusLine::fail(StatusSubject::Actions, "no gesture bindings configured");
+    if config.gestures.is_empty() && config.sliders.is_empty() {
+        return StatusLine::fail(StatusSubject::Actions, "no bindings configured");
     }
 
-    let command_count = config
+    let mut commands = config
         .gestures
         .iter()
         .filter_map(|binding| match &binding.action {
             crate::config::GestureActionConfig::Command { argv } => argv.first(),
             crate::config::GestureActionConfig::Log => None,
         })
-        .collect::<BTreeSet<_>>()
-        .len();
+        .collect::<BTreeSet<_>>();
+    for slider in &config.sliders {
+        if let Some(program) = slider.negative.argv.first() {
+            commands.insert(program);
+        }
+        if let Some(program) = slider.positive.argv.first() {
+            commands.insert(program);
+        }
+    }
+    let command_count = commands.len();
 
     let detail = match command_count {
         0 => format!(
-            "{}; log actions only",
-            binding_count_label(config.gestures.len())
+            "{}, {}; log actions only",
+            binding_count_label(config.gestures.len()),
+            slider_count_label(config.sliders.len())
         ),
-        1 => format!("{}, 1 command", binding_count_label(config.gestures.len())),
+        1 => format!(
+            "{}, {}, 1 command",
+            binding_count_label(config.gestures.len()),
+            slider_count_label(config.sliders.len())
+        ),
         count => format!(
-            "{}, {count} commands",
-            binding_count_label(config.gestures.len())
+            "{}, {}, {count} commands",
+            binding_count_label(config.gestures.len()),
+            slider_count_label(config.sliders.len())
         ),
     };
 
@@ -456,8 +473,15 @@ fn edge_width_label(width: f32) -> String {
 
 fn binding_count_label(count: usize) -> String {
     match count {
-        1 => "1 binding".to_string(),
-        _ => format!("{count} bindings"),
+        1 => "1 gesture binding".to_string(),
+        _ => format!("{count} gesture bindings"),
+    }
+}
+
+fn slider_count_label(count: usize) -> String {
+    match count {
+        1 => "1 slider".to_string(),
+        _ => format!("{count} sliders"),
     }
 }
 
@@ -490,6 +514,7 @@ mod tests {
                     action: GestureActionConfig::Log,
                 },
             ],
+            sliders: Vec::new(),
         };
 
         let line = zones_status_line(&config);
@@ -528,11 +553,12 @@ mod tests {
                     action: GestureActionConfig::Log,
                 },
             ],
+            sliders: Vec::new(),
         };
 
         let line = actions_status_line(&config);
 
-        assert_eq!(line.detail, "3 bindings, 1 command");
+        assert_eq!(line.detail, "3 gesture bindings, 0 sliders, 1 command");
     }
 
     #[test]

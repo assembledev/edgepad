@@ -1,5 +1,6 @@
 use edgepad::core::{
-    AxisRange, Capabilities, EdgeWidths, Engine, Event, GestureDirection, SlotError, Zone,
+    AxisRange, Capabilities, EdgeWidths, Engine, Event, GestureDirection, SliderAxis,
+    SliderDirection, SliderSpec, SlotError, Zone,
 };
 
 fn test_caps() -> Capabilities {
@@ -85,6 +86,84 @@ fn claimed_edge_touch_does_not_emit_initial_down_to_passthrough() {
     assert_eq!(up.gestures.len(), 1);
     assert_eq!(up.gestures[0].zone, Zone::Left);
     assert_eq!(up.gestures[0].direction, GestureDirection::Right);
+}
+
+#[test]
+fn slider_edge_touch_emits_steps_during_motion_without_release_swipe() {
+    let mut engine = Engine::with_sliders(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        vec![SliderSpec {
+            zone: Zone::Left,
+            axis: SliderAxis::Vertical,
+            step: 0.09,
+        }],
+    );
+
+    let down = engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(22),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left slider contact is valid");
+
+    assert!(down.slider_steps.is_empty());
+    assert!(down.gestures.is_empty());
+
+    let move_frame = engine
+        .process_frame(&[Event::slot(0), Event::y(510)])
+        .expect("slider motion emits steps");
+
+    assert_eq!(move_frame.slider_steps.len(), 3);
+    for step in &move_frame.slider_steps {
+        assert_eq!(step.zone, Zone::Left);
+        assert_eq!(step.direction, SliderDirection::Down);
+        assert_eq!(step.slot, 0);
+        assert_eq!(step.tracking_id, 22);
+    }
+    assert!(move_frame.gestures.is_empty());
+    assert!(move_frame.passthrough.is_empty());
+
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("slider release is valid");
+
+    assert!(up.slider_steps.is_empty());
+    assert!(up.gestures.is_empty());
+    assert!(up.passthrough.is_empty());
+}
+
+#[test]
+fn slider_edge_touch_still_emits_tap_on_release() {
+    let mut engine = Engine::with_sliders(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        vec![SliderSpec {
+            zone: Zone::Left,
+            axis: SliderAxis::Vertical,
+            step: 0.09,
+        }],
+    );
+
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(23),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left slider contact is valid");
+
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("slider tap release is valid");
+
+    assert!(up.slider_steps.is_empty());
+    assert_eq!(up.gestures.len(), 1);
+    assert_eq!(up.gestures[0].zone, Zone::Left);
+    assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
 }
 
 #[test]

@@ -12,7 +12,7 @@ use crate::config::{
     default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
     GestureActionConfig,
 };
-use crate::core::{EdgeWidths, GestureDirection, Zone};
+use crate::core::{EdgeWidths, GestureDirection, SliderDirection, Zone};
 use crate::device::{discover_device_report, format_device_line, touchpad_candidates};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,13 +241,14 @@ fn check_config(config: &DoctorConfig, report: &mut DoctorReport) -> Option<Edge
                 DoctorSection::Config,
                 "file",
                 format!(
-                    "device {}, edge width {}, {}",
+                    "device {}, edge width {}, {}, {}",
                     device_config_value_label(&edgepad_config.device),
                     percent_label(edgepad_config.edge_width),
-                    binding_count_label(edgepad_config.gestures.len())
+                    gesture_binding_count_label(edgepad_config.gestures.len()),
+                    slider_count_label(edgepad_config.sliders.len())
                 ),
             ));
-            check_gesture_bindings(&edgepad_config, report);
+            check_bindings(&edgepad_config, report);
             Some(edgepad_config)
         }
         Err(err) => {
@@ -262,13 +263,13 @@ fn check_config(config: &DoctorConfig, report: &mut DoctorReport) -> Option<Edge
     }
 }
 
-fn check_gesture_bindings(config: &EdgepadConfig, report: &mut DoctorReport) {
-    if config.gestures.is_empty() {
+fn check_bindings(config: &EdgepadConfig, report: &mut DoctorReport) {
+    if config.gestures.is_empty() && config.sliders.is_empty() {
         report.checks.push(DoctorCheck::new(
             CheckStatus::Fail,
             DoctorSection::Config,
             "bindings",
-            "no gesture bindings configured; add at least one [[gestures]] entry",
+            "no bindings configured; add at least one [[gestures]] or [[sliders]] entry",
         ));
         return;
     }
@@ -277,7 +278,11 @@ fn check_gesture_bindings(config: &EdgepadConfig, report: &mut DoctorReport) {
         CheckStatus::Ok,
         DoctorSection::Config,
         "bindings",
-        format!("{} configured", binding_count_label(config.gestures.len())),
+        format!(
+            "{}, {} configured",
+            gesture_binding_count_label(config.gestures.len()),
+            slider_count_label(config.sliders.len())
+        ),
     ));
     report.checks.push(DoctorCheck::new(
         CheckStatus::Ok,
@@ -291,7 +296,10 @@ fn active_zones_detail(config: &EdgepadConfig) -> String {
     let active_zones: Vec<Zone> = ordered_zones()
         .iter()
         .copied()
-        .filter(|zone| config.gestures.iter().any(|binding| binding.zone == *zone))
+        .filter(|zone| {
+            config.gestures.iter().any(|binding| binding.zone == *zone)
+                || config.sliders.iter().any(|binding| binding.zone == *zone)
+        })
         .collect();
     let inactive_zones: Vec<Zone> = ordered_zones()
         .iter()
@@ -345,10 +353,17 @@ fn percent_label(value: f32) -> String {
     format!("{:.1}%", value * 100.0)
 }
 
-fn binding_count_label(count: usize) -> String {
+fn gesture_binding_count_label(count: usize) -> String {
     match count {
         1 => "1 gesture binding".to_string(),
         _ => format!("{count} gesture bindings"),
+    }
+}
+
+fn slider_count_label(count: usize) -> String {
+    match count {
+        1 => "1 slider".to_string(),
+        _ => format!("{count} sliders"),
     }
 }
 
@@ -397,7 +412,7 @@ fn check_config_device(
 }
 
 fn check_action_executables(config: &EdgepadConfig, report: &mut DoctorReport) {
-    if config.gestures.is_empty() {
+    if config.gestures.is_empty() && config.sliders.is_empty() {
         return;
     }
 
@@ -410,6 +425,35 @@ fn check_action_executables(config: &EdgepadConfig, report: &mut DoctorReport) {
                     .or_default()
                     .push(gesture_binding_label(binding.zone, binding.direction));
             }
+        }
+    }
+    for slider in &config.sliders {
+        let negative_label = slider_binding_label(
+            slider.zone,
+            match slider.axis {
+                crate::core::SliderAxis::Vertical => SliderDirection::Up,
+                crate::core::SliderAxis::Horizontal => SliderDirection::Left,
+            },
+        );
+        if let Some(program) = slider.negative.argv.first() {
+            usages
+                .entry(program.clone())
+                .or_default()
+                .push(negative_label);
+        }
+
+        let positive_label = slider_binding_label(
+            slider.zone,
+            match slider.axis {
+                crate::core::SliderAxis::Vertical => SliderDirection::Down,
+                crate::core::SliderAxis::Horizontal => SliderDirection::Right,
+            },
+        );
+        if let Some(program) = slider.positive.argv.first() {
+            usages
+                .entry(program.clone())
+                .or_default()
+                .push(positive_label);
         }
     }
 
@@ -545,6 +589,10 @@ fn format_binding_usage(bindings: &[String]) -> String {
 
 fn gesture_binding_label(zone: Zone, direction: GestureDirection) -> String {
     format!("{}.{}", zone_name(zone), direction_name(direction))
+}
+
+fn slider_binding_label(zone: Zone, direction: SliderDirection) -> String {
+    format!("{}.{}", zone_name(zone), slider_direction_name(direction))
 }
 
 fn device_config_value_label(device: &DeviceConfig) -> String {
@@ -1144,6 +1192,15 @@ fn direction_name(direction: GestureDirection) -> &'static str {
     }
 }
 
+fn slider_direction_name(direction: SliderDirection) -> &'static str {
+    match direction {
+        SliderDirection::Up => "up",
+        SliderDirection::Down => "down",
+        SliderDirection::Left => "left",
+        SliderDirection::Right => "right",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1206,6 +1263,7 @@ mod tests {
                     action: GestureActionConfig::Log,
                 },
             ],
+            sliders: Vec::new(),
         };
 
         assert_eq!(
@@ -1221,6 +1279,7 @@ mod tests {
             device: DeviceConfig::Path(PathBuf::from("/dev/input/event7")),
             edge_width: 0.10,
             gestures: Vec::new(),
+            sliders: Vec::new(),
         };
 
         let device = check_config_device(Some(&config), None, &mut report);
@@ -1240,6 +1299,7 @@ mod tests {
             device: DeviceConfig::Auto,
             edge_width: 0.10,
             gestures: Vec::new(),
+            sliders: Vec::new(),
         };
 
         let device = check_config_device(
@@ -1269,6 +1329,7 @@ mod tests {
                     argv: vec!["/tmp/edgepad-definitely-missing-command".to_string()],
                 },
             }],
+            sliders: Vec::new(),
         };
 
         check_action_executables(&config, &mut report);

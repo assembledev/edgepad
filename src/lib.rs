@@ -102,6 +102,20 @@ pub mod core {
         Tap,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum SliderDirection {
+        Up,
+        Down,
+        Left,
+        Right,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SliderAxis {
+        Horizontal,
+        Vertical,
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Gesture {
         pub zone: Zone,
@@ -110,10 +124,26 @@ pub mod core {
         pub tracking_id: i32,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct SliderSpec {
+        pub zone: Zone,
+        pub axis: SliderAxis,
+        pub step: f32,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SliderStep {
+        pub zone: Zone,
+        pub direction: SliderDirection,
+        pub slot: i32,
+        pub tracking_id: i32,
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FrameOutput {
         pub passthrough: Vec<Event>,
         pub gestures: Vec<Gesture>,
+        pub slider_steps: Vec<SliderStep>,
         pub resync_required: bool,
     }
 
@@ -122,6 +152,7 @@ pub mod core {
             Self {
                 passthrough: Vec::new(),
                 gestures: Vec::new(),
+                slider_steps: Vec::new(),
                 resync_required: false,
             }
         }
@@ -161,6 +192,7 @@ pub mod core {
         start_y: Option<i32>,
         current_x: Option<i32>,
         current_y: Option<i32>,
+        slider_anchor: Option<f32>,
         held_events: Vec<Event>,
     }
 
@@ -174,6 +206,7 @@ pub mod core {
                 start_y: None,
                 current_x: None,
                 current_y: None,
+                slider_anchor: None,
                 held_events: Vec::new(),
             }
         }
@@ -189,6 +222,7 @@ pub mod core {
     pub struct Engine {
         caps: Capabilities,
         edges: EdgeWidths,
+        sliders: Vec<SliderSpec>,
         current_slot: i32,
         slots: Vec<SlotState>,
     }
@@ -206,8 +240,27 @@ pub mod core {
                 current_slot: caps.slot_min,
                 caps,
                 edges,
+                sliders: Vec::new(),
                 slots: vec![SlotState::default(); slot_count],
             }
+        }
+
+        pub fn with_sliders(
+            caps: Capabilities,
+            edges: EdgeWidths,
+            sliders: Vec<SliderSpec>,
+        ) -> Self {
+            for slider in &sliders {
+                assert!(
+                    slider.step.is_finite() && slider.step > 0.0 && slider.step <= 1.0,
+                    "invalid slider step for {:?}: {}",
+                    slider.zone,
+                    slider.step
+                );
+            }
+            let mut engine = Self::new(caps, edges);
+            engine.sliders = sliders;
+            engine
         }
 
         pub fn process_frame(&mut self, frame: &[Event]) -> Result<FrameOutput, SlotError> {
@@ -264,6 +317,7 @@ pub mod core {
                 }
 
                 self.decide_ownership_if_ready(&mut output)?;
+                self.emit_slider_steps_if_ready(&mut output)?;
             }
 
             Ok(output)
@@ -275,12 +329,18 @@ pub mod core {
             output: &mut FrameOutput,
         ) -> Result<(), SlotError> {
             let slot = self.current_slot;
+            let releases_slider_zone = match self.slot(slot)?.ownership {
+                Ownership::Claimed(zone) => self.slider_for_zone(zone).is_some(),
+                Ownership::Unknown | Ownership::Passthrough => false,
+            };
             let slot_state = self.slot_mut(slot)?;
 
             match slot_state.ownership {
                 Ownership::Claimed(zone) => {
                     if let Some(gesture) = classify_gesture(slot, zone, slot_state) {
-                        output.gestures.push(gesture);
+                        if !releases_slider_zone || gesture.direction == GestureDirection::Tap {
+                            output.gestures.push(gesture);
+                        }
                     }
                 }
                 Ownership::Passthrough => output.passthrough.push(event),
@@ -322,6 +382,20 @@ pub mod core {
                 return Ok(());
             };
 
+            let slider_anchor = {
+                let slot_state = self.slot(slot)?;
+                if slot_state.active
+                    && matches!(slot_state.ownership, Ownership::Unknown)
+                    && slot_state.start_x.is_some()
+                    && slot_state.start_y.is_some()
+                {
+                    self.slider_for_zone(zone)
+                        .and_then(|spec| slider_position(self.caps, spec.axis, slot_state))
+                } else {
+                    None
+                }
+            };
+
             let slot_state = self.slot_mut(slot)?;
             if slot_state.active
                 && matches!(slot_state.ownership, Ownership::Unknown)
@@ -329,9 +403,69 @@ pub mod core {
                 && slot_state.start_y.is_some()
             {
                 slot_state.ownership = Ownership::Claimed(zone);
+                slot_state.slider_anchor = slider_anchor;
                 slot_state.held_events.clear();
             }
             Ok(())
+        }
+
+        fn emit_slider_steps_if_ready(
+            &mut self,
+            output: &mut FrameOutput,
+        ) -> Result<(), SlotError> {
+            let slot = self.current_slot;
+            let (zone, spec, position, tracking_id) = {
+                let slot_state = self.slot(slot)?;
+                let Ownership::Claimed(zone) = slot_state.ownership else {
+                    return Ok(());
+                };
+                let Some(spec) = self.slider_for_zone(zone) else {
+                    return Ok(());
+                };
+                let Some(position) = slider_position(self.caps, spec.axis, slot_state) else {
+                    return Ok(());
+                };
+                let Some(tracking_id) = slot_state.tracking_id else {
+                    return Ok(());
+                };
+                (zone, spec, position, tracking_id)
+            };
+
+            let slot_state = self.slot_mut(slot)?;
+            let Some(mut anchor) = slot_state.slider_anchor else {
+                slot_state.slider_anchor = Some(position);
+                return Ok(());
+            };
+
+            while position - anchor >= spec.step {
+                output.slider_steps.push(SliderStep {
+                    zone,
+                    direction: positive_slider_direction(spec.axis),
+                    slot,
+                    tracking_id,
+                });
+                anchor += spec.step;
+            }
+
+            while anchor - position >= spec.step {
+                output.slider_steps.push(SliderStep {
+                    zone,
+                    direction: negative_slider_direction(spec.axis),
+                    slot,
+                    tracking_id,
+                });
+                anchor -= spec.step;
+            }
+
+            slot_state.slider_anchor = Some(anchor);
+            Ok(())
+        }
+
+        fn slider_for_zone(&self, zone: Zone) -> Option<SliderSpec> {
+            self.sliders
+                .iter()
+                .copied()
+                .find(|slider| slider.zone == zone)
         }
 
         fn zone_for_current_slot(&self) -> Result<Option<Zone>, SlotError> {
@@ -418,6 +552,27 @@ pub mod core {
             slot,
             tracking_id: state.tracking_id?,
         })
+    }
+
+    fn slider_position(caps: Capabilities, axis: SliderAxis, state: &SlotState) -> Option<f32> {
+        match axis {
+            SliderAxis::Horizontal => state.current_x.map(|x| caps.x.normalize(x)),
+            SliderAxis::Vertical => state.current_y.map(|y| caps.y.normalize(y)),
+        }
+    }
+
+    fn positive_slider_direction(axis: SliderAxis) -> SliderDirection {
+        match axis {
+            SliderAxis::Horizontal => SliderDirection::Right,
+            SliderAxis::Vertical => SliderDirection::Down,
+        }
+    }
+
+    fn negative_slider_direction(axis: SliderAxis) -> SliderDirection {
+        match axis {
+            SliderAxis::Horizontal => SliderDirection::Left,
+            SliderAxis::Vertical => SliderDirection::Up,
+        }
     }
 }
 

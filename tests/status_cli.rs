@@ -46,7 +46,7 @@ fn status_cli_summarizes_config_zones_actions_and_device_state() {
         "stdout was: {stdout}"
     );
     assert!(
-        stdout.contains("Actions  1 binding, 1 command"),
+        stdout.contains("Actions  1 gesture binding, 0 sliders, 1 command"),
         "stdout was: {stdout}"
     );
     assert!(

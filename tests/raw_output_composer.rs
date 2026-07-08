@@ -218,6 +218,7 @@ fn compose_frame_releases_each_active_passthrough_slot_on_resync() {
         .compose_frame(&RoutedRawFrame {
             passthrough: vec![],
             gestures: vec![],
+            slider_steps: vec![],
             resync_required: true,
         })
         .expect("resync should compose")

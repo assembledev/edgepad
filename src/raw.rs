@@ -1,4 +1,4 @@
-use crate::core::{AxisRange, Capabilities, Engine, Event, Gesture, SlotError};
+use crate::core::{AxisRange, Capabilities, Engine, Event, Gesture, SliderStep, SlotError};
 
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
@@ -160,6 +160,7 @@ pub struct RawDumpFile {
 pub struct RoutedRawFrame {
     pub passthrough: Vec<RawEvent>,
     pub gestures: Vec<Gesture>,
+    pub slider_steps: Vec<SliderStep>,
     pub resync_required: bool,
 }
 
@@ -740,6 +741,7 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
     Ok(RoutedRawFrame {
         passthrough,
         gestures: output.gestures,
+        slider_steps: output.slider_steps,
         resync_required: output.resync_required,
     })
 }
