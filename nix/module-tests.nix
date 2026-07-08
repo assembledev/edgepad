@@ -90,6 +90,7 @@ let
           enable = true;
           device = "auto";
           edgeWidth = 0.1;
+          tapMinDurationMs = 90;
           gestures = [
             {
               zone = "right";
@@ -149,6 +150,7 @@ let
       set -eu
       grep -F 'device = "auto"' ${homeConfigFile}
       grep -F 'edge_width = 0.1' ${homeConfigFile}
+      grep -F 'tap_min_duration_ms = 90' ${homeConfigFile}
       grep -F '[[gestures]]' ${homeConfigFile}
       grep -F 'zone = "right"' ${homeConfigFile}
       grep -F 'direction = "down"' ${homeConfigFile}

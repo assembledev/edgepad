@@ -5,13 +5,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 #[cfg(test)]
 use crate::core::SliderAxis;
 use crate::core::{
-    Capabilities, EdgeWidths, Engine, Gesture, GestureDirection, SliderDirection, SliderSpec,
-    SliderStep, Zone,
+    Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureDirection, SliderDirection,
+    SliderSpec, SliderStep, Zone,
 };
 use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
@@ -33,6 +33,49 @@ const UINPUT_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
 const STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProxyInputEvent {
+    raw: RawEvent,
+    timestamp: Option<Duration>,
+}
+
+#[derive(Debug, Clone)]
+struct ProxyLoopConfig {
+    capabilities: Capabilities,
+    edge_widths: EdgeWidths,
+    engine_options: EngineOptions,
+    slider_specs: Vec<SliderSpec>,
+}
+
+#[derive(Debug, Default)]
+struct PendingRawFrame {
+    events: Vec<RawEvent>,
+    timestamp: Option<Duration>,
+}
+
+impl PendingRawFrame {
+    fn push(&mut self, event: ProxyInputEvent) {
+        self.events.push(event.raw);
+        if let Some(timestamp) = event.timestamp {
+            self.timestamp = Some(timestamp);
+        }
+    }
+
+    fn take_frame(&mut self, frame_timestamp: Option<Duration>) -> Option<RawFrame> {
+        if self.events.is_empty() {
+            self.timestamp = None;
+            return None;
+        }
+
+        let timestamp = frame_timestamp.or(self.timestamp);
+        self.timestamp = None;
+        Some(raw_frame_with_timestamp(
+            std::mem::take(&mut self.events),
+            timestamp,
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProxyMode {
     DryRun,
     UinputGrab,
@@ -43,6 +86,7 @@ pub struct ProxyRunConfig {
     pub device_path: PathBuf,
     pub limit: ProxyRunLimit,
     pub edge_widths: EdgeWidths,
+    pub engine_options: EngineOptions,
     pub slider_specs: Vec<SliderSpec>,
     pub mode: ProxyMode,
 }
@@ -192,12 +236,15 @@ where
     let mut sink = RecordingRawOutputSink::default();
     let stats = run_proxy_loop(
         &mut device,
-        capabilities,
-        config.edge_widths,
+        ProxyLoopConfig {
+            capabilities,
+            edge_widths: config.edge_widths,
+            engine_options: config.engine_options,
+            slider_specs: config.slider_specs.clone(),
+        },
         &config.limit,
         &mut sink,
         handler,
-        config.slider_specs.clone(),
     )?;
 
     Ok(ProxyRunSummary {
@@ -231,12 +278,15 @@ where
     })?;
     let run_result = run_proxy_loop(
         &mut device,
-        capabilities,
-        config.edge_widths,
+        ProxyLoopConfig {
+            capabilities,
+            edge_widths: config.edge_widths,
+            engine_options: config.engine_options,
+            slider_specs: config.slider_specs.clone(),
+        },
         &config.limit,
         &mut sink,
         handler,
-        config.slider_specs.clone(),
     );
     let settle_result = settle_after_uinput_proxy_run(capabilities, &mut sink, run_result);
     std::thread::sleep(UINPUT_UNGRAB_SETTLE_DELAY);
@@ -364,25 +414,28 @@ fn append_additional_error(primary: String, additional: String) -> String {
 
 fn run_proxy_loop<S, H>(
     device: &mut RawDevice,
-    capabilities: Capabilities,
-    edge_widths: EdgeWidths,
+    config: ProxyLoopConfig,
     limit: &ProxyRunLimit,
     sink: &mut S,
     handler: &mut H,
-    slider_specs: Vec<SliderSpec>,
 ) -> Result<ProxyRuntimeStats, String>
 where
     S: RawOutputSink,
     S::Error: std::fmt::Debug,
     H: GestureHandler,
 {
-    let mut engine = Engine::with_sliders(capabilities, edge_widths, slider_specs);
-    let mut composer = RawOutputComposer::new(capabilities);
+    let mut engine = Engine::with_options(
+        config.capabilities,
+        config.edge_widths,
+        config.slider_specs,
+        config.engine_options,
+    );
+    let mut composer = RawOutputComposer::new(config.capabilities);
     let mut stats = ProxyRuntimeStats::default();
-    let mut touch_state = PhysicalTouchState::new(capabilities);
+    let mut touch_state = PhysicalTouchState::new(config.capabilities);
     let mut stopper = ProxyLoopStopper::new(limit);
     let mut drain_deadline: Option<Instant> = None;
-    let mut current = Vec::new();
+    let mut pending = PendingRawFrame::default();
 
     loop {
         let timeout = drain_deadline
@@ -407,17 +460,21 @@ where
         };
 
         for raw in events {
+            let event = raw;
+            let raw = event.raw;
             match (raw.kind, raw.code) {
                 (EV_SYN, SYN_REPORT) => {
-                    process_pending_proxy_frame(
-                        &mut current,
-                        &mut touch_state,
-                        &mut engine,
-                        &mut composer,
-                        sink,
-                        &mut stats,
-                        handler,
-                    )?;
+                    if let Some(frame) = pending.take_frame(event.timestamp) {
+                        process_proxy_raw_frame(
+                            &frame,
+                            &mut touch_state,
+                            &mut engine,
+                            &mut composer,
+                            sink,
+                            &mut stats,
+                            handler,
+                        )?;
+                    }
                     stats.input_frame_boundaries += 1;
                     if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
                         stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
@@ -432,23 +489,25 @@ where
                     stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                 }
                 (EV_SYN, SYN_DROPPED) => {
-                    process_pending_proxy_frame(
-                        &mut current,
+                    if let Some(frame) = pending.take_frame(event.timestamp) {
+                        process_proxy_raw_frame(
+                            &frame,
+                            &mut touch_state,
+                            &mut engine,
+                            &mut composer,
+                            sink,
+                            &mut stats,
+                            handler,
+                        )?;
+                    }
+                    let dropped = raw_frame_with_timestamp(vec![raw], event.timestamp);
+                    process_proxy_raw_frame(
+                        &dropped,
                         &mut touch_state,
                         &mut engine,
                         &mut composer,
                         sink,
                         &mut stats,
-                        handler,
-                    )?;
-                    let dropped = RawFrame::new(vec![raw]);
-                    touch_state.observe_frame(&dropped);
-                    process_proxy_frame_with_handler(
-                        &mut engine,
-                        &mut composer,
-                        sink,
-                        &mut stats,
-                        &dropped,
                         handler,
                     )?;
                     stats.input_frame_boundaries += 1;
@@ -464,7 +523,7 @@ where
                     }
                     stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                 }
-                _ => current.push(raw),
+                _ => pending.push(event),
             }
         }
     }
@@ -473,7 +532,7 @@ where
 fn fetch_proxy_events(
     device: &mut RawDevice,
     timeout: Option<Duration>,
-) -> Result<Option<Vec<RawEvent>>, String> {
+) -> Result<Option<Vec<ProxyInputEvent>>, String> {
     if let Some(timeout) = timeout {
         let timeout_ms = poll_timeout_ms(timeout);
         let mut poll_fd = libc::pollfd {
@@ -499,7 +558,10 @@ fn fetch_proxy_events(
     let events = device
         .fetch_events()
         .map_err(|err| format!("failed to read events from proxy device: {err}"))?
-        .map(|event| RawEvent::new(event.event_type().0, event.code(), event.value()))
+        .map(|event| ProxyInputEvent {
+            raw: RawEvent::new(event.event_type().0, event.code(), event.value()),
+            timestamp: event.timestamp().duration_since(UNIX_EPOCH).ok(),
+        })
         .collect();
     Ok(Some(events))
 }
@@ -513,8 +575,8 @@ fn poll_timeout_ms(timeout: Duration) -> i32 {
     }
 }
 
-fn process_pending_proxy_frame<S, H>(
-    current: &mut Vec<RawEvent>,
+fn process_proxy_raw_frame<S, H>(
+    frame: &RawFrame,
     touch_state: &mut PhysicalTouchState,
     engine: &mut Engine,
     composer: &mut RawOutputComposer,
@@ -527,13 +589,15 @@ where
     S::Error: std::fmt::Debug,
     H: GestureHandler,
 {
-    if current.is_empty() {
-        return Ok(());
-    }
+    touch_state.observe_frame(frame);
+    process_proxy_frame_with_handler(engine, composer, sink, stats, frame, handler)
+}
 
-    let frame = RawFrame::new(std::mem::take(current));
-    touch_state.observe_frame(&frame);
-    process_proxy_frame_with_handler(engine, composer, sink, stats, &frame, handler)
+fn raw_frame_with_timestamp(events: Vec<RawEvent>, timestamp: Option<Duration>) -> RawFrame {
+    match timestamp {
+        Some(timestamp) => RawFrame::new_at(events, timestamp),
+        None => RawFrame::new(events),
+    }
 }
 
 #[cfg(test)]
@@ -1437,6 +1501,7 @@ mod tests {
                 stop_after_limit: StopAfterFrameLimit::Immediately,
             },
             edge_widths: EdgeWidths::all(0.2),
+            engine_options: EngineOptions::default(),
             slider_specs: Vec::new(),
             mode: ProxyMode::DryRun,
         };

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use crate::core::{AxisRange, Capabilities, Engine, Event, Gesture, SliderStep, SlotError};
 
 pub const EV_SYN: u16 = 0x00;
@@ -148,6 +150,7 @@ pub enum RawParseError {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RawFrame {
     pub events: Vec<RawEvent>,
+    pub timestamp: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -230,7 +233,17 @@ impl RawOutputSink for RecordingRawOutputSink {
 
 impl RawFrame {
     pub fn new(events: Vec<RawEvent>) -> Self {
-        Self { events }
+        Self {
+            events,
+            timestamp: None,
+        }
+    }
+
+    pub fn new_at(events: Vec<RawEvent>, timestamp: Duration) -> Self {
+        Self {
+            events,
+            timestamp: Some(timestamp),
+        }
     }
 }
 
@@ -735,7 +748,10 @@ pub fn extract_core_events(frame: &RawFrame) -> Vec<Event> {
 
 pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRawFrame, SlotError> {
     let core_events = extract_core_events(frame);
-    let output = engine.process_frame(&core_events)?;
+    let output = match frame.timestamp {
+        Some(timestamp) => engine.process_frame_at(&core_events, timestamp)?,
+        None => engine.process_frame(&core_events)?,
+    };
     let passthrough = raw_passthrough_events_for_core_passthrough(frame, &output.passthrough);
 
     Ok(RoutedRawFrame {

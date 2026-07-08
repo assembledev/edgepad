@@ -3,11 +3,13 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::Deserialize;
 
 use crate::core::{
-    EdgeWidths, Gesture, GestureDirection, SliderAxis, SliderDirection, SliderSpec, Zone,
+    EdgeWidths, EngineOptions, Gesture, GestureDirection, SliderAxis, SliderDirection, SliderSpec,
+    Zone,
 };
 use crate::device::{
     discover_device_report, format_device_line, touchpad_candidates, DiscoveryReport,
@@ -15,11 +17,13 @@ use crate::device::{
 
 pub const DEFAULT_EDGE_WIDTH: f32 = 0.10;
 pub const DEFAULT_SLIDER_STEP: f32 = 0.04;
+pub use crate::core::DEFAULT_TAP_MIN_DURATION_MS;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgepadConfig {
     pub device: DeviceConfig,
     pub edge_width: f32,
+    pub tap_min_duration_ms: u64,
     pub gestures: Vec<GestureBindingConfig>,
     pub sliders: Vec<SliderBindingConfig>,
 }
@@ -29,6 +33,7 @@ impl Default for EdgepadConfig {
         Self {
             device: DeviceConfig::Auto,
             edge_width: DEFAULT_EDGE_WIDTH,
+            tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             gestures: Vec::new(),
             sliders: Vec::new(),
         }
@@ -49,6 +54,10 @@ impl EdgepadConfig {
         }
         if let Some(edge_width) = raw.edge_width {
             config.edge_width = validate_edge_width(edge_width, "edge_width")?;
+        }
+        if let Some(tap_min_duration_ms) = raw.tap_min_duration_ms {
+            config.tap_min_duration_ms =
+                validate_tap_min_duration_ms(tap_min_duration_ms, "tap_min_duration_ms")?;
         }
 
         for (index, raw_binding) in raw.gestures.into_iter().enumerate() {
@@ -108,6 +117,12 @@ impl EdgepadConfig {
                 step: slider.step,
             })
             .collect()
+    }
+
+    pub fn engine_options(&self) -> EngineOptions {
+        EngineOptions {
+            tap_min_duration: Duration::from_millis(self.tap_min_duration_ms),
+        }
     }
 
     fn validate_slider_gesture_conflicts(&self) -> Result<(), String> {
@@ -359,6 +374,13 @@ fn validate_slider_step(parsed: f32, name: &str) -> Result<f32, String> {
     Ok(parsed)
 }
 
+fn validate_tap_min_duration_ms(parsed: u64, name: &str) -> Result<u64, String> {
+    if parsed > 10_000 {
+        return Err(format!("{name} must be <= 10000"));
+    }
+    Ok(parsed)
+}
+
 fn resolve_auto_touchpad(input_root: &Path) -> Result<PathBuf, String> {
     let report = discover_device_report(input_root)
         .map_err(|err| format!("failed to list {}: {err}", input_root.display()))?;
@@ -496,6 +518,7 @@ fn slider_label(index: usize) -> String {
 struct RawEdgepadConfig {
     device: Option<String>,
     edge_width: Option<f32>,
+    tap_min_duration_ms: Option<u64>,
     #[serde(default)]
     gestures: Vec<RawGestureBindingConfig>,
     #[serde(default)]
@@ -600,6 +623,7 @@ mod tests {
             r#"
             device = "/dev/input/event7"
             edge_width = 0.20
+            tap_min_duration_ms = 90
 
             [[gestures]]
             zone = "left"
@@ -619,6 +643,11 @@ mod tests {
             DeviceConfig::Path(PathBuf::from("/dev/input/event7"))
         );
         assert_eq!(config.edge_width, 0.20);
+        assert_eq!(config.tap_min_duration_ms, 90);
+        assert_eq!(
+            config.engine_options().tap_min_duration,
+            Duration::from_millis(90)
+        );
         assert_eq!(
             config.gestures,
             vec![
@@ -640,6 +669,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn edgepad_config_defaults_tap_min_duration() {
+        let config = EdgepadConfig::parse(
+            r#"
+            [[gestures]]
+            zone = "left"
+            direction = "tap"
+            action = ["pamixer", "-t"]
+            "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.tap_min_duration_ms, DEFAULT_TAP_MIN_DURATION_MS);
     }
 
     #[test]
@@ -734,6 +778,25 @@ mod tests {
         assert_eq!(config.sliders[0].zone, Zone::Top);
         assert_eq!(config.sliders[0].axis, SliderAxis::Horizontal);
         assert_eq!(config.sliders[0].step, 0.08);
+    }
+
+    #[test]
+    fn edgepad_config_rejects_excessive_tap_min_duration() {
+        let result = EdgepadConfig::parse(
+            r#"
+            tap_min_duration_ms = 10001
+
+            [[gestures]]
+            zone = "left"
+            direction = "tap"
+            action = ["pamixer", "-t"]
+            "#,
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("tap_min_duration_ms must be <= 10000")
+        );
     }
 
     #[test]

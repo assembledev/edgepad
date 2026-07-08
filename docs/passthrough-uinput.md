@@ -65,6 +65,7 @@ For normal desktop use, run the daemon as a user service with access to `/dev/in
 ```toml
 device = "auto"
 edge_width = 0.10
+tap_min_duration_ms = 80
 
 [[gestures]]
 zone = "top"

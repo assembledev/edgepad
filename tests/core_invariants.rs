@@ -1,6 +1,8 @@
+use std::time::Duration;
+
 use edgepad::core::{
-    AxisRange, Capabilities, EdgeWidths, Engine, Event, GestureDirection, SliderAxis,
-    SliderDirection, SliderSpec, SlotError, Zone,
+    AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, Event, GestureDirection,
+    SliderAxis, SliderDirection, SliderSpec, SlotError, Zone,
 };
 
 fn test_caps() -> Capabilities {
@@ -164,6 +166,150 @@ fn slider_edge_touch_still_emits_tap_on_release() {
     assert_eq!(up.gestures.len(), 1);
     assert_eq!(up.gestures[0].zone, Zone::Left);
     assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
+}
+
+#[test]
+fn short_edge_touch_does_not_emit_tap_when_timing_is_known() {
+    let mut engine = Engine::with_options(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        Vec::new(),
+        EngineOptions {
+            tap_min_duration: Duration::from_millis(80),
+        },
+    );
+
+    engine
+        .process_frame_at(
+            &[
+                Event::slot(0),
+                Event::tracking_id(24),
+                Event::x(20),
+                Event::y(300),
+            ],
+            Duration::from_millis(1000),
+        )
+        .expect("left edge contact is valid");
+
+    let up = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(1079),
+        )
+        .expect("short tap release is valid");
+
+    assert!(up.gestures.is_empty());
+    assert!(up.passthrough.is_empty());
+}
+
+#[test]
+fn edge_touch_at_tap_min_duration_emits_tap() {
+    let mut engine = Engine::with_options(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        Vec::new(),
+        EngineOptions {
+            tap_min_duration: Duration::from_millis(80),
+        },
+    );
+
+    engine
+        .process_frame_at(
+            &[
+                Event::slot(0),
+                Event::tracking_id(25),
+                Event::x(20),
+                Event::y(300),
+            ],
+            Duration::from_millis(1000),
+        )
+        .expect("left edge contact is valid");
+
+    let up = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(1080),
+        )
+        .expect("tap release is valid");
+
+    assert_eq!(up.gestures.len(), 1);
+    assert_eq!(up.gestures[0].zone, Zone::Left);
+    assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
+}
+
+#[test]
+fn zero_tap_min_duration_allows_immediate_tap() {
+    let mut engine = Engine::with_options(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        Vec::new(),
+        EngineOptions {
+            tap_min_duration: Duration::ZERO,
+        },
+    );
+
+    engine
+        .process_frame_at(
+            &[
+                Event::slot(0),
+                Event::tracking_id(26),
+                Event::x(20),
+                Event::y(300),
+            ],
+            Duration::from_millis(1000),
+        )
+        .expect("left edge contact is valid");
+
+    let up = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(1000),
+        )
+        .expect("immediate tap release is valid");
+
+    assert_eq!(up.gestures.len(), 1);
+    assert_eq!(up.gestures[0].zone, Zone::Left);
+    assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
+}
+
+#[test]
+fn short_edge_swipe_still_emits_directional_gesture() {
+    let mut engine = Engine::with_options(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        Vec::new(),
+        EngineOptions {
+            tap_min_duration: Duration::from_millis(80),
+        },
+    );
+
+    engine
+        .process_frame_at(
+            &[
+                Event::slot(0),
+                Event::tracking_id(27),
+                Event::x(20),
+                Event::y(300),
+            ],
+            Duration::from_millis(1000),
+        )
+        .expect("left edge contact is valid");
+    engine
+        .process_frame_at(
+            &[Event::slot(0), Event::x(220), Event::y(310)],
+            Duration::from_millis(1030),
+        )
+        .expect("claimed movement remains internal");
+
+    let up = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(1040),
+        )
+        .expect("short swipe release is valid");
+
+    assert_eq!(up.gestures.len(), 1);
+    assert_eq!(up.gestures[0].direction, GestureDirection::Right);
 }
 
 #[test]

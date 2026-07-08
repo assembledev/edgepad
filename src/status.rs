@@ -494,7 +494,7 @@ fn property_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GestureActionConfig, GestureBindingConfig};
+    use crate::config::{GestureActionConfig, GestureBindingConfig, DEFAULT_TAP_MIN_DURATION_MS};
     use crate::core::GestureDirection;
 
     #[test]
@@ -502,6 +502,7 @@ mod tests {
         let config = EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: 0.20,
+            tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             gestures: vec![
                 GestureBindingConfig {
                     zone: Zone::Right,
@@ -532,6 +533,7 @@ mod tests {
         let config = EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: 0.10,
+            tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             gestures: vec![
                 GestureBindingConfig {
                     zone: Zone::Left,

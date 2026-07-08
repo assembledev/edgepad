@@ -78,6 +78,7 @@ The Home Manager module writes `~/.config/edgepad/edgepad.toml` and starts a sys
     enable = true;
     device = "auto";
     edgeWidth = 0.10;
+    tapMinDurationMs = 80;
 
     gestures = [
       {

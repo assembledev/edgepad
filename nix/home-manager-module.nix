@@ -104,6 +104,7 @@ let
   configFile = toml.generate "edgepad.toml" {
     device = cfg.device;
     edge_width = cfg.edgeWidth;
+    tap_min_duration_ms = cfg.tapMinDurationMs;
     gestures = map (gesture: {
       inherit (gesture) zone direction action;
     }) cfg.gestures;
@@ -138,6 +139,12 @@ in
         else
           throw "services.edgepad.edgeWidth must be > 0 and < 0.5";
       description = "Fractional edge width used by every edge zone.";
+    };
+
+    tapMinDurationMs = lib.mkOption {
+      type = lib.types.ints.between 0 10000;
+      default = 80;
+      description = "Minimum edge contact duration in milliseconds required for a tap gesture.";
     };
 
     gestures = lib.mkOption {

@@ -12,7 +12,8 @@ use edgepad::config::{
     default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
 };
 use edgepad::core::{
-    AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, SliderDirection, Zone,
+    AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, GestureDirection, SliderDirection,
+    Zone,
 };
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
 use edgepad::doctor::{run_doctor, DoctorCheck, DoctorConfig, DoctorReport, DoctorSection};
@@ -781,6 +782,7 @@ fn proxy(args: &ProxyArgs) -> Result<(), String> {
             },
         },
         edge_widths: EdgeWidths::all(args.edge_width),
+        engine_options: EngineOptions::default(),
         slider_specs: Vec::new(),
         mode: args.mode,
     })?;
@@ -870,6 +872,7 @@ fn run_daemon_proxy_with_startup_retry(
                         idle_drain_timeout: DAEMON_IDLE_DRAIN_TIMEOUT,
                     },
                     edge_widths,
+                    engine_options: config.engine_options(),
                     slider_specs: config.slider_specs(),
                     mode: ProxyMode::UinputGrab,
                 },

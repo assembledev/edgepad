@@ -116,6 +116,7 @@ Example config:
 ```toml
 device = "auto"
 edge_width = 0.10
+tap_min_duration_ms = 80
 
 [[sliders]]
 zone = "left"
@@ -160,6 +161,12 @@ device = "auto"
 
 ```toml
 edge_width = 0.10
+```
+
+`tap_min_duration_ms` ignores very short edge taps. It defaults to `80`; set it to `0` to disable the guard.
+
+```toml
+tap_min_duration_ms = 80
 ```
 
 Each gesture binding has a zone, direction, and action:

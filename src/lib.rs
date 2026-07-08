@@ -14,6 +14,10 @@ pub mod status;
 pub mod uinput;
 
 pub mod core {
+    use std::time::Duration;
+
+    pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 80;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct AxisRange {
         pub min: i32,
@@ -132,6 +136,19 @@ pub mod core {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EngineOptions {
+        pub tap_min_duration: Duration,
+    }
+
+    impl Default for EngineOptions {
+        fn default() -> Self {
+            Self {
+                tap_min_duration: Duration::from_millis(DEFAULT_TAP_MIN_DURATION_MS),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct SliderStep {
         pub zone: Zone,
         pub direction: SliderDirection,
@@ -192,6 +209,7 @@ pub mod core {
         start_y: Option<i32>,
         current_x: Option<i32>,
         current_y: Option<i32>,
+        started_at: Option<Duration>,
         slider_anchor: Option<f32>,
         held_events: Vec<Event>,
     }
@@ -206,6 +224,7 @@ pub mod core {
                 start_y: None,
                 current_x: None,
                 current_y: None,
+                started_at: None,
                 slider_anchor: None,
                 held_events: Vec::new(),
             }
@@ -222,6 +241,7 @@ pub mod core {
     pub struct Engine {
         caps: Capabilities,
         edges: EdgeWidths,
+        options: EngineOptions,
         sliders: Vec<SliderSpec>,
         current_slot: i32,
         slots: Vec<SlotState>,
@@ -240,6 +260,7 @@ pub mod core {
                 current_slot: caps.slot_min,
                 caps,
                 edges,
+                options: EngineOptions::default(),
                 sliders: Vec::new(),
                 slots: vec![SlotState::default(); slot_count],
             }
@@ -263,7 +284,34 @@ pub mod core {
             engine
         }
 
+        pub fn with_options(
+            caps: Capabilities,
+            edges: EdgeWidths,
+            sliders: Vec<SliderSpec>,
+            options: EngineOptions,
+        ) -> Self {
+            let mut engine = Self::with_sliders(caps, edges, sliders);
+            engine.options = options;
+            engine
+        }
+
         pub fn process_frame(&mut self, frame: &[Event]) -> Result<FrameOutput, SlotError> {
+            self.process_frame_with_time(frame, None)
+        }
+
+        pub fn process_frame_at(
+            &mut self,
+            frame: &[Event],
+            timestamp: Duration,
+        ) -> Result<FrameOutput, SlotError> {
+            self.process_frame_with_time(frame, Some(timestamp))
+        }
+
+        fn process_frame_with_time(
+            &mut self,
+            frame: &[Event],
+            timestamp: Option<Duration>,
+        ) -> Result<FrameOutput, SlotError> {
             let mut output = FrameOutput::empty();
 
             for event in frame.iter().copied() {
@@ -290,13 +338,14 @@ pub mod core {
                         slot_state.active = true;
                         slot_state.tracking_id = Some(tracking_id);
                         slot_state.ownership = Ownership::Unknown;
+                        slot_state.started_at = timestamp;
                         slot_state.held_events.push(event);
                     }
                     Event::TrackingId(-1) => {
-                        self.release_current_slot(event, &mut output)?;
+                        self.release_current_slot(event, timestamp, &mut output)?;
                     }
                     Event::TrackingId(_) => {
-                        self.release_current_slot(event, &mut output)?;
+                        self.release_current_slot(event, timestamp, &mut output)?;
                     }
                     Event::X(x) => {
                         let slot_state = self.slot_mut(self.current_slot)?;
@@ -326,6 +375,7 @@ pub mod core {
         fn release_current_slot(
             &mut self,
             event: Event,
+            timestamp: Option<Duration>,
             output: &mut FrameOutput,
         ) -> Result<(), SlotError> {
             let slot = self.current_slot;
@@ -333,11 +383,14 @@ pub mod core {
                 Ownership::Claimed(zone) => self.slider_for_zone(zone).is_some(),
                 Ownership::Unknown | Ownership::Passthrough => false,
             };
+            let options = self.options;
             let slot_state = self.slot_mut(slot)?;
 
             match slot_state.ownership {
                 Ownership::Claimed(zone) => {
-                    if let Some(gesture) = classify_gesture(slot, zone, slot_state) {
+                    if let Some(gesture) =
+                        classify_gesture(slot, zone, slot_state, options, timestamp)
+                    {
                         if !releases_slider_zone || gesture.direction == GestureDirection::Tap {
                             output.gestures.push(gesture);
                         }
@@ -524,7 +577,13 @@ pub mod core {
         }
     }
 
-    fn classify_gesture(slot: i32, zone: Zone, state: &SlotState) -> Option<Gesture> {
+    fn classify_gesture(
+        slot: i32,
+        zone: Zone,
+        state: &SlotState,
+        options: EngineOptions,
+        released_at: Option<Duration>,
+    ) -> Option<Gesture> {
         let start_x = state.start_x?;
         let start_y = state.start_y?;
         let current_x = state.current_x.unwrap_or(start_x);
@@ -533,6 +592,9 @@ pub mod core {
         let dy = current_y - start_y;
 
         let direction = if dx.abs() < 20 && dy.abs() < 20 {
+            if !tap_duration_is_valid(state.started_at, released_at, options.tap_min_duration) {
+                return None;
+            }
             GestureDirection::Tap
         } else if dx.abs() >= dy.abs() {
             if dx >= 0 {
@@ -552,6 +614,23 @@ pub mod core {
             slot,
             tracking_id: state.tracking_id?,
         })
+    }
+
+    fn tap_duration_is_valid(
+        started_at: Option<Duration>,
+        released_at: Option<Duration>,
+        min_duration: Duration,
+    ) -> bool {
+        if min_duration.is_zero() {
+            return true;
+        }
+
+        match (started_at, released_at) {
+            (Some(started_at), Some(released_at)) => released_at
+                .checked_sub(started_at)
+                .is_some_and(|duration| duration >= min_duration),
+            _ => true,
+        }
     }
 
     fn slider_position(caps: Capabilities, axis: SliderAxis, state: &SlotState) -> Option<f32> {
