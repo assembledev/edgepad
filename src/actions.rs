@@ -18,7 +18,8 @@ use crate::core::SliderAxis;
 use crate::core::{Gesture, GestureDirection, SliderDirection, SliderStep, Zone};
 use crate::proxy::GestureHandler;
 
-const ACTION_COMMAND_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const ACTION_COMMAND_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const ACTION_COMMAND_MAX_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ACTION_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const ACTION_WORKER_SHUTDOWN_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -89,6 +90,7 @@ impl ActionCommandRunner for ProcessCommandRunner {
             .split_first()
             .ok_or_else(|| "command action argv must not be empty".to_string())?;
         let mut child = spawn_action_command(program, args)?;
+        let mut poll_interval = ACTION_COMMAND_INITIAL_POLL_INTERVAL;
 
         loop {
             if let Some(status) = child
@@ -132,9 +134,14 @@ impl ActionCommandRunner for ProcessCommandRunner {
                 }
             }
 
-            thread::sleep(ACTION_COMMAND_SHUTDOWN_POLL_INTERVAL);
+            thread::sleep(poll_interval);
+            poll_interval = next_action_command_poll_interval(poll_interval);
         }
     }
+}
+
+fn next_action_command_poll_interval(current: Duration) -> Duration {
+    std::cmp::min(current.saturating_mul(2), ACTION_COMMAND_MAX_POLL_INTERVAL)
 }
 
 fn spawn_action_command(program: &str, args: &[String]) -> Result<Child, String> {
@@ -752,6 +759,21 @@ mod tests {
         assert_eq!(stats.succeeded_commands, 0);
         assert_eq!(stats.failed_commands, 1);
         assert_eq!(stats.worker_shutdown_timeouts, 0);
+    }
+
+    #[test]
+    fn action_command_poll_interval_backs_off_to_small_bound() {
+        let first = ACTION_COMMAND_INITIAL_POLL_INTERVAL;
+        let second = next_action_command_poll_interval(first);
+        let third = next_action_command_poll_interval(second);
+
+        assert!(first < Duration::from_millis(50));
+        assert_eq!(second, Duration::from_millis(2));
+        assert_eq!(third, Duration::from_millis(4));
+        assert_eq!(
+            next_action_command_poll_interval(Duration::from_millis(100)),
+            ACTION_COMMAND_MAX_POLL_INTERVAL
+        );
     }
 
     #[test]
