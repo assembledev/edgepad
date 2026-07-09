@@ -47,6 +47,7 @@ fn compose_frame_synthesizes_touch_and_position_from_passthrough_slot_not_raw_gl
     assert_eq!(
         output,
         vec![
+            RawEvent::abs_mt_slot(0),
             RawEvent::abs_mt_tracking_id(100),
             RawEvent::abs_mt_position_x(500),
             RawEvent::abs_mt_position_y(300),
@@ -141,9 +142,122 @@ fn compose_frame_releases_legacy_state_when_last_passthrough_contact_ends() {
     assert_eq!(
         output,
         vec![
+            RawEvent::abs_mt_slot(0),
             RawEvent::abs_mt_tracking_id(-1),
             RawEvent::btn_touch(false),
             RawEvent::btn_tool_finger(false),
+        ]
+    );
+}
+
+#[test]
+fn passthrough_release_carries_slot_context_after_claimed_slot_switch() {
+    let mut engine = test_engine();
+    let mut composer = RawOutputComposer::new(test_capabilities());
+
+    let _ = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(1),
+            RawEvent::abs_mt_tracking_id(100),
+            RawEvent::abs_mt_position_x(500),
+            RawEvent::abs_mt_position_y(300),
+        ]),
+    );
+
+    let _ = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(200),
+            RawEvent::abs_mt_position_x(20),
+            RawEvent::abs_mt_position_y(300),
+        ]),
+    );
+
+    let output = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(1),
+            RawEvent::abs_mt_tracking_id(-1),
+        ]),
+    );
+
+    assert_eq!(
+        output,
+        vec![
+            RawEvent::abs_mt_slot(1),
+            RawEvent::abs_mt_tracking_id(-1),
+            RawEvent::btn_touch(false),
+            RawEvent::btn_tool_finger(false),
+        ]
+    );
+}
+
+#[test]
+fn passthrough_start_carries_slot_context_after_claimed_slot_switch() {
+    let mut engine = test_engine();
+    let mut composer = RawOutputComposer::new(test_capabilities());
+
+    let _ = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(1),
+            RawEvent::abs_mt_tracking_id(100),
+            RawEvent::abs_mt_position_x(500),
+            RawEvent::abs_mt_position_y(300),
+        ]),
+    );
+    let _ = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(1),
+            RawEvent::abs_mt_tracking_id(-1),
+        ]),
+    );
+
+    let _ = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(200),
+            RawEvent::abs_mt_position_x(20),
+            RawEvent::abs_mt_position_y(300),
+        ]),
+    );
+    let _ = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![RawEvent::abs_mt_tracking_id(-1)]),
+    );
+
+    let output = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_tracking_id(300),
+            RawEvent::abs_mt_position_x(500),
+            RawEvent::abs_mt_position_y(300),
+        ]),
+    );
+
+    assert_eq!(
+        output,
+        vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(300),
+            RawEvent::abs_mt_position_x(500),
+            RawEvent::abs_mt_position_y(300),
+            RawEvent::btn_touch(true),
+            RawEvent::btn_tool_finger(true),
+            RawEvent::abs_x(500),
+            RawEvent::abs_y(300),
         ]
     );
 }

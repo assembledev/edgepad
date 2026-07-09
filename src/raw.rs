@@ -763,24 +763,24 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
 }
 
 fn raw_passthrough_events_for_core_passthrough(
-    frame: &RawFrame,
+    _frame: &RawFrame,
     core_passthrough: &[Event],
 ) -> Vec<RawEvent> {
-    let mut raw_passthrough = Vec::new();
-    let mut expected = core_passthrough.iter();
-    let mut next_expected = expected.next();
+    core_passthrough
+        .iter()
+        .copied()
+        .filter_map(raw_event_for_core_event)
+        .collect()
+}
 
-    for raw_event in &frame.events {
-        let Some(expected_event) = next_expected else {
-            break;
-        };
-        if core_event_for_raw_event(*raw_event).is_some_and(|event| event == *expected_event) {
-            raw_passthrough.push(*raw_event);
-            next_expected = expected.next();
-        }
+fn raw_event_for_core_event(event: Event) -> Option<RawEvent> {
+    match event {
+        Event::Slot(slot) => Some(RawEvent::abs_mt_slot(slot)),
+        Event::TrackingId(tracking_id) => Some(RawEvent::abs_mt_tracking_id(tracking_id)),
+        Event::X(x) => Some(RawEvent::abs_mt_position_x(x)),
+        Event::Y(y) => Some(RawEvent::abs_mt_position_y(y)),
+        Event::SynDropped => None,
     }
-
-    raw_passthrough
 }
 
 fn core_event_for_raw_event(event: RawEvent) -> Option<Event> {

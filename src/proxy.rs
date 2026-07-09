@@ -1020,7 +1020,7 @@ mod tests {
             .expect("finish should emit a synthetic release frame");
 
         assert_eq!(stats.composed_frames, 2);
-        assert_eq!(stats.composed_events, 10);
+        assert_eq!(stats.composed_events, 11);
         assert_eq!(stats.cleanup_output_frames, 1);
         assert_eq!(stats.cleanup_output_events, 3);
         assert_eq!(sink.frames().len(), 2);

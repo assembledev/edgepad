@@ -379,15 +379,11 @@ pub mod core {
             output: &mut FrameOutput,
         ) -> Result<(), SlotError> {
             let slot = self.current_slot;
-            let releases_slider_zone = match self.slot(slot)?.ownership {
-                Ownership::Claimed(zone) => self.slider_for_zone(zone).is_some(),
-                Ownership::Unknown | Ownership::Passthrough => false,
-            };
-            let options = self.options;
-            let slot_state = self.slot_mut(slot)?;
-
-            match slot_state.ownership {
+            match self.slot(slot)?.ownership {
                 Ownership::Claimed(zone) => {
+                    let releases_slider_zone = self.slider_for_zone(zone).is_some();
+                    let options = self.options;
+                    let slot_state = self.slot_mut(slot)?;
                     if let Some(gesture) =
                         classify_gesture(slot, zone, slot_state, options, timestamp)
                     {
@@ -395,13 +391,23 @@ pub mod core {
                             output.gestures.push(gesture);
                         }
                     }
+                    if slot_state.active {
+                        slot_state.reset();
+                    }
                 }
-                Ownership::Passthrough => output.passthrough.push(event),
-                Ownership::Unknown => slot_state.held_events.push(event),
-            }
-
-            if slot_state.active {
-                slot_state.reset();
+                Ownership::Passthrough => {
+                    self.push_passthrough_event_for_current_slot(event, output);
+                    if self.slot(slot)?.active {
+                        self.slot_mut(slot)?.reset();
+                    }
+                }
+                Ownership::Unknown => {
+                    let slot_state = self.slot_mut(slot)?;
+                    slot_state.held_events.push(event);
+                    if slot_state.active {
+                        slot_state.reset();
+                    }
+                }
             }
             Ok(())
         }
@@ -413,24 +419,54 @@ pub mod core {
         ) -> Result<(), SlotError> {
             let slot_state = self.slot_mut(self.current_slot)?;
             match slot_state.ownership {
-                Ownership::Passthrough => output.passthrough.push(event),
+                Ownership::Passthrough => {
+                    self.push_passthrough_event_for_current_slot(event, output)
+                }
                 Ownership::Unknown => slot_state.held_events.push(event),
                 Ownership::Claimed(_) => {}
             }
             Ok(())
         }
 
+        fn push_passthrough_event_for_current_slot(&self, event: Event, output: &mut FrameOutput) {
+            self.push_passthrough_event_for_slot(self.current_slot, event, output);
+        }
+
+        fn push_passthrough_event_for_slot(
+            &self,
+            slot: i32,
+            event: Event,
+            output: &mut FrameOutput,
+        ) {
+            match event {
+                Event::Slot(_) | Event::SynDropped => output.passthrough.push(event),
+                Event::TrackingId(_) | Event::X(_) | Event::Y(_) => {
+                    if last_passthrough_slot(&output.passthrough) != Some(slot) {
+                        output.passthrough.push(Event::slot(slot));
+                    }
+                    output.passthrough.push(event);
+                }
+            }
+        }
+
         fn decide_ownership_if_ready(&mut self, output: &mut FrameOutput) -> Result<(), SlotError> {
             let slot = self.current_slot;
             let Some(zone) = self.zone_for_current_slot()? else {
-                let slot_state = self.slot_mut(slot)?;
-                if slot_state.active
-                    && matches!(slot_state.ownership, Ownership::Unknown)
-                    && slot_state.start_x.is_some()
-                    && slot_state.start_y.is_some()
-                {
-                    slot_state.ownership = Ownership::Passthrough;
-                    output.passthrough.append(&mut slot_state.held_events);
+                let held_events = {
+                    let slot_state = self.slot_mut(slot)?;
+                    if slot_state.active
+                        && matches!(slot_state.ownership, Ownership::Unknown)
+                        && slot_state.start_x.is_some()
+                        && slot_state.start_y.is_some()
+                    {
+                        slot_state.ownership = Ownership::Passthrough;
+                        std::mem::take(&mut slot_state.held_events)
+                    } else {
+                        Vec::new()
+                    }
+                };
+                for event in held_events {
+                    self.push_passthrough_event_for_slot(slot, event, output);
                 }
                 return Ok(());
             };
@@ -575,6 +611,13 @@ pub mod core {
             let index = self.slot_index(slot)?;
             Ok(&mut self.slots[index])
         }
+    }
+
+    fn last_passthrough_slot(events: &[Event]) -> Option<i32> {
+        events.iter().rev().find_map(|event| match event {
+            Event::Slot(slot) => Some(*slot),
+            _ => None,
+        })
     }
 
     fn classify_gesture(
