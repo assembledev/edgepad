@@ -83,7 +83,7 @@ fn release_workflow_publishes_required_assets_and_checksums() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for required in [
-        "edgepad-x86_64-unknown-linux-gnu",
+        "edgepad-x86_64-unknown-linux-musl",
         "70-edgepad.rules",
         "edgepad.service",
         "edgepad.toml.example",
@@ -92,6 +92,10 @@ fn release_workflow_publishes_required_assets_and_checksums() {
         "v$PACKAGE_VERSION",
         "gh release create",
         "--generate-notes",
+        "targets: x86_64-unknown-linux-musl",
+        "--target x86_64-unknown-linux-musl",
+        "readelf -l",
+        "INTERP",
     ] {
         assert!(
             workflow.contains(required),

@@ -32,7 +32,7 @@ Preview the install plan first:
 curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --dry-run
 ```
 
-The installer downloads the x86_64 Linux release binary, installs udev rules, writes a default config to `~/.config/edgepad/edgepad.toml`, installs a systemd user service, starts it, and runs `edgepad doctor`.
+The installer downloads a statically linked x86_64 Linux release binary, installs udev rules, writes a default config to `~/.config/edgepad/edgepad.toml`, installs a systemd user service, starts it, and runs `edgepad doctor`.
 
 Uninstall files created by the release installer:
 

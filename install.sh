@@ -245,7 +245,7 @@ kernel="$(uname -s)"
 machine="$(uname -m)"
 case "${kernel}-${machine}" in
     Linux-x86_64|Linux-amd64)
-        target="x86_64-unknown-linux-gnu"
+        target="x86_64-unknown-linux-musl"
         ;;
     *)
         die "unsupported platform: ${kernel}-${machine}; the release installer ships x86_64 Linux only"
