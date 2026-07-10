@@ -33,6 +33,8 @@ curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh
 ```
 
 The installer downloads a statically linked x86_64 Linux release binary, installs udev rules, writes a default config to `~/.config/edgepad/edgepad.toml`, installs a systemd user service, starts it, and runs `edgepad doctor`.
+Running the installer again upgrades the installed files and restarts the active daemon before
+checking its health.
 
 Uninstall files created by the release installer:
 

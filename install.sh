@@ -9,7 +9,7 @@ CONFIG_DIR="${CONFIG_HOME}/edgepad"
 CONFIG_FILE="${CONFIG_DIR}/edgepad.toml"
 SYSTEMD_USER_DIR="${CONFIG_HOME}/systemd/user"
 SERVICE_FILE="${SYSTEMD_USER_DIR}/edgepad.service"
-UDEV_RULE_FILE="/etc/udev/rules.d/70-edgepad.rules"
+UDEV_RULE_FILE="${EDGEPAD_UDEV_RULE_FILE:-/etc/udev/rules.d/70-edgepad.rules}"
 DRY_RUN=0
 MODE="install"
 PURGE=0
@@ -134,7 +134,9 @@ print_install_dry_run_plan() {
     info "  ${tmp_dir}/edgepad.service -> ${SERVICE_FILE}"
     info "Would run:"
     info "  systemctl --user daemon-reload"
-    info "  systemctl --user enable --now edgepad.service"
+    info "  systemctl --user enable edgepad.service"
+    info "  systemctl --user restart edgepad.service"
+    info "  systemctl --user is-active --quiet edgepad.service"
     info ""
     info "Would run:"
     info "  ${BIN_DIR}/edgepad doctor"
@@ -307,7 +309,9 @@ fi
 
 run install -Dm0644 "${tmp_dir}/edgepad.service" "$SERVICE_FILE"
 run systemctl --user daemon-reload
-run systemctl --user enable --now edgepad.service
+run systemctl --user enable edgepad.service
+run systemctl --user restart edgepad.service
+run systemctl --user is-active --quiet edgepad.service
 run "${BIN_DIR}/edgepad" doctor
 
 info "edgepad installed"
