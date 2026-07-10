@@ -106,3 +106,11 @@ fn release_workflow_publishes_required_assets_and_checksums() {
         );
     }
 }
+
+#[test]
+fn ci_uses_the_locked_dependency_graph_for_rust_checks() {
+    let workflow = include_str!("../.github/workflows/ci.yml");
+
+    assert!(workflow.contains("cargo clippy --locked --all-targets -- -D warnings"));
+    assert!(workflow.contains("cargo test --locked"));
+}
