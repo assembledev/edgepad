@@ -8,6 +8,7 @@ pub mod config;
 pub mod device;
 pub mod doctor;
 pub mod dump;
+pub mod notify;
 pub mod proxy;
 pub mod raw;
 pub mod status;

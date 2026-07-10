@@ -57,6 +57,9 @@ edgepad daemon --config ~/.config/edgepad/edgepad.toml
 ```
 
 It uses the same proxy runtime as the bounded mode and stops on Ctrl+C or SIGTERM. During shutdown it drains briefly until the physical touchpad is idle, emits cleanup output, and ungrabs the physical device.
+The packaged systemd units use `Type=notify`: they become active only after `/dev/uinput` setup and
+the physical-device grab both succeed. While startup retry is waiting for hardware or permissions,
+systemd keeps the service in `activating` instead of reporting a false ready state.
 
 For normal desktop use, run the daemon as a user service with access to `/dev/input` and `/dev/uinput`. That lets gesture actions inherit the user session. Running the daemon with `sudo` is useful for manual diagnostics, but command actions then run with root's environment.
 

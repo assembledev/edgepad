@@ -331,6 +331,7 @@ fn service_status_line(service_name: &str) -> StatusLine {
             let load_state = property_value(&output.stdout, "LoadState").unwrap_or("unknown");
             let active_state = property_value(&output.stdout, "ActiveState").unwrap_or("unknown");
             let sub_state = property_value(&output.stdout, "SubState").unwrap_or("unknown");
+            let detail = service_state_detail(active_state, sub_state, &output.stdout);
 
             if load_state == "not-found" {
                 StatusLine::fail(
@@ -338,14 +339,9 @@ fn service_status_line(service_name: &str) -> StatusLine {
                     format!("{service_name} is not installed"),
                 )
             } else if active_state == "active" {
-                StatusLine::ok(StatusSubject::Service, format!("active ({sub_state})"))
-            } else if active_state == "failed" {
-                StatusLine::fail(StatusSubject::Service, format!("failed ({sub_state})"))
+                StatusLine::ok(StatusSubject::Service, detail)
             } else {
-                StatusLine::fail(
-                    StatusSubject::Service,
-                    format!("{active_state} ({sub_state})"),
-                )
+                StatusLine::fail(StatusSubject::Service, detail)
             }
         }
         Ok(output) => StatusLine::warn(
@@ -372,8 +368,25 @@ fn systemctl_user_show(service_name: &str) -> Result<CommandOutput, String> {
             "ActiveState",
             "-p",
             "SubState",
+            "-p",
+            "MainPID",
+            "-p",
+            "StatusText",
         ],
     )
+}
+
+fn service_state_detail(active_state: &str, sub_state: &str, output: &str) -> String {
+    let mut detail = format!("{active_state} ({sub_state})");
+    if let Some(pid) =
+        property_value(output, "MainPID").filter(|pid| *pid != "0" && !pid.is_empty())
+    {
+        detail.push_str(&format!(", pid {pid}"));
+    }
+    if let Some(status) = property_value(output, "StatusText").filter(|status| !status.is_empty()) {
+        detail.push_str(&format!(", {status}"));
+    }
+    detail
 }
 
 fn command_output(program: &str, args: &[&str]) -> Result<CommandOutput, String> {
@@ -582,7 +595,7 @@ mod tests {
     fn service_status_parses_active_systemd_unit() {
         let output = CommandOutput {
             status_success: true,
-            stdout: "LoadState=loaded\nActiveState=active\nSubState=running\n".to_string(),
+            stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=1234\nStatusText=edgepad 0.2.0 ready on /dev/input/event7\n".to_string(),
             stderr: String::new(),
         };
 
@@ -591,5 +604,26 @@ mod tests {
             Some("active")
         );
         assert_eq!(property_value(&output.stdout, "SubState"), Some("running"));
+        assert_eq!(
+            service_state_detail("active", "running", &output.stdout),
+            "active (running), pid 1234, edgepad 0.2.0 ready on /dev/input/event7"
+        );
+    }
+
+    #[test]
+    fn activating_notify_service_is_not_reported_as_running() {
+        let detail = service_state_detail(
+            "activating",
+            "start",
+            "MainPID=4321\nStatusText=waiting for touchpad access\n",
+        );
+        let line = StatusLine::fail(StatusSubject::Service, detail);
+
+        assert_eq!(line.severity, StatusSeverity::Fail);
+        assert_eq!(
+            line.detail,
+            "activating (start), pid 4321, waiting for touchpad access"
+        );
+        assert_eq!(status_result(&[line]), StatusResult::NotRunning);
     }
 }

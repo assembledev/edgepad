@@ -96,6 +96,10 @@ Check the current daemon, config, device, zones, and actions:
 edgepad status
 ```
 
+The service becomes active only after the virtual touchpad is created and the physical device is
+grabbed. Status output includes the ready daemon's PID, version, and selected device when systemd
+provides them.
+
 Run deeper diagnostics for device access, action executables, and service state:
 
 ```bash

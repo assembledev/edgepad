@@ -204,6 +204,9 @@ in
       };
 
       Service = {
+        Type = "notify";
+        NotifyAccess = "main";
+        TimeoutStartSec = "45s";
         ExecStart = "${lib.getExe cfg.package} daemon --config ${configFile}";
         Restart = "on-failure";
         RestartSec = "1s";

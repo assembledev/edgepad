@@ -147,6 +147,9 @@ let
     assert lib.hasInfix "daemon --config" (
       builtins.unsafeDiscardStringContext homeService.Service.ExecStart
     );
+    assert homeService.Service.Type == "notify";
+    assert homeService.Service.NotifyAccess == "main";
+    assert homeService.Service.TimeoutStartSec == "45s";
     pkgs.runCommand "edgepad-module-tests" { } ''
       set -eu
       grep -F 'device = "auto"' ${homeConfigFile}

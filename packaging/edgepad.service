@@ -3,7 +3,9 @@ Description=edgepad touchpad edge gesture daemon
 Documentation=https://github.com/assembledev/edgepad
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+TimeoutStartSec=45s
 ExecStart=%h/.local/bin/edgepad daemon --config %h/.config/edgepad/edgepad.toml
 Restart=on-failure
 RestartSec=1s

@@ -76,6 +76,9 @@ fn release_user_service_runs_installed_user_binary_with_config() {
     );
     assert!(service.contains("WantedBy=default.target"));
     assert!(service.contains("Restart=on-failure"));
+    assert!(service.contains("Type=notify"));
+    assert!(service.contains("NotifyAccess=main"));
+    assert!(service.contains("TimeoutStartSec=45s"));
 }
 
 #[test]

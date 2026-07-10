@@ -248,10 +248,23 @@ pub fn run_proxy_with_gesture_handler<H>(
 where
     H: GestureHandler,
 {
+    let mut on_ready = |_device_path: &std::path::Path| Ok(());
+    run_proxy_with_gesture_handler_and_ready(config, handler, &mut on_ready)
+}
+
+pub fn run_proxy_with_gesture_handler_and_ready<H, F>(
+    config: &ProxyRunConfig,
+    handler: &mut H,
+    on_ready: &mut F,
+) -> Result<ProxyRunSummary, String>
+where
+    H: GestureHandler,
+    F: FnMut(&std::path::Path) -> Result<(), String>,
+{
     validate_run_limit(&config.limit)?;
     match config.mode {
         ProxyMode::DryRun => proxy_dry_run(config, handler),
-        ProxyMode::UinputGrab => proxy_uinput_grab(config, handler),
+        ProxyMode::UinputGrab => proxy_uinput_grab(config, handler, on_ready),
     }
 }
 
@@ -294,9 +307,14 @@ where
     })
 }
 
-fn proxy_uinput_grab<H>(config: &ProxyRunConfig, handler: &mut H) -> Result<ProxyRunSummary, String>
+fn proxy_uinput_grab<H, F>(
+    config: &ProxyRunConfig,
+    handler: &mut H,
+    on_ready: &mut F,
+) -> Result<ProxyRunSummary, String>
 where
     H: GestureHandler,
+    F: FnMut(&std::path::Path) -> Result<(), String>,
 {
     let (mut device, capabilities) = open_proxy_device(&config.device_path)?;
     ensure_physical_touchpad_idle_at_start(&config.device_path, &device, capabilities)?;
@@ -313,6 +331,18 @@ where
             config.device_path.display()
         )
     })?;
+    if let Err(ready_err) = on_ready(&config.device_path) {
+        let ungrab_result = device.ungrab().map_err(|err| {
+            format!(
+                "failed to ungrab device {} after readiness failure: {err}",
+                config.device_path.display()
+            )
+        });
+        return match ungrab_result {
+            Ok(()) => Err(ready_err),
+            Err(ungrab_err) => Err(append_additional_error(ready_err, ungrab_err)),
+        };
+    }
     let run_result = run_proxy_loop(
         &mut device,
         ProxyLoopConfig {

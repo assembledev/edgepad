@@ -22,7 +22,7 @@ use edgepad::dump::{
     write_raw_events_with_limit, WriteEventsResult,
 };
 use edgepad::proxy::{
-    run_proxy, run_proxy_with_gesture_handler, ProxyMode, ProxyRunConfig, ProxyRunLimit,
+    run_proxy, run_proxy_with_gesture_handler_and_ready, ProxyMode, ProxyRunConfig, ProxyRunLimit,
     ProxyRunSummary, StopAfterFrameLimit, StopToken, DEFAULT_EDGE_WIDTH,
 };
 use edgepad::raw::{
@@ -864,7 +864,7 @@ fn run_daemon_proxy_with_startup_retry(
                 last_announced_device = Some(device_path.clone());
             }
 
-            run_proxy_with_gesture_handler(
+            run_proxy_with_gesture_handler_and_ready(
                 &ProxyRunConfig {
                     device_path,
                     limit: ProxyRunLimit::UntilStopped {
@@ -877,6 +877,15 @@ fn run_daemon_proxy_with_startup_retry(
                     mode: ProxyMode::UinputGrab,
                 },
                 action_dispatcher,
+                &mut |ready_device| {
+                    if edgepad::notify::notify_ready(ready_device)? {
+                        eprintln!(
+                            "edgepad daemon: systemd ready notification sent for {}",
+                            ready_device.display()
+                        );
+                    }
+                    Ok(())
+                },
             )
         });
 
