@@ -9,6 +9,7 @@ The hard part is input correctness: Type-B multitouch slots, mixed edge/center c
 ## Features
 
 - Edge gestures on the left, right, top, and bottom touchpad zones.
+- Continuous edge sliders for stepwise controls such as volume and brightness.
 - Normal touchpad passthrough for unclaimed center contacts.
 - Long-running user-session daemon with TOML config.
 - Command actions as argv arrays, without shell re-splitting.

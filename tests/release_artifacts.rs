@@ -88,7 +88,10 @@ fn release_workflow_publishes_required_assets_and_checksums() {
         "edgepad.service",
         "edgepad.toml.example",
         "checksums",
+        "Verify tag matches Cargo version",
+        "v$PACKAGE_VERSION",
         "gh release create",
+        "--generate-notes",
     ] {
         assert!(
             workflow.contains(required),
