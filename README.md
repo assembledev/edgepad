@@ -118,6 +118,7 @@ Example config:
 device = "auto"
 edge_width = 0.10
 tap_min_duration_ms = 80
+swipe_min_distance = 0.02
 
 [[sliders]]
 zone = "left"
@@ -168,6 +169,14 @@ edge_width = 0.10
 
 ```toml
 tap_min_duration_ms = 80
+```
+
+`swipe_min_distance` is the minimum normalized touchpad travel that turns an edge contact into a
+directional gesture. It defaults to `0.02`, or 2% of the corresponding touchpad axis. Smaller
+movement remains a tap, so the same physical gesture behaves consistently across coordinate ranges.
+
+```toml
+swipe_min_distance = 0.02
 ```
 
 Each gesture binding has a zone, direction, and action:

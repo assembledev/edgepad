@@ -66,6 +66,7 @@ For normal desktop use, run the daemon as a user service with access to `/dev/in
 device = "auto"
 edge_width = 0.10
 tap_min_duration_ms = 80
+swipe_min_distance = 0.02
 
 [[gestures]]
 zone = "top"

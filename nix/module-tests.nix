@@ -91,6 +91,7 @@ let
           device = "auto";
           edgeWidth = 0.1;
           tapMinDurationMs = 90;
+          swipeMinDistance = 0.03;
           gestures = [
             {
               zone = "right";
@@ -151,6 +152,7 @@ let
       grep -F 'device = "auto"' ${homeConfigFile}
       grep -F 'edge_width = 0.1' ${homeConfigFile}
       grep -F 'tap_min_duration_ms = 90' ${homeConfigFile}
+      grep -F 'swipe_min_distance = 0.03' ${homeConfigFile}
       grep -F '[[gestures]]' ${homeConfigFile}
       grep -F 'zone = "right"' ${homeConfigFile}
       grep -F 'direction = "down"' ${homeConfigFile}

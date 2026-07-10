@@ -17,13 +17,14 @@ use crate::device::{
 
 pub const DEFAULT_EDGE_WIDTH: f32 = 0.10;
 pub const DEFAULT_SLIDER_STEP: f32 = 0.04;
-pub use crate::core::DEFAULT_TAP_MIN_DURATION_MS;
+pub use crate::core::{DEFAULT_SWIPE_MIN_DISTANCE, DEFAULT_TAP_MIN_DURATION_MS};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgepadConfig {
     pub device: DeviceConfig,
     pub edge_width: f32,
     pub tap_min_duration_ms: u64,
+    pub swipe_min_distance: f32,
     pub gestures: Vec<GestureBindingConfig>,
     pub sliders: Vec<SliderBindingConfig>,
 }
@@ -34,6 +35,7 @@ impl Default for EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: DEFAULT_EDGE_WIDTH,
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
+            swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
             sliders: Vec::new(),
         }
@@ -58,6 +60,10 @@ impl EdgepadConfig {
         if let Some(tap_min_duration_ms) = raw.tap_min_duration_ms {
             config.tap_min_duration_ms =
                 validate_tap_min_duration_ms(tap_min_duration_ms, "tap_min_duration_ms")?;
+        }
+        if let Some(swipe_min_distance) = raw.swipe_min_distance {
+            config.swipe_min_distance =
+                validate_swipe_min_distance(swipe_min_distance, "swipe_min_distance")?;
         }
 
         for (index, raw_binding) in raw.gestures.into_iter().enumerate() {
@@ -122,6 +128,7 @@ impl EdgepadConfig {
     pub fn engine_options(&self) -> EngineOptions {
         EngineOptions {
             tap_min_duration: Duration::from_millis(self.tap_min_duration_ms),
+            swipe_min_distance: self.swipe_min_distance,
         }
     }
 
@@ -381,6 +388,13 @@ fn validate_tap_min_duration_ms(parsed: u64, name: &str) -> Result<u64, String> 
     Ok(parsed)
 }
 
+fn validate_swipe_min_distance(parsed: f32, name: &str) -> Result<f32, String> {
+    if !(parsed > 0.0 && parsed <= 1.0) {
+        return Err(format!("{name} must be > 0 and <= 1"));
+    }
+    Ok(parsed)
+}
+
 fn resolve_auto_touchpad(input_root: &Path) -> Result<PathBuf, String> {
     let report = discover_device_report(input_root)
         .map_err(|err| format!("failed to list {}: {err}", input_root.display()))?;
@@ -519,6 +533,7 @@ struct RawEdgepadConfig {
     device: Option<String>,
     edge_width: Option<f32>,
     tap_min_duration_ms: Option<u64>,
+    swipe_min_distance: Option<f32>,
     #[serde(default)]
     gestures: Vec<RawGestureBindingConfig>,
     #[serde(default)]
@@ -624,6 +639,7 @@ mod tests {
             device = "/dev/input/event7"
             edge_width = 0.20
             tap_min_duration_ms = 90
+            swipe_min_distance = 0.03
 
             [[gestures]]
             zone = "left"
@@ -644,10 +660,12 @@ mod tests {
         );
         assert_eq!(config.edge_width, 0.20);
         assert_eq!(config.tap_min_duration_ms, 90);
+        assert_eq!(config.swipe_min_distance, 0.03);
         assert_eq!(
             config.engine_options().tap_min_duration,
             Duration::from_millis(90)
         );
+        assert_eq!(config.engine_options().swipe_min_distance, 0.03);
         assert_eq!(
             config.gestures,
             vec![
@@ -684,6 +702,7 @@ mod tests {
         .expect("config should parse");
 
         assert_eq!(config.tap_min_duration_ms, DEFAULT_TAP_MIN_DURATION_MS);
+        assert_eq!(config.swipe_min_distance, DEFAULT_SWIPE_MIN_DISTANCE);
     }
 
     #[test]
@@ -796,6 +815,25 @@ mod tests {
         assert_eq!(
             result.as_ref().err().map(String::as_str),
             Some("tap_min_duration_ms must be <= 10000")
+        );
+    }
+
+    #[test]
+    fn edgepad_config_rejects_invalid_swipe_min_distance() {
+        let result = EdgepadConfig::parse(
+            r#"
+            swipe_min_distance = 0.0
+
+            [[gestures]]
+            zone = "left"
+            direction = "tap"
+            action = ["pamixer", "-t"]
+            "#,
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("swipe_min_distance must be > 0 and <= 1")
         );
     }
 
