@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use crate::core::{AxisRange, Capabilities, Engine, Event, Gesture, SliderStep, SlotError};
+use crate::core::{
+    AxisRange, Capabilities, Engine, Event, Gesture, ResyncContact, SliderStep, SlotError,
+};
 
 pub const EV_SYN: u16 = 0x00;
 pub const EV_KEY: u16 = 0x01;
@@ -759,6 +761,23 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
         gestures: output.gestures,
         slider_steps: output.slider_steps,
         resync_required: output.resync_required,
+    })
+}
+
+pub fn route_resync_contacts(
+    engine: &mut Engine,
+    contacts: &[ResyncContact],
+) -> Result<RoutedRawFrame, SlotError> {
+    let output = engine.restore_passthrough_contacts(contacts)?;
+    Ok(RoutedRawFrame {
+        passthrough: output
+            .passthrough
+            .into_iter()
+            .filter_map(raw_event_for_core_event)
+            .collect(),
+        gestures: Vec::new(),
+        slider_steps: Vec::new(),
+        resync_required: false,
     })
 }
 

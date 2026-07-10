@@ -10,14 +10,14 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 #[cfg(test)]
 use crate::core::SliderAxis;
 use crate::core::{
-    Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureDirection, SliderDirection,
-    SliderSpec, SliderStep, Zone,
+    Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureDirection, ResyncContact,
+    SliderDirection, SliderSpec, SliderStep, Zone,
 };
 use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
-    extract_core_events, route_raw_frame, RawEvent, RawFrame, RawOutputComposer, RawOutputSink,
-    RecordingRawOutputSink, ABS_MT_SLOT, ABS_MT_TRACKING_ID, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN,
-    SYN_DROPPED, SYN_REPORT,
+    extract_core_events, route_raw_frame, route_resync_contacts, RawEvent, RawFrame,
+    RawOutputComposer, RawOutputSink, RecordingRawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y,
+    ABS_MT_SLOT, ABS_MT_TRACKING_ID, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED, SYN_REPORT,
 };
 use crate::uinput::{
     build_virtual_touchpad, UinputEventWriter, UinputRawOutputSink, VirtualTouchpadSpec,
@@ -72,6 +72,43 @@ impl PendingRawFrame {
             std::mem::take(&mut self.events),
             timestamp,
         ))
+    }
+
+    fn discard(&mut self) {
+        self.events.clear();
+        self.timestamp = None;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResyncStreamAction {
+    ProcessNormally,
+    StartResync,
+    CompleteResync,
+    Ignore,
+}
+
+fn observe_resync_stream_event(
+    resync_pending: &mut bool,
+    pending: &mut PendingRawFrame,
+    event: RawEvent,
+) -> ResyncStreamAction {
+    if *resync_pending {
+        return match (event.kind, event.code) {
+            (EV_SYN, SYN_REPORT) => {
+                *resync_pending = false;
+                ResyncStreamAction::CompleteResync
+            }
+            _ => ResyncStreamAction::Ignore,
+        };
+    }
+
+    if (event.kind, event.code) == (EV_SYN, SYN_DROPPED) {
+        pending.discard();
+        *resync_pending = true;
+        ResyncStreamAction::StartResync
+    } else {
+        ResyncStreamAction::ProcessNormally
     }
 }
 
@@ -351,9 +388,17 @@ fn physical_touch_snapshot_is_down(btn_touch_down: bool, mt_tracking_ids: &[i32]
 }
 
 fn mt_tracking_ids(device: &RawDevice, capabilities: Capabilities) -> Result<Vec<i32>, String> {
+    mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)
+}
+
+fn mt_slot_values(
+    device: &RawDevice,
+    capabilities: Capabilities,
+    axis_code: u16,
+) -> Result<Vec<i32>, String> {
     let slot_count = (capabilities.slot_max - capabilities.slot_min + 1) as usize;
     let mut request = vec![0_i32; slot_count + 1];
-    request[0] = ABS_MT_TRACKING_ID as i32;
+    request[0] = axis_code as i32;
     let request_bytes = unsafe {
         std::slice::from_raw_parts_mut(
             request.as_mut_ptr().cast::<u8>(),
@@ -361,9 +406,46 @@ fn mt_tracking_ids(device: &RawDevice, capabilities: Capabilities) -> Result<Vec
         )
     };
     unsafe { eviocgmtslots(device.as_raw_fd(), request_bytes) }.map_err(|err| {
-        format!("failed to read current multitouch slot state before live proxy: {err}")
+        format!("failed to read current multitouch slot axis {axis_code:#x}: {err}")
     })?;
     Ok(request[1..].to_vec())
+}
+
+fn read_resync_contacts(
+    device: &RawDevice,
+    capabilities: Capabilities,
+) -> Result<Vec<ResyncContact>, String> {
+    let tracking_ids = mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)?;
+    let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)?;
+    let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)?;
+    Ok(resync_contacts_from_slot_values(
+        capabilities,
+        &tracking_ids,
+        &x_values,
+        &y_values,
+    ))
+}
+
+fn resync_contacts_from_slot_values(
+    capabilities: Capabilities,
+    tracking_ids: &[i32],
+    x_values: &[i32],
+    y_values: &[i32],
+) -> Vec<ResyncContact> {
+    tracking_ids
+        .iter()
+        .zip(x_values)
+        .zip(y_values)
+        .enumerate()
+        .filter_map(|(index, ((tracking_id, x), y))| {
+            (*tracking_id >= 0).then_some(ResyncContact {
+                slot: capabilities.slot_min + index as i32,
+                tracking_id: *tracking_id,
+                x: *x,
+                y: *y,
+            })
+        })
+        .collect()
 }
 
 fn settle_after_uinput_proxy_run<W>(
@@ -436,6 +518,7 @@ where
     let mut stopper = ProxyLoopStopper::new(limit);
     let mut drain_deadline: Option<Instant> = None;
     let mut pending = PendingRawFrame::default();
+    let mut resync_pending = false;
 
     loop {
         let timeout = drain_deadline
@@ -462,6 +545,45 @@ where
         for raw in events {
             let event = raw;
             let raw = event.raw;
+            match observe_resync_stream_event(&mut resync_pending, &mut pending, raw) {
+                ResyncStreamAction::Ignore => continue,
+                ResyncStreamAction::StartResync => {
+                    let dropped = raw_frame_with_timestamp(vec![raw], event.timestamp);
+                    process_proxy_raw_frame(
+                        &dropped,
+                        &mut touch_state,
+                        &mut engine,
+                        &mut composer,
+                        sink,
+                        &mut stats,
+                        handler,
+                    )?;
+                    touch_state.mark_desynchronized();
+                    stats.input_frame_boundaries += 1;
+                    continue;
+                }
+                ResyncStreamAction::CompleteResync => {
+                    let contacts = read_resync_contacts(device, config.capabilities)?;
+                    process_proxy_resync_contacts(
+                        &contacts,
+                        &mut engine,
+                        &mut composer,
+                        sink,
+                        &mut stats,
+                        handler,
+                    )?;
+                    touch_state.restore_contacts(&contacts);
+                    stats.input_frame_boundaries += 1;
+                    if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
+                        stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
+                        finish_proxy_output(&mut composer, sink, &mut stats)?;
+                        return Ok(stats);
+                    }
+                    stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
+                    continue;
+                }
+                ResyncStreamAction::ProcessNormally => {}
+            }
             match (raw.kind, raw.code) {
                 (EV_SYN, SYN_REPORT) => {
                     if let Some(frame) = pending.take_frame(event.timestamp) {
@@ -475,41 +597,6 @@ where
                             handler,
                         )?;
                     }
-                    stats.input_frame_boundaries += 1;
-                    if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
-                        stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
-                        finish_proxy_output(&mut composer, sink, &mut stats)?;
-                        return Ok(stats);
-                    }
-                    if stopper.is_draining() && drain_deadline.is_none() {
-                        drain_deadline = stopper
-                            .drain_timeout()
-                            .map(|timeout| Instant::now() + timeout);
-                    }
-                    stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
-                }
-                (EV_SYN, SYN_DROPPED) => {
-                    if let Some(frame) = pending.take_frame(event.timestamp) {
-                        process_proxy_raw_frame(
-                            &frame,
-                            &mut touch_state,
-                            &mut engine,
-                            &mut composer,
-                            sink,
-                            &mut stats,
-                            handler,
-                        )?;
-                    }
-                    let dropped = raw_frame_with_timestamp(vec![raw], event.timestamp);
-                    process_proxy_raw_frame(
-                        &dropped,
-                        &mut touch_state,
-                        &mut engine,
-                        &mut composer,
-                        sink,
-                        &mut stats,
-                        handler,
-                    )?;
                     stats.input_frame_boundaries += 1;
                     if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
                         stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
@@ -636,6 +723,42 @@ where
     stats.recognizer_events += recognizer_events;
 
     let routed = route_raw_frame(engine, frame).map_err(|err| format!("proxy failed: {err:?}"))?;
+    process_proxy_routed_frame(recognizer_events, composer, sink, stats, routed, handler)
+}
+
+fn process_proxy_resync_contacts<S, H>(
+    contacts: &[ResyncContact],
+    engine: &mut Engine,
+    composer: &mut RawOutputComposer,
+    sink: &mut S,
+    stats: &mut ProxyRuntimeStats,
+    handler: &mut H,
+) -> Result<(), String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+    H: GestureHandler,
+{
+    let routed = route_resync_contacts(engine, contacts)
+        .map_err(|err| format!("proxy resync failed: {err:?}"))?;
+    let recognizer_events = routed.passthrough.len();
+    stats.recognizer_events += recognizer_events;
+    process_proxy_routed_frame(recognizer_events, composer, sink, stats, routed, handler)
+}
+
+fn process_proxy_routed_frame<S, H>(
+    recognizer_events: usize,
+    composer: &mut RawOutputComposer,
+    sink: &mut S,
+    stats: &mut ProxyRuntimeStats,
+    routed: crate::raw::RoutedRawFrame,
+    handler: &mut H,
+) -> Result<(), String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+    H: GestureHandler,
+{
     let passthrough_events = routed.passthrough.len();
     stats.recognizer_passthrough_events += passthrough_events;
     if passthrough_events > 0 {
@@ -897,6 +1020,7 @@ struct PhysicalTouchState {
     current_slot: i32,
     active_slots: Vec<bool>,
     btn_touch_down: bool,
+    desynchronized: bool,
     capabilities: Capabilities,
 }
 
@@ -907,6 +1031,7 @@ impl PhysicalTouchState {
             current_slot: capabilities.slot_min,
             active_slots: vec![false; slot_count],
             btn_touch_down: false,
+            desynchronized: false,
             capabilities,
         }
     }
@@ -936,7 +1061,26 @@ impl PhysicalTouchState {
     }
 
     fn is_touch_down(&self) -> bool {
-        self.btn_touch_down || self.active_slots.iter().any(|active| *active)
+        self.desynchronized || self.btn_touch_down || self.active_slots.iter().any(|active| *active)
+    }
+
+    fn mark_desynchronized(&mut self) {
+        self.active_slots.fill(false);
+        self.btn_touch_down = false;
+        self.desynchronized = true;
+    }
+
+    fn restore_contacts(&mut self, contacts: &[ResyncContact]) {
+        self.current_slot = self.capabilities.slot_min;
+        self.active_slots.fill(false);
+        self.btn_touch_down = !contacts.is_empty();
+        self.desynchronized = false;
+        for contact in contacts {
+            if let Some(index) = self.slot_index(contact.slot) {
+                self.active_slots[index] = true;
+                self.current_slot = contact.slot;
+            }
+        }
     }
 
     fn slot_index(&self, slot: i32) -> Option<usize> {
@@ -1344,6 +1488,70 @@ mod tests {
     #[test]
     fn physical_touch_snapshot_treats_all_released_slots_as_idle() {
         assert!(!physical_touch_snapshot_is_down(false, &[-1, -1, -1]));
+    }
+
+    #[test]
+    fn syn_dropped_discards_partial_frame_and_ignores_events_until_syn_report() {
+        let mut pending = PendingRawFrame::default();
+        pending.push(ProxyInputEvent {
+            raw: RawEvent::abs_mt_position_x(500),
+            timestamp: None,
+        });
+        let mut resync_pending = false;
+
+        assert_eq!(
+            observe_resync_stream_event(&mut resync_pending, &mut pending, RawEvent::syn_dropped(),),
+            ResyncStreamAction::StartResync
+        );
+        assert!(pending.events.is_empty());
+        assert!(resync_pending);
+        assert_eq!(
+            observe_resync_stream_event(
+                &mut resync_pending,
+                &mut pending,
+                RawEvent::abs_mt_tracking_id(77),
+            ),
+            ResyncStreamAction::Ignore
+        );
+        assert_eq!(
+            observe_resync_stream_event(&mut resync_pending, &mut pending, RawEvent::syn_report(),),
+            ResyncStreamAction::CompleteResync
+        );
+        assert!(!resync_pending);
+    }
+
+    #[test]
+    fn resync_snapshot_keeps_only_active_slots_with_real_slot_numbers() {
+        let contacts = resync_contacts_from_slot_values(
+            Capabilities {
+                slot_min: 2,
+                slot_max: 4,
+                ..test_capabilities()
+            },
+            &[-1, 501, -1],
+            &[10, 20, 30],
+            &[40, 50, 60],
+        );
+
+        assert_eq!(
+            contacts,
+            vec![ResyncContact {
+                slot: 3,
+                tracking_id: 501,
+                x: 20,
+                y: 50,
+            }]
+        );
+    }
+
+    #[test]
+    fn physical_touch_state_stays_busy_until_resync_snapshot_arrives() {
+        let mut state = PhysicalTouchState::new(test_capabilities());
+        state.mark_desynchronized();
+        assert!(state.is_touch_down());
+
+        state.restore_contacts(&[]);
+        assert!(!state.is_touch_down());
     }
 
     #[test]

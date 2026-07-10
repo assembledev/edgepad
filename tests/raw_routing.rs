@@ -1,7 +1,9 @@
 use std::time::Duration;
 
-use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
-use edgepad::raw::{route_raw_frame, RawEvent, RawFrame};
+use edgepad::core::{
+    AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, ResyncContact, Zone,
+};
+use edgepad::raw::{route_raw_frame, route_resync_contacts, RawEvent, RawFrame};
 
 fn test_engine() -> Engine {
     Engine::new(
@@ -171,4 +173,31 @@ fn route_raw_frame_reports_syn_dropped_without_emitting_raw_passthrough() {
     assert!(routed.passthrough.is_empty());
     assert!(routed.gestures.is_empty());
     assert!(routed.resync_required);
+}
+
+#[test]
+fn route_resync_contacts_rebuilds_kernel_snapshot_as_passthrough() {
+    let mut engine = test_engine();
+    let routed = route_resync_contacts(
+        &mut engine,
+        &[ResyncContact {
+            slot: 1,
+            tracking_id: 200,
+            x: 20,
+            y: 300,
+        }],
+    )
+    .expect("resync snapshot should route");
+
+    assert_eq!(
+        routed.passthrough,
+        vec![
+            RawEvent::abs_mt_slot(1),
+            RawEvent::abs_mt_tracking_id(200),
+            RawEvent::abs_mt_position_x(20),
+            RawEvent::abs_mt_position_y(300),
+        ]
+    );
+    assert!(routed.gestures.is_empty());
+    assert!(!routed.resync_required);
 }

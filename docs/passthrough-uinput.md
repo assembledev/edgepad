@@ -105,7 +105,10 @@ Those values can follow an edge-owned contact while another center contact is ac
 - `BTN_TOUCH` follows the count of unclaimed active contacts;
 - `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, and related tool keys follow the unclaimed active contact count;
 - legacy `ABS_X/Y` come from a representative unclaimed active slot;
-- `SYN_DROPPED` releases tracked virtual contacts and marks resync.
+- `SYN_DROPPED` releases tracked virtual contacts, ignores the unreliable tail through the next
+  `SYN_REPORT`, then queries the kernel's current multitouch slot state. Contacts that were already
+  held during resync are restored as passthrough until release so incomplete history cannot create
+  a gesture.
 
 ## uinput batching
 

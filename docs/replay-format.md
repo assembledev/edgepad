@@ -27,6 +27,10 @@ ABS_MT_SLOT 0 # inline comment
 `SYN_REPORT` ends the current frame. Events before the next `SYN_REPORT` are processed together.
 
 `SYN_DROPPED` creates a standalone frame that tells the engine to clear local touch state and require resync.
+The live proxy additionally ignores events through the next `SYN_REPORT`, queries the kernel slot
+snapshot, and restores already-held contacts as passthrough. Text replay has no physical device to
+query, so a fixture must provide a fresh complete contact after `SYN_DROPPED` when it wants to model
+post-resync input.
 
 ## Raw dump syntax
 

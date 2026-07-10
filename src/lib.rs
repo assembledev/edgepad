@@ -156,6 +156,14 @@ pub mod core {
         pub tracking_id: i32,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ResyncContact {
+        pub slot: i32,
+        pub tracking_id: i32,
+        pub x: i32,
+        pub y: i32,
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FrameOutput {
         pub passthrough: Vec<Event>,
@@ -305,6 +313,36 @@ pub mod core {
             timestamp: Duration,
         ) -> Result<FrameOutput, SlotError> {
             self.process_frame_with_time(frame, Some(timestamp))
+        }
+
+        pub fn restore_passthrough_contacts(
+            &mut self,
+            contacts: &[ResyncContact],
+        ) -> Result<FrameOutput, SlotError> {
+            self.reset_for_resync();
+            let mut output = FrameOutput::empty();
+
+            for contact in contacts {
+                self.ensure_slot(contact.slot)?;
+                self.current_slot = contact.slot;
+                let slot = self.slot_mut(contact.slot)?;
+                slot.active = true;
+                slot.tracking_id = Some(contact.tracking_id);
+                slot.ownership = Ownership::Passthrough;
+                slot.start_x = Some(contact.x);
+                slot.start_y = Some(contact.y);
+                slot.current_x = Some(contact.x);
+                slot.current_y = Some(contact.y);
+
+                output.passthrough.extend([
+                    Event::slot(contact.slot),
+                    Event::tracking_id(contact.tracking_id),
+                    Event::x(contact.x),
+                    Event::y(contact.y),
+                ]);
+            }
+
+            Ok(output)
         }
 
         fn process_frame_with_time(

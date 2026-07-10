@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, Event, GestureDirection,
-    SliderAxis, SliderDirection, SliderSpec, SlotError, Zone,
+    ResyncContact, SliderAxis, SliderDirection, SliderSpec, SlotError, Zone,
 };
 
 fn test_caps() -> Capabilities {
@@ -414,4 +414,41 @@ fn syn_dropped_clears_state_and_requires_explicit_resync() {
         .expect("state was cleared after SYN_DROPPED");
 
     assert!(!restarted.resync_required);
+}
+
+#[test]
+fn restored_contact_is_passthrough_until_release_even_when_it_is_on_an_edge() {
+    let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
+    engine
+        .process_frame(&[Event::syn_dropped()])
+        .expect("SYN_DROPPED should reset the engine");
+
+    let restored = engine
+        .restore_passthrough_contacts(&[ResyncContact {
+            slot: 1,
+            tracking_id: 42,
+            x: 20,
+            y: 300,
+        }])
+        .expect("kernel snapshot should restore the active contact");
+
+    assert_eq!(
+        restored.passthrough,
+        vec![
+            Event::slot(1),
+            Event::tracking_id(42),
+            Event::x(20),
+            Event::y(300),
+        ]
+    );
+    assert!(restored.gestures.is_empty());
+
+    let released = engine
+        .process_frame(&[Event::slot(1), Event::tracking_id(-1)])
+        .expect("restored contact release should pass through");
+    assert_eq!(
+        released.passthrough,
+        vec![Event::slot(1), Event::tracking_id(-1)]
+    );
+    assert!(released.gestures.is_empty());
 }
