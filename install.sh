@@ -27,7 +27,7 @@ Options:
 
 Environment:
   EDGEPAD_REPO=owner/repo      GitHub repository [default: assembledev/edgepad]
-  EDGEPAD_VERSION=v0.1.0      Release tag to install [default: latest]
+  EDGEPAD_VERSION=vX.Y.Z      Release tag to install [default: latest]
   XDG_CONFIG_HOME=path        User config root [default: ~/.config]
 EOF
 }
@@ -248,7 +248,7 @@ case "${kernel}-${machine}" in
         target="x86_64-unknown-linux-gnu"
         ;;
     *)
-        die "unsupported platform: ${kernel}-${machine}; edgepad 0.1.0 release installer ships x86_64 Linux only"
+        die "unsupported platform: ${kernel}-${machine}; the release installer ships x86_64 Linux only"
         ;;
 esac
 

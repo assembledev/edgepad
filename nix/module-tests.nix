@@ -90,6 +90,7 @@ let
           enable = true;
           device = "auto";
           edgeWidth = 0.1;
+          tapMinDurationMs = 90;
           gestures = [
             {
               zone = "right";
@@ -107,6 +108,21 @@ let
                 "notify-send"
                 "edgepad"
                 "top-right"
+              ];
+            }
+          ];
+          sliders = [
+            {
+              zone = "left";
+              up = [
+                "pamixer"
+                "-i"
+                "3"
+              ];
+              down = [
+                "pamixer"
+                "-d"
+                "3"
               ];
             }
           ];
@@ -134,6 +150,7 @@ let
       set -eu
       grep -F 'device = "auto"' ${homeConfigFile}
       grep -F 'edge_width = 0.1' ${homeConfigFile}
+      grep -F 'tap_min_duration_ms = 90' ${homeConfigFile}
       grep -F '[[gestures]]' ${homeConfigFile}
       grep -F 'zone = "right"' ${homeConfigFile}
       grep -F 'direction = "down"' ${homeConfigFile}
@@ -141,6 +158,11 @@ let
       grep -F 'zone = "top"' ${homeConfigFile}
       grep -F 'direction = "right"' ${homeConfigFile}
       grep -F 'action = ["notify-send", "edgepad", "top-right"]' ${homeConfigFile}
+      grep -F '[[sliders]]' ${homeConfigFile}
+      grep -F 'zone = "left"' ${homeConfigFile}
+      grep -F 'step = 0.04' ${homeConfigFile}
+      grep -F 'up = ["pamixer", "-i", "3"]' ${homeConfigFile}
+      grep -F 'down = ["pamixer", "-d", "3"]' ${homeConfigFile}
       grep -F 'ENV{ID_INPUT_TOUCHPAD}=="1"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules
       grep -F 'TAG+="uaccess"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules
       grep -F 'KERNEL=="uinput"' ${uaccessUdevRulesPackage}/lib/udev/rules.d/70-edgepad.rules

@@ -41,7 +41,8 @@ fn doctor_cli_checks_config_and_action_executables() {
     );
     assert!(stdout.contains("file"), "stdout was: {stdout}");
     assert!(
-        stdout.contains("device auto, edge width 10.0%, 1 gesture binding"),
+        stdout
+            .contains("device auto, edge width 10.0%, tap min 80ms, 1 gesture binding, 0 sliders"),
         "stdout was: {stdout}"
     );
     assert!(stdout.contains("zones"), "stdout was: {stdout}");

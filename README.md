@@ -9,6 +9,7 @@ The hard part is input correctness: Type-B multitouch slots, mixed edge/center c
 ## Features
 
 - Edge gestures on the left, right, top, and bottom touchpad zones.
+- Continuous edge sliders for stepwise controls such as volume and brightness.
 - Normal touchpad passthrough for unclaimed center contacts.
 - Long-running user-session daemon with TOML config.
 - Command actions as argv arrays, without shell re-splitting.
@@ -116,26 +117,22 @@ Example config:
 ```toml
 device = "auto"
 edge_width = 0.10
+tap_min_duration_ms = 80
 
-[[gestures]]
-zone = "right"
-direction = "up"
-action = ["notify-send", "edgepad", "right-up"]
-
-[[gestures]]
-zone = "right"
-direction = "down"
-action = ["notify-send", "edgepad", "right-down"]
-
-[[gestures]]
+[[sliders]]
 zone = "left"
-direction = "up"
-action = ["notify-send", "edgepad", "left-up"]
+up = ["notify-send", "edgepad", "volume-up"]
+down = ["notify-send", "edgepad", "volume-down"]
+
+[[sliders]]
+zone = "right"
+up = ["notify-send", "edgepad", "brightness-up"]
+down = ["notify-send", "edgepad", "brightness-down"]
 
 [[gestures]]
-zone = "left"
-direction = "down"
-action = ["notify-send", "edgepad", "left-down"]
+zone = "top"
+direction = "tap"
+action = ["notify-send", "edgepad", "play-pause"]
 ```
 
 Restart the user service after config changes:
@@ -167,6 +164,12 @@ device = "auto"
 edge_width = 0.10
 ```
 
+`tap_min_duration_ms` ignores very short edge taps. It defaults to `80`; set it to `0` to disable the guard.
+
+```toml
+tap_min_duration_ms = 80
+```
+
 Each gesture binding has a zone, direction, and action:
 
 ```toml
@@ -187,6 +190,18 @@ Directions:
 ```text
 up, down, left, right, tap
 ```
+
+Continuous controls use `[[sliders]]`. Side zones use vertical `up`/`down` steps; top and bottom zones use horizontal `left`/`right` steps. `step` is normalized touchpad travel and defaults to `0.04`.
+
+```toml
+[[sliders]]
+zone = "left"
+step = 0.04
+up = ["pamixer", "-i", "3"]
+down = ["pamixer", "-d", "3"]
+```
+
+Slider zones can share the same edge with `tap` gestures, but not with directional `[[gestures]]`.
 
 Actions are argv arrays. They are not run through a shell, so write shell logic explicitly when needed:
 

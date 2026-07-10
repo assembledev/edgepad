@@ -78,24 +78,28 @@ The Home Manager module writes `~/.config/edgepad/edgepad.toml` and starts a sys
     enable = true;
     device = "auto";
     edgeWidth = 0.10;
+    tapMinDurationMs = 80;
 
     gestures = [
       {
-        zone = "right";
-        direction = "up";
-        action = [ "notify-send" "edgepad" "right-up" ];
-      }
-      {
         zone = "top";
-        direction = "right";
-        action = [ "notify-send" "edgepad" "top-right" ];
+        direction = "tap";
+        action = [ "notify-send" "edgepad" "play-pause" ];
+      }
+    ];
+
+    sliders = [
+      {
+        zone = "right";
+        up = [ "notify-send" "edgepad" "brightness-up" ];
+        down = [ "notify-send" "edgepad" "brightness-down" ];
       }
     ];
   };
 }
 ```
 
-Gesture actions are argv arrays and are not run through a shell. Use full paths or add packages to the user environment when you do not want to rely on `PATH`.
+Gesture and slider actions are argv arrays and are not run through a shell. Use full paths or add packages to the user environment when you do not want to rely on `PATH`.
 
 ## Device selection
 

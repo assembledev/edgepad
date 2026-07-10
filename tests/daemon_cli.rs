@@ -206,7 +206,7 @@ fn daemon_cli_loads_default_config_path_from_xdg_config_home() {
 }
 
 #[test]
-fn daemon_cli_rejects_empty_gesture_config_before_device_open() {
+fn daemon_cli_rejects_empty_binding_config_before_device_open() {
     let config_path = unique_temp_path("edgepad-daemon-empty-gesture-config");
     let missing_device = unique_temp_path("edgepad-daemon-empty-gesture-device");
     let _ = std::fs::remove_file(&missing_device);
@@ -224,12 +224,9 @@ fn daemon_cli_rejects_empty_gesture_config_before_device_open() {
         .output()
         .expect("edgepad binary should run");
 
-    assert!(!output.status.success(), "empty gestures should fail");
+    assert!(!output.status.success(), "empty bindings should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("has no gesture bindings"),
-        "stderr was: {stderr}"
-    );
+    assert!(stderr.contains("has no bindings"), "stderr was: {stderr}");
     assert!(
         !stderr.contains("failed to open device"),
         "daemon should reject config before opening the device, stderr was: {stderr}"

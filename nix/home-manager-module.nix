@@ -10,6 +10,7 @@ let
   cfg = config.services.edgepad;
   toml = pkgs.formats.toml { };
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.edgepad;
+  commandActionType = lib.types.nonEmptyListOf lib.types.str;
 
   gestureType = lib.types.submodule {
     options = {
@@ -35,7 +36,7 @@ let
       };
 
       action = lib.mkOption {
-        type = lib.types.nonEmptyListOf lib.types.str;
+        type = commandActionType;
         example = [
           "notify-send"
           "edgepad"
@@ -46,12 +47,68 @@ let
     };
   };
 
+  sliderActionOption =
+    direction:
+    lib.mkOption {
+      type = lib.types.nullOr commandActionType;
+      default = null;
+      example = [
+        "notify-send"
+        "edgepad"
+        direction
+      ];
+      description = "Command argv to run for the ${direction} slider step.";
+    };
+
+  sliderType = lib.types.submodule {
+    options = {
+      zone = lib.mkOption {
+        type = lib.types.enum [
+          "left"
+          "right"
+          "top"
+          "bottom"
+        ];
+        description = "Edge zone that owns this continuous slider.";
+      };
+
+      step = lib.mkOption {
+        type = lib.types.float;
+        default = 0.04;
+        apply =
+          value:
+          if value > 0.0 && value <= 1.0 then
+            value
+          else
+            throw "services.edgepad.sliders.*.step must be > 0 and <= 1";
+        description = "Normalized touchpad movement required to emit one slider step.";
+      };
+
+      up = sliderActionOption "up";
+      down = sliderActionOption "down";
+      left = sliderActionOption "left";
+      right = sliderActionOption "right";
+    };
+  };
+
+  sliderToToml =
+    slider:
+    {
+      inherit (slider) zone step;
+    }
+    // lib.optionalAttrs (slider.up != null) { inherit (slider) up; }
+    // lib.optionalAttrs (slider.down != null) { inherit (slider) down; }
+    // lib.optionalAttrs (slider.left != null) { inherit (slider) left; }
+    // lib.optionalAttrs (slider.right != null) { inherit (slider) right; };
+
   configFile = toml.generate "edgepad.toml" {
     device = cfg.device;
     edge_width = cfg.edgeWidth;
+    tap_min_duration_ms = cfg.tapMinDurationMs;
     gestures = map (gesture: {
       inherit (gesture) zone direction action;
     }) cfg.gestures;
+    sliders = map sliderToToml cfg.sliders;
   };
 in
 {
@@ -84,6 +141,12 @@ in
       description = "Fractional edge width used by every edge zone.";
     };
 
+    tapMinDurationMs = lib.mkOption {
+      type = lib.types.ints.between 0 10000;
+      default = 80;
+      description = "Minimum edge contact duration in milliseconds required for a tap gesture.";
+    };
+
     gestures = lib.mkOption {
       type = lib.types.listOf gestureType;
       default = [ ];
@@ -97,6 +160,21 @@ in
         ]
       '';
       description = "Gesture bindings written to edgepad's TOML config.";
+    };
+
+    sliders = lib.mkOption {
+      type = lib.types.listOf sliderType;
+      default = [ ];
+      example = lib.literalExpression ''
+        [
+          {
+            zone = "right";
+            up = [ "brightnessctl" "set" "+5%" ];
+            down = [ "brightnessctl" "set" "5%-" ];
+          }
+        ]
+      '';
+      description = "Continuous slider bindings written to edgepad's TOML config.";
     };
   };
 

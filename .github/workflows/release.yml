@@ -16,6 +16,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      - name: Verify tag matches Cargo version
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "$TAG_NAME" = "v$PACKAGE_VERSION"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -45,4 +53,4 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release create "$TAG_NAME" dist/* --verify-tag --title "$TAG_NAME" --notes "edgepad $TAG_NAME"
+          gh release create "$TAG_NAME" dist/* --verify-tag --title "$TAG_NAME" --generate-notes

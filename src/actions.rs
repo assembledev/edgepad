@@ -10,11 +10,16 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::config::{GestureActionConfig, GestureBindingConfig};
-use crate::core::{Gesture, GestureDirection, Zone};
+#[cfg(test)]
+use crate::config::CommandActionConfig;
+use crate::config::{GestureActionConfig, GestureBindingConfig, SliderBindingConfig};
+#[cfg(test)]
+use crate::core::SliderAxis;
+use crate::core::{Gesture, GestureDirection, SliderDirection, SliderStep, Zone};
 use crate::proxy::GestureHandler;
 
-const ACTION_COMMAND_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const ACTION_COMMAND_INITIAL_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const ACTION_COMMAND_MAX_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const ACTION_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const ACTION_WORKER_SHUTDOWN_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -22,6 +27,8 @@ const ACTION_WORKER_SHUTDOWN_JOIN_POLL_INTERVAL: Duration = Duration::from_milli
 pub struct ActionDispatcherStats {
     pub matched_gestures: usize,
     pub unmatched_gestures: usize,
+    pub matched_slider_steps: usize,
+    pub unmatched_slider_steps: usize,
     pub log_actions: usize,
     pub queued_commands: usize,
     pub dropped_commands: usize,
@@ -83,6 +90,7 @@ impl ActionCommandRunner for ProcessCommandRunner {
             .split_first()
             .ok_or_else(|| "command action argv must not be empty".to_string())?;
         let mut child = spawn_action_command(program, args)?;
+        let mut poll_interval = ACTION_COMMAND_INITIAL_POLL_INTERVAL;
 
         loop {
             if let Some(status) = child
@@ -126,9 +134,14 @@ impl ActionCommandRunner for ProcessCommandRunner {
                 }
             }
 
-            thread::sleep(ACTION_COMMAND_SHUTDOWN_POLL_INTERVAL);
+            thread::sleep(poll_interval);
+            poll_interval = next_action_command_poll_interval(poll_interval);
         }
     }
+}
+
+fn next_action_command_poll_interval(current: Duration) -> Duration {
+    std::cmp::min(current.saturating_mul(2), ACTION_COMMAND_MAX_POLL_INTERVAL)
 }
 
 fn spawn_action_command(program: &str, args: &[String]) -> Result<Child, String> {
@@ -175,6 +188,7 @@ fn kill_action_child(child: &mut Child, program: &str) -> Result<bool, String> {
 #[derive(Debug)]
 pub struct ActionDispatcher {
     bindings: Vec<GestureBindingConfig>,
+    sliders: Vec<SliderBindingConfig>,
     sender: Option<SyncSender<ActionCommand>>,
     stats: SharedActionStats,
     worker: Option<JoinHandle<()>>,
@@ -186,8 +200,28 @@ impl ActionDispatcher {
         Self::with_runner(bindings, queue_capacity, ProcessCommandRunner)
     }
 
+    pub fn new_with_sliders(
+        bindings: Vec<GestureBindingConfig>,
+        sliders: Vec<SliderBindingConfig>,
+        queue_capacity: usize,
+    ) -> Result<Self, String> {
+        Self::with_runner_and_sliders(bindings, sliders, queue_capacity, ProcessCommandRunner)
+    }
+
     pub fn with_runner<R>(
         bindings: Vec<GestureBindingConfig>,
+        queue_capacity: usize,
+        runner: R,
+    ) -> Result<Self, String>
+    where
+        R: ActionCommandRunner,
+    {
+        Self::with_runner_and_sliders(bindings, Vec::new(), queue_capacity, runner)
+    }
+
+    pub fn with_runner_and_sliders<R>(
+        bindings: Vec<GestureBindingConfig>,
+        sliders: Vec<SliderBindingConfig>,
         queue_capacity: usize,
         runner: R,
     ) -> Result<Self, String>
@@ -206,6 +240,7 @@ impl ActionDispatcher {
 
         Ok(Self {
             bindings,
+            sliders,
             sender: Some(sender),
             stats,
             worker: Some(worker),
@@ -240,6 +275,21 @@ impl ActionDispatcher {
         }
     }
 
+    pub fn dispatch_slider_step(&mut self, step: SliderStep) {
+        let Some(slider) = self
+            .sliders
+            .iter()
+            .find(|slider| slider.zone == step.zone && slider.direction_is_valid(step.direction))
+        else {
+            self.stats.increment_unmatched_slider_steps();
+            eprintln!("edgepad slider unmatched: {}", slider_step_context(step));
+            return;
+        };
+
+        self.stats.increment_matched_slider_steps();
+        self.enqueue_slider_command(step, slider.action_for(step.direction).argv.clone());
+    }
+
     pub fn stats(&self) -> ActionDispatcherStats {
         self.stats.snapshot()
     }
@@ -264,12 +314,20 @@ impl ActionDispatcher {
     }
 
     fn enqueue_command(&self, gesture: Gesture, argv: Vec<String>) {
+        self.enqueue_action_command(ActionSource::Gesture(gesture), argv);
+    }
+
+    fn enqueue_slider_command(&self, step: SliderStep, argv: Vec<String>) {
+        self.enqueue_action_command(ActionSource::SliderStep(step), argv);
+    }
+
+    fn enqueue_action_command(&self, source: ActionSource, argv: Vec<String>) {
         let Some(sender) = &self.sender else {
             self.stats.increment_dropped_commands();
             return;
         };
 
-        match sender.try_send(ActionCommand { gesture, argv }) {
+        match sender.try_send(ActionCommand { source, argv }) {
             Ok(()) => self.stats.increment_queued_commands(),
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
                 self.stats.increment_dropped_commands();
@@ -282,12 +340,22 @@ impl GestureHandler for ActionDispatcher {
     fn handle_gesture(&mut self, gesture: Gesture) {
         self.dispatch_gesture(gesture);
     }
+
+    fn handle_slider_step(&mut self, step: SliderStep) {
+        self.dispatch_slider_step(step);
+    }
 }
 
 #[derive(Debug, Clone)]
 struct ActionCommand {
-    gesture: Gesture,
+    source: ActionSource,
     argv: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ActionSource {
+    Gesture(Gesture),
+    SliderStep(SliderStep),
 }
 
 fn run_action_worker<R>(
@@ -330,7 +398,14 @@ fn run_action_worker<R>(
 }
 
 fn action_command_context(command: &ActionCommand) -> String {
-    gesture_context(command.gesture)
+    action_source_context(command.source)
+}
+
+fn action_source_context(source: ActionSource) -> String {
+    match source {
+        ActionSource::Gesture(gesture) => gesture_context(gesture),
+        ActionSource::SliderStep(step) => slider_step_context(step),
+    }
 }
 
 fn gesture_context(gesture: Gesture) -> String {
@@ -340,6 +415,16 @@ fn gesture_context(gesture: Gesture) -> String {
         direction_name(gesture.direction),
         gesture.slot,
         gesture.tracking_id
+    )
+}
+
+fn slider_step_context(step: SliderStep) -> String {
+    format!(
+        "zone={} direction={} slot={} tracking_id={}",
+        zone_name(step.zone),
+        slider_direction_name(step.direction),
+        step.slot,
+        step.tracking_id
     )
 }
 
@@ -383,6 +468,14 @@ impl SharedActionStats {
 
     fn increment_unmatched_gestures(&self) {
         self.update(|stats| stats.unmatched_gestures += 1);
+    }
+
+    fn increment_matched_slider_steps(&self) {
+        self.update(|stats| stats.matched_slider_steps += 1);
+    }
+
+    fn increment_unmatched_slider_steps(&self) {
+        self.update(|stats| stats.unmatched_slider_steps += 1);
     }
 
     fn increment_log_actions(&self) {
@@ -434,6 +527,15 @@ fn direction_name(direction: GestureDirection) -> &'static str {
         GestureDirection::Left => "left",
         GestureDirection::Right => "right",
         GestureDirection::Tap => "tap",
+    }
+}
+
+fn slider_direction_name(direction: SliderDirection) -> &'static str {
+    match direction {
+        SliderDirection::Up => "up",
+        SliderDirection::Down => "down",
+        SliderDirection::Left => "left",
+        SliderDirection::Right => "right",
     }
 }
 
@@ -501,6 +603,43 @@ mod tests {
             ]
         );
         assert_eq!(stats.matched_gestures, 1);
+        assert_eq!(stats.queued_commands, 1);
+        assert_eq!(stats.started_commands, 1);
+        assert_eq!(stats.succeeded_commands, 1);
+        assert_eq!(stats.failed_commands, 0);
+    }
+
+    #[test]
+    fn matching_slider_step_action_is_queued_and_waited_by_worker_runner() {
+        let (sender, receiver) = mpsc::channel();
+        let mut dispatcher = ActionDispatcher::with_runner_and_sliders(
+            Vec::new(),
+            vec![slider_binding(
+                Zone::Left,
+                SliderDirection::Up,
+                vec!["pamixer", "-d", "3"],
+                SliderDirection::Down,
+                vec!["pamixer", "-i", "3"],
+            )],
+            4,
+            RecordingRunner {
+                sender,
+                status: ActionCommandStatus::success(),
+            },
+        )
+        .expect("dispatcher should start");
+
+        dispatcher.dispatch_slider_step(slider_step(Zone::Left, SliderDirection::Down));
+        let argv = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker should run queued action");
+        let stats = dispatcher.shutdown();
+
+        assert_eq!(
+            argv,
+            vec!["pamixer".to_string(), "-i".to_string(), "3".to_string()]
+        );
+        assert_eq!(stats.matched_slider_steps, 1);
         assert_eq!(stats.queued_commands, 1);
         assert_eq!(stats.started_commands, 1);
         assert_eq!(stats.succeeded_commands, 1);
@@ -623,9 +762,24 @@ mod tests {
     }
 
     #[test]
+    fn action_command_poll_interval_backs_off_to_small_bound() {
+        let first = ACTION_COMMAND_INITIAL_POLL_INTERVAL;
+        let second = next_action_command_poll_interval(first);
+        let third = next_action_command_poll_interval(second);
+
+        assert!(first < Duration::from_millis(50));
+        assert_eq!(second, Duration::from_millis(2));
+        assert_eq!(third, Duration::from_millis(4));
+        assert_eq!(
+            next_action_command_poll_interval(Duration::from_millis(100)),
+            ACTION_COMMAND_MAX_POLL_INTERVAL
+        );
+    }
+
+    #[test]
     fn action_command_context_includes_gesture_identity() {
         let command = ActionCommand {
-            gesture: gesture(Zone::Right, GestureDirection::Up),
+            source: ActionSource::Gesture(gesture(Zone::Right, GestureDirection::Up)),
             argv: vec!["notify-send".to_string(), "edgepad".to_string()],
         };
 
@@ -640,6 +794,14 @@ mod tests {
         assert_eq!(
             gesture_context(gesture(Zone::Top, GestureDirection::Left)),
             "zone=top direction=left slot=0 tracking_id=42"
+        );
+    }
+
+    #[test]
+    fn slider_step_context_includes_slider_identity() {
+        assert_eq!(
+            slider_step_context(slider_step(Zone::Right, SliderDirection::Up)),
+            "zone=right direction=up slot=0 tracking_id=42"
         );
     }
 
@@ -668,6 +830,40 @@ mod tests {
 
     fn gesture(zone: Zone, direction: GestureDirection) -> Gesture {
         Gesture {
+            zone,
+            direction,
+            slot: 0,
+            tracking_id: 42,
+        }
+    }
+
+    fn slider_binding(
+        zone: Zone,
+        negative_direction: SliderDirection,
+        negative: Vec<&str>,
+        positive_direction: SliderDirection,
+        positive: Vec<&str>,
+    ) -> SliderBindingConfig {
+        let axis = match (negative_direction, positive_direction) {
+            (SliderDirection::Up, SliderDirection::Down) => SliderAxis::Vertical,
+            (SliderDirection::Left, SliderDirection::Right) => SliderAxis::Horizontal,
+            _ => panic!("invalid slider directions"),
+        };
+        SliderBindingConfig {
+            zone,
+            axis,
+            step: 0.04,
+            negative: command_action(negative),
+            positive: command_action(positive),
+        }
+    }
+
+    fn command_action(argv: Vec<&str>) -> CommandActionConfig {
+        CommandActionConfig::new(argv).expect("test command should be valid")
+    }
+
+    fn slider_step(zone: Zone, direction: SliderDirection) -> SliderStep {
+        SliderStep {
             zone,
             direction,
             slot: 0,

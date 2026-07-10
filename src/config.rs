@@ -3,21 +3,29 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::core::{EdgeWidths, Gesture, GestureDirection, Zone};
+use crate::core::{
+    EdgeWidths, EngineOptions, Gesture, GestureDirection, SliderAxis, SliderDirection, SliderSpec,
+    Zone,
+};
 use crate::device::{
     discover_device_report, format_device_line, touchpad_candidates, DiscoveryReport,
 };
 
 pub const DEFAULT_EDGE_WIDTH: f32 = 0.10;
+pub const DEFAULT_SLIDER_STEP: f32 = 0.04;
+pub use crate::core::DEFAULT_TAP_MIN_DURATION_MS;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgepadConfig {
     pub device: DeviceConfig,
     pub edge_width: f32,
+    pub tap_min_duration_ms: u64,
     pub gestures: Vec<GestureBindingConfig>,
+    pub sliders: Vec<SliderBindingConfig>,
 }
 
 impl Default for EdgepadConfig {
@@ -25,7 +33,9 @@ impl Default for EdgepadConfig {
         Self {
             device: DeviceConfig::Auto,
             edge_width: DEFAULT_EDGE_WIDTH,
+            tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             gestures: Vec::new(),
+            sliders: Vec::new(),
         }
     }
 }
@@ -36,6 +46,7 @@ impl EdgepadConfig {
             .map_err(|err| format!("invalid TOML config: {err}"))?;
         let mut config = Self::default();
         let mut gesture_keys = BTreeSet::new();
+        let mut slider_zones = BTreeSet::new();
 
         if let Some(device) = raw.device {
             config.device = DeviceConfig::parse(&device)
@@ -43,6 +54,10 @@ impl EdgepadConfig {
         }
         if let Some(edge_width) = raw.edge_width {
             config.edge_width = validate_edge_width(edge_width, "edge_width")?;
+        }
+        if let Some(tap_min_duration_ms) = raw.tap_min_duration_ms {
+            config.tap_min_duration_ms =
+                validate_tap_min_duration_ms(tap_min_duration_ms, "tap_min_duration_ms")?;
         }
 
         for (index, raw_binding) in raw.gestures.into_iter().enumerate() {
@@ -58,6 +73,19 @@ impl EdgepadConfig {
             config.gestures.push(binding);
         }
 
+        for (index, raw_slider) in raw.sliders.into_iter().enumerate() {
+            let slider = SliderBindingConfig::from_raw(index, raw_slider)?;
+            if !slider_zones.insert(slider.zone) {
+                return Err(format!(
+                    "duplicate slider binding {}",
+                    zone_name(slider.zone)
+                ));
+            }
+            config.sliders.push(slider);
+        }
+
+        config.validate_slider_gesture_conflicts()?;
+
         Ok(config)
     }
 
@@ -71,11 +99,51 @@ impl EdgepadConfig {
     }
 
     fn zone_edge_width(&self, zone: Zone) -> f32 {
-        if self.gestures.iter().any(|binding| binding.zone == zone) {
+        if self.gestures.iter().any(|binding| binding.zone == zone)
+            || self.sliders.iter().any(|binding| binding.zone == zone)
+        {
             self.edge_width
         } else {
             0.0
         }
+    }
+
+    pub fn slider_specs(&self) -> Vec<SliderSpec> {
+        self.sliders
+            .iter()
+            .map(|slider| SliderSpec {
+                zone: slider.zone,
+                axis: slider.axis,
+                step: slider.step,
+            })
+            .collect()
+    }
+
+    pub fn engine_options(&self) -> EngineOptions {
+        EngineOptions {
+            tap_min_duration: Duration::from_millis(self.tap_min_duration_ms),
+        }
+    }
+
+    fn validate_slider_gesture_conflicts(&self) -> Result<(), String> {
+        for (index, gesture) in self.gestures.iter().enumerate() {
+            if gesture.direction == GestureDirection::Tap {
+                continue;
+            }
+            if self
+                .sliders
+                .iter()
+                .any(|slider| slider.zone == gesture.zone)
+            {
+                return Err(format!(
+                    "{}.direction={} conflicts with slider {}; slider zones only allow tap gestures",
+                    gesture_label(index),
+                    direction_name(gesture.direction),
+                    zone_name(gesture.zone)
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -119,6 +187,91 @@ pub struct GestureBindingConfig {
     pub zone: Zone,
     pub direction: GestureDirection,
     pub action: GestureActionConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SliderBindingConfig {
+    pub zone: Zone,
+    pub axis: SliderAxis,
+    pub step: f32,
+    pub negative: CommandActionConfig,
+    pub positive: CommandActionConfig,
+}
+
+impl SliderBindingConfig {
+    pub fn action_for(&self, direction: SliderDirection) -> &CommandActionConfig {
+        match direction {
+            SliderDirection::Up | SliderDirection::Left => &self.negative,
+            SliderDirection::Down | SliderDirection::Right => &self.positive,
+        }
+    }
+
+    pub fn direction_is_valid(&self, direction: SliderDirection) -> bool {
+        match self.axis {
+            SliderAxis::Vertical => {
+                matches!(direction, SliderDirection::Up | SliderDirection::Down)
+            }
+            SliderAxis::Horizontal => {
+                matches!(direction, SliderDirection::Left | SliderDirection::Right)
+            }
+        }
+    }
+
+    fn from_raw(index: usize, raw: RawSliderBindingConfig) -> Result<Self, String> {
+        let label = slider_label(index);
+        let zone = parse_zone(&raw.zone)
+            .ok_or_else(|| format!("{}.zone must be one of: left, right, top, bottom", label))?;
+        let axis = default_slider_axis(zone);
+        let step = match raw.step {
+            Some(step) => validate_slider_step(step, &format!("{label}.step"))?,
+            None => DEFAULT_SLIDER_STEP,
+        };
+        let (negative, positive) = match axis {
+            SliderAxis::Vertical => {
+                reject_slider_action(&label, "left", raw.left)?;
+                reject_slider_action(&label, "right", raw.right)?;
+                (
+                    parse_required_slider_action(&label, "up", raw.up)?,
+                    parse_required_slider_action(&label, "down", raw.down)?,
+                )
+            }
+            SliderAxis::Horizontal => {
+                reject_slider_action(&label, "up", raw.up)?;
+                reject_slider_action(&label, "down", raw.down)?;
+                (
+                    parse_required_slider_action(&label, "left", raw.left)?,
+                    parse_required_slider_action(&label, "right", raw.right)?,
+                )
+            }
+        };
+
+        Ok(Self {
+            zone,
+            axis,
+            step,
+            negative,
+            positive,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandActionConfig {
+    pub argv: Vec<String>,
+}
+
+impl CommandActionConfig {
+    pub fn new<I, S>(argv: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let argv = argv.into_iter().map(Into::into).collect::<Vec<_>>();
+        if argv.is_empty() {
+            return Err("command action requires at least a program".to_string());
+        }
+        Ok(Self { argv })
+    }
 }
 
 impl GestureBindingConfig {
@@ -172,7 +325,7 @@ impl GestureActionConfig {
     {
         let argv = argv.into_iter().map(Into::into).collect::<Vec<_>>();
         if argv.is_empty() {
-            return Err("gesture command action requires at least a program".to_string());
+            return Err("command action requires at least a program".to_string());
         }
         Ok(Self::Command { argv })
     }
@@ -210,6 +363,20 @@ pub fn parse_edge_width(raw_value: &str) -> Result<f32, String> {
 fn validate_edge_width(parsed: f32, name: &str) -> Result<f32, String> {
     if !(parsed > 0.0 && parsed < 0.5) {
         return Err(format!("{name} must be > 0 and < 0.5"));
+    }
+    Ok(parsed)
+}
+
+fn validate_slider_step(parsed: f32, name: &str) -> Result<f32, String> {
+    if !(parsed > 0.0 && parsed <= 1.0) {
+        return Err(format!("{name} must be > 0 and <= 1"));
+    }
+    Ok(parsed)
+}
+
+fn validate_tap_min_duration_ms(parsed: u64, name: &str) -> Result<u64, String> {
+    if parsed > 10_000 {
+        return Err(format!("{name} must be <= 10000"));
     }
     Ok(parsed)
 }
@@ -301,6 +468,35 @@ fn direction_name(direction: GestureDirection) -> &'static str {
     }
 }
 
+fn default_slider_axis(zone: Zone) -> SliderAxis {
+    match zone {
+        Zone::Left | Zone::Right => SliderAxis::Vertical,
+        Zone::Top | Zone::Bottom => SliderAxis::Horizontal,
+    }
+}
+
+fn parse_required_slider_action(
+    label: &str,
+    direction: &str,
+    raw: Option<Vec<String>>,
+) -> Result<CommandActionConfig, String> {
+    let argv = raw.ok_or_else(|| format!("{label}.{direction} is required"))?;
+    CommandActionConfig::new(argv).map_err(|err| format!("{label}.{direction}: {err}"))
+}
+
+fn reject_slider_action(
+    label: &str,
+    direction: &str,
+    raw: Option<Vec<String>>,
+) -> Result<(), String> {
+    if raw.is_some() {
+        return Err(format!(
+            "{label}.{direction} is not valid for this slider zone"
+        ));
+    }
+    Ok(())
+}
+
 fn event_node_count_text(count: usize) -> String {
     if count == 1 {
         "1 event node was present but could not be opened".to_string()
@@ -313,13 +509,20 @@ fn gesture_label(index: usize) -> String {
     format!("gestures[{index}]")
 }
 
+fn slider_label(index: usize) -> String {
+    format!("sliders[{index}]")
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawEdgepadConfig {
     device: Option<String>,
     edge_width: Option<f32>,
+    tap_min_duration_ms: Option<u64>,
     #[serde(default)]
     gestures: Vec<RawGestureBindingConfig>,
+    #[serde(default)]
+    sliders: Vec<RawSliderBindingConfig>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,6 +538,17 @@ struct RawGestureBindingConfig {
 enum RawGestureActionConfig {
     Command(Vec<String>),
     Log { log: bool },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSliderBindingConfig {
+    zone: String,
+    step: Option<f32>,
+    up: Option<Vec<String>>,
+    down: Option<Vec<String>>,
+    left: Option<Vec<String>>,
+    right: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -409,6 +623,7 @@ mod tests {
             r#"
             device = "/dev/input/event7"
             edge_width = 0.20
+            tap_min_duration_ms = 90
 
             [[gestures]]
             zone = "left"
@@ -428,6 +643,11 @@ mod tests {
             DeviceConfig::Path(PathBuf::from("/dev/input/event7"))
         );
         assert_eq!(config.edge_width, 0.20);
+        assert_eq!(config.tap_min_duration_ms, 90);
+        assert_eq!(
+            config.engine_options().tap_min_duration,
+            Duration::from_millis(90)
+        );
         assert_eq!(
             config.gestures,
             vec![
@@ -449,6 +669,21 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn edgepad_config_defaults_tap_min_duration() {
+        let config = EdgepadConfig::parse(
+            r#"
+            [[gestures]]
+            zone = "left"
+            direction = "tap"
+            action = ["pamixer", "-t"]
+            "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.tap_min_duration_ms, DEFAULT_TAP_MIN_DURATION_MS);
     }
 
     #[test]
@@ -482,6 +717,89 @@ mod tests {
     }
 
     #[test]
+    fn edgepad_config_parses_vertical_slider_with_default_step() {
+        let config = EdgepadConfig::parse(
+            r#"
+            edge_width = 0.20
+
+            [[sliders]]
+            zone = "left"
+            up = ["pamixer", "-d", "3"]
+            down = ["pamixer", "-i", "3"]
+            "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.sliders.len(), 1);
+        assert_eq!(config.sliders[0].zone, Zone::Left);
+        assert_eq!(config.sliders[0].axis, SliderAxis::Vertical);
+        assert_eq!(config.sliders[0].step, DEFAULT_SLIDER_STEP);
+        assert_eq!(
+            config.sliders[0].negative.argv,
+            vec!["pamixer".to_string(), "-d".to_string(), "3".to_string()]
+        );
+        assert_eq!(
+            config.sliders[0].positive.argv,
+            vec!["pamixer".to_string(), "-i".to_string(), "3".to_string()]
+        );
+        assert_eq!(
+            config.active_edge_widths(),
+            EdgeWidths {
+                left: 0.20,
+                right: 0.0,
+                top: 0.0,
+                bottom: 0.0,
+            }
+        );
+        assert_eq!(
+            config.slider_specs(),
+            vec![SliderSpec {
+                zone: Zone::Left,
+                axis: SliderAxis::Vertical,
+                step: DEFAULT_SLIDER_STEP,
+            }]
+        );
+    }
+
+    #[test]
+    fn edgepad_config_parses_horizontal_slider_with_custom_step() {
+        let config = EdgepadConfig::parse(
+            r#"
+            [[sliders]]
+            zone = "top"
+            step = 0.08
+            left = ["playerctl", "previous"]
+            right = ["playerctl", "next"]
+            "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.sliders.len(), 1);
+        assert_eq!(config.sliders[0].zone, Zone::Top);
+        assert_eq!(config.sliders[0].axis, SliderAxis::Horizontal);
+        assert_eq!(config.sliders[0].step, 0.08);
+    }
+
+    #[test]
+    fn edgepad_config_rejects_excessive_tap_min_duration() {
+        let result = EdgepadConfig::parse(
+            r#"
+            tap_min_duration_ms = 10001
+
+            [[gestures]]
+            zone = "left"
+            direction = "tap"
+            action = ["pamixer", "-t"]
+            "#,
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("tap_min_duration_ms must be <= 10000")
+        );
+    }
+
+    #[test]
     fn edgepad_config_rejects_duplicate_gesture_binding() {
         let result = EdgepadConfig::parse(
             r#"
@@ -504,6 +822,71 @@ mod tests {
     }
 
     #[test]
+    fn edgepad_config_rejects_duplicate_slider_zone() {
+        let result = EdgepadConfig::parse(
+            r#"
+            [[sliders]]
+            zone = "right"
+            up = ["brightnessctl", "set", "5%-"]
+            down = ["brightnessctl", "set", "+5%"]
+
+            [[sliders]]
+            zone = "right"
+            up = ["brightnessctl", "set", "5%-"]
+            down = ["brightnessctl", "set", "+5%"]
+            "#,
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("duplicate slider binding right")
+        );
+    }
+
+    #[test]
+    fn edgepad_config_rejects_directional_gesture_on_slider_zone() {
+        let result = EdgepadConfig::parse(
+            r#"
+            [[gestures]]
+            zone = "left"
+            direction = "up"
+            action = ["notify-send", "left-up"]
+
+            [[sliders]]
+            zone = "left"
+            up = ["pamixer", "-d", "3"]
+            down = ["pamixer", "-i", "3"]
+            "#,
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("gestures[0].direction=up conflicts with slider left; slider zones only allow tap gestures")
+        );
+    }
+
+    #[test]
+    fn edgepad_config_allows_tap_gesture_on_slider_zone() {
+        let config = EdgepadConfig::parse(
+            r#"
+            [[gestures]]
+            zone = "left"
+            direction = "tap"
+            action = ["pamixer", "-t"]
+
+            [[sliders]]
+            zone = "left"
+            up = ["pamixer", "-d", "3"]
+            down = ["pamixer", "-i", "3"]
+            "#,
+        )
+        .expect("tap and slider can share a zone");
+
+        assert_eq!(config.gestures.len(), 1);
+        assert_eq!(config.sliders.len(), 1);
+    }
+
+    #[test]
     fn edgepad_config_rejects_empty_command_action_array() {
         let result = EdgepadConfig::parse(
             r#"
@@ -516,7 +899,7 @@ mod tests {
 
         assert_eq!(
             result.as_ref().err().map(String::as_str),
-            Some("gestures[0].action: gesture command action requires at least a program")
+            Some("gestures[0].action: command action requires at least a program")
         );
     }
 

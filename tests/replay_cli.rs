@@ -140,11 +140,11 @@ EV_SYN SYN_REPORT 0
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("raw_frames: 1"), "stdout was: {stdout}");
     assert!(
-        stdout.contains("recognizer_passthrough_events: 3"),
+        stdout.contains("recognizer_passthrough_events: 4"),
         "stdout was: {stdout}"
     );
     assert!(
-        stdout.contains("composed_events: 10"),
+        stdout.contains("composed_events: 11"),
         "stdout was: {stdout}"
     );
 }

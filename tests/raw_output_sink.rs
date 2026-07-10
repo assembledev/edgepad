@@ -65,6 +65,7 @@ fn recording_sink_groups_non_empty_composed_output_by_sync_boundary() {
         sink.frames(),
         &[
             RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
                 RawEvent::abs_mt_tracking_id(100),
                 RawEvent::abs_mt_position_x(500),
                 RawEvent::abs_mt_position_y(300),
@@ -73,8 +74,13 @@ fn recording_sink_groups_non_empty_composed_output_by_sync_boundary() {
                 RawEvent::abs_x(500),
                 RawEvent::abs_y(300),
             ]),
-            RawFrame::new(vec![RawEvent::abs_mt_position_x(550), RawEvent::abs_x(550)]),
             RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_position_x(550),
+                RawEvent::abs_x(550),
+            ]),
+            RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
                 RawEvent::abs_mt_tracking_id(-1),
                 RawEvent::btn_touch(false),
                 RawEvent::btn_tool_finger(false),
@@ -170,6 +176,7 @@ fn sink_emit_errors_are_returned_without_syncing_partial_frames() {
                 RawEvent::abs_mt_position_y(300),
             ],
             gestures: vec![],
+            slider_steps: vec![],
             resync_required: false,
         },
         &mut sink,

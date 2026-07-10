@@ -1,5 +1,5 @@
 use edgepad::config::{DeviceConfig, EdgepadConfig, GestureActionConfig};
-use edgepad::core::{GestureDirection, Zone};
+use edgepad::core::{GestureDirection, SliderAxis, Zone};
 
 #[test]
 fn release_example_config_parses_and_uses_axis_appropriate_gestures() {
@@ -7,26 +7,43 @@ fn release_example_config_parses_and_uses_axis_appropriate_gestures() {
         .expect("release example config should parse");
 
     assert_eq!(config.device, DeviceConfig::Auto);
-    assert_eq!(config.gestures.len(), 8);
+    assert_eq!(config.gestures.len(), 7);
+    assert_eq!(config.sliders.len(), 2);
+
+    for slider in &config.sliders {
+        assert!(
+            matches!(slider.zone, Zone::Left | Zone::Right),
+            "release example sliders should use side zones: {slider:?}"
+        );
+        assert_eq!(slider.axis, SliderAxis::Vertical);
+        assert!(!slider.negative.argv.is_empty());
+        assert!(!slider.positive.argv.is_empty());
+    }
 
     for binding in &config.gestures {
         match binding.zone {
             Zone::Left | Zone::Right => {
                 assert!(
-                    matches!(
-                        binding.direction,
-                        GestureDirection::Up | GestureDirection::Down
-                    ),
-                    "left/right examples should use vertical gestures: {binding:?}"
+                    matches!(binding.direction, GestureDirection::Tap),
+                    "side zones with sliders should only use tap gestures: {binding:?}"
                 );
             }
-            Zone::Top | Zone::Bottom => {
+            Zone::Top => {
+                assert!(
+                    matches!(
+                        binding.direction,
+                        GestureDirection::Left | GestureDirection::Right | GestureDirection::Tap
+                    ),
+                    "top examples should use horizontal or tap gestures: {binding:?}"
+                );
+            }
+            Zone::Bottom => {
                 assert!(
                     matches!(
                         binding.direction,
                         GestureDirection::Left | GestureDirection::Right
                     ),
-                    "top/bottom examples should use horizontal gestures: {binding:?}"
+                    "bottom examples should use horizontal gestures: {binding:?}"
                 );
             }
         }
@@ -71,7 +88,10 @@ fn release_workflow_publishes_required_assets_and_checksums() {
         "edgepad.service",
         "edgepad.toml.example",
         "checksums",
+        "Verify tag matches Cargo version",
+        "v$PACKAGE_VERSION",
         "gh release create",
+        "--generate-notes",
     ] {
         assert!(
             workflow.contains(required),

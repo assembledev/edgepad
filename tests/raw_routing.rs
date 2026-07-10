@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, Zone};
 use edgepad::raw::{route_raw_frame, RawEvent, RawFrame};
 
@@ -126,6 +128,37 @@ fn route_raw_frame_returns_gesture_on_claimed_edge_release_without_passthrough()
     assert_eq!(routed.gestures[0].zone, Zone::Left);
     assert_eq!(routed.gestures[0].direction, GestureDirection::Right);
     assert!(!routed.resync_required);
+}
+
+#[test]
+fn route_raw_frame_suppresses_short_timed_tap() {
+    let mut engine = test_engine();
+
+    route_raw_frame(
+        &mut engine,
+        &RawFrame::new_at(
+            vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(101),
+                RawEvent::abs_mt_position_x(20),
+                RawEvent::abs_mt_position_y(300),
+            ],
+            Duration::from_millis(1000),
+        ),
+    )
+    .expect("edge down should route");
+
+    let routed = route_raw_frame(
+        &mut engine,
+        &RawFrame::new_at(
+            vec![RawEvent::abs_mt_slot(0), RawEvent::abs_mt_tracking_id(-1)],
+            Duration::from_millis(1079),
+        ),
+    )
+    .expect("edge release should route");
+
+    assert!(routed.passthrough.is_empty());
+    assert!(routed.gestures.is_empty());
 }
 
 #[test]

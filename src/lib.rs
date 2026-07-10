@@ -14,6 +14,10 @@ pub mod status;
 pub mod uinput;
 
 pub mod core {
+    use std::time::Duration;
+
+    pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 80;
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct AxisRange {
         pub min: i32,
@@ -102,6 +106,20 @@ pub mod core {
         Tap,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    pub enum SliderDirection {
+        Up,
+        Down,
+        Left,
+        Right,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum SliderAxis {
+        Horizontal,
+        Vertical,
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Gesture {
         pub zone: Zone,
@@ -110,10 +128,39 @@ pub mod core {
         pub tracking_id: i32,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub struct SliderSpec {
+        pub zone: Zone,
+        pub axis: SliderAxis,
+        pub step: f32,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct EngineOptions {
+        pub tap_min_duration: Duration,
+    }
+
+    impl Default for EngineOptions {
+        fn default() -> Self {
+            Self {
+                tap_min_duration: Duration::from_millis(DEFAULT_TAP_MIN_DURATION_MS),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct SliderStep {
+        pub zone: Zone,
+        pub direction: SliderDirection,
+        pub slot: i32,
+        pub tracking_id: i32,
+    }
+
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct FrameOutput {
         pub passthrough: Vec<Event>,
         pub gestures: Vec<Gesture>,
+        pub slider_steps: Vec<SliderStep>,
         pub resync_required: bool,
     }
 
@@ -122,6 +169,7 @@ pub mod core {
             Self {
                 passthrough: Vec::new(),
                 gestures: Vec::new(),
+                slider_steps: Vec::new(),
                 resync_required: false,
             }
         }
@@ -161,6 +209,8 @@ pub mod core {
         start_y: Option<i32>,
         current_x: Option<i32>,
         current_y: Option<i32>,
+        started_at: Option<Duration>,
+        slider_anchor: Option<f32>,
         held_events: Vec<Event>,
     }
 
@@ -174,6 +224,8 @@ pub mod core {
                 start_y: None,
                 current_x: None,
                 current_y: None,
+                started_at: None,
+                slider_anchor: None,
                 held_events: Vec::new(),
             }
         }
@@ -189,6 +241,8 @@ pub mod core {
     pub struct Engine {
         caps: Capabilities,
         edges: EdgeWidths,
+        options: EngineOptions,
+        sliders: Vec<SliderSpec>,
         current_slot: i32,
         slots: Vec<SlotState>,
     }
@@ -206,11 +260,58 @@ pub mod core {
                 current_slot: caps.slot_min,
                 caps,
                 edges,
+                options: EngineOptions::default(),
+                sliders: Vec::new(),
                 slots: vec![SlotState::default(); slot_count],
             }
         }
 
+        pub fn with_sliders(
+            caps: Capabilities,
+            edges: EdgeWidths,
+            sliders: Vec<SliderSpec>,
+        ) -> Self {
+            for slider in &sliders {
+                assert!(
+                    slider.step.is_finite() && slider.step > 0.0 && slider.step <= 1.0,
+                    "invalid slider step for {:?}: {}",
+                    slider.zone,
+                    slider.step
+                );
+            }
+            let mut engine = Self::new(caps, edges);
+            engine.sliders = sliders;
+            engine
+        }
+
+        pub fn with_options(
+            caps: Capabilities,
+            edges: EdgeWidths,
+            sliders: Vec<SliderSpec>,
+            options: EngineOptions,
+        ) -> Self {
+            let mut engine = Self::with_sliders(caps, edges, sliders);
+            engine.options = options;
+            engine
+        }
+
         pub fn process_frame(&mut self, frame: &[Event]) -> Result<FrameOutput, SlotError> {
+            self.process_frame_with_time(frame, None)
+        }
+
+        pub fn process_frame_at(
+            &mut self,
+            frame: &[Event],
+            timestamp: Duration,
+        ) -> Result<FrameOutput, SlotError> {
+            self.process_frame_with_time(frame, Some(timestamp))
+        }
+
+        fn process_frame_with_time(
+            &mut self,
+            frame: &[Event],
+            timestamp: Option<Duration>,
+        ) -> Result<FrameOutput, SlotError> {
             let mut output = FrameOutput::empty();
 
             for event in frame.iter().copied() {
@@ -237,13 +338,14 @@ pub mod core {
                         slot_state.active = true;
                         slot_state.tracking_id = Some(tracking_id);
                         slot_state.ownership = Ownership::Unknown;
+                        slot_state.started_at = timestamp;
                         slot_state.held_events.push(event);
                     }
                     Event::TrackingId(-1) => {
-                        self.release_current_slot(event, &mut output)?;
+                        self.release_current_slot(event, timestamp, &mut output)?;
                     }
                     Event::TrackingId(_) => {
-                        self.release_current_slot(event, &mut output)?;
+                        self.release_current_slot(event, timestamp, &mut output)?;
                     }
                     Event::X(x) => {
                         let slot_state = self.slot_mut(self.current_slot)?;
@@ -264,6 +366,7 @@ pub mod core {
                 }
 
                 self.decide_ownership_if_ready(&mut output)?;
+                self.emit_slider_steps_if_ready(&mut output)?;
             }
 
             Ok(output)
@@ -272,23 +375,39 @@ pub mod core {
         fn release_current_slot(
             &mut self,
             event: Event,
+            timestamp: Option<Duration>,
             output: &mut FrameOutput,
         ) -> Result<(), SlotError> {
             let slot = self.current_slot;
-            let slot_state = self.slot_mut(slot)?;
-
-            match slot_state.ownership {
+            match self.slot(slot)?.ownership {
                 Ownership::Claimed(zone) => {
-                    if let Some(gesture) = classify_gesture(slot, zone, slot_state) {
-                        output.gestures.push(gesture);
+                    let releases_slider_zone = self.slider_for_zone(zone).is_some();
+                    let options = self.options;
+                    let slot_state = self.slot_mut(slot)?;
+                    if let Some(gesture) =
+                        classify_gesture(slot, zone, slot_state, options, timestamp)
+                    {
+                        if !releases_slider_zone || gesture.direction == GestureDirection::Tap {
+                            output.gestures.push(gesture);
+                        }
+                    }
+                    if slot_state.active {
+                        slot_state.reset();
                     }
                 }
-                Ownership::Passthrough => output.passthrough.push(event),
-                Ownership::Unknown => slot_state.held_events.push(event),
-            }
-
-            if slot_state.active {
-                slot_state.reset();
+                Ownership::Passthrough => {
+                    self.push_passthrough_event_for_current_slot(event, output);
+                    if self.slot(slot)?.active {
+                        self.slot_mut(slot)?.reset();
+                    }
+                }
+                Ownership::Unknown => {
+                    let slot_state = self.slot_mut(slot)?;
+                    slot_state.held_events.push(event);
+                    if slot_state.active {
+                        slot_state.reset();
+                    }
+                }
             }
             Ok(())
         }
@@ -300,26 +419,70 @@ pub mod core {
         ) -> Result<(), SlotError> {
             let slot_state = self.slot_mut(self.current_slot)?;
             match slot_state.ownership {
-                Ownership::Passthrough => output.passthrough.push(event),
+                Ownership::Passthrough => {
+                    self.push_passthrough_event_for_current_slot(event, output)
+                }
                 Ownership::Unknown => slot_state.held_events.push(event),
                 Ownership::Claimed(_) => {}
             }
             Ok(())
         }
 
+        fn push_passthrough_event_for_current_slot(&self, event: Event, output: &mut FrameOutput) {
+            self.push_passthrough_event_for_slot(self.current_slot, event, output);
+        }
+
+        fn push_passthrough_event_for_slot(
+            &self,
+            slot: i32,
+            event: Event,
+            output: &mut FrameOutput,
+        ) {
+            match event {
+                Event::Slot(_) | Event::SynDropped => output.passthrough.push(event),
+                Event::TrackingId(_) | Event::X(_) | Event::Y(_) => {
+                    if last_passthrough_slot(&output.passthrough) != Some(slot) {
+                        output.passthrough.push(Event::slot(slot));
+                    }
+                    output.passthrough.push(event);
+                }
+            }
+        }
+
         fn decide_ownership_if_ready(&mut self, output: &mut FrameOutput) -> Result<(), SlotError> {
             let slot = self.current_slot;
             let Some(zone) = self.zone_for_current_slot()? else {
-                let slot_state = self.slot_mut(slot)?;
+                let held_events = {
+                    let slot_state = self.slot_mut(slot)?;
+                    if slot_state.active
+                        && matches!(slot_state.ownership, Ownership::Unknown)
+                        && slot_state.start_x.is_some()
+                        && slot_state.start_y.is_some()
+                    {
+                        slot_state.ownership = Ownership::Passthrough;
+                        std::mem::take(&mut slot_state.held_events)
+                    } else {
+                        Vec::new()
+                    }
+                };
+                for event in held_events {
+                    self.push_passthrough_event_for_slot(slot, event, output);
+                }
+                return Ok(());
+            };
+
+            let slider_anchor = {
+                let slot_state = self.slot(slot)?;
                 if slot_state.active
                     && matches!(slot_state.ownership, Ownership::Unknown)
                     && slot_state.start_x.is_some()
                     && slot_state.start_y.is_some()
                 {
-                    slot_state.ownership = Ownership::Passthrough;
-                    output.passthrough.append(&mut slot_state.held_events);
+                    self.slider_for_zone(zone)
+                        .and_then(|spec| slider_position(self.caps, spec.axis, slot_state))
+                } else {
+                    None
                 }
-                return Ok(());
             };
 
             let slot_state = self.slot_mut(slot)?;
@@ -329,9 +492,69 @@ pub mod core {
                 && slot_state.start_y.is_some()
             {
                 slot_state.ownership = Ownership::Claimed(zone);
+                slot_state.slider_anchor = slider_anchor;
                 slot_state.held_events.clear();
             }
             Ok(())
+        }
+
+        fn emit_slider_steps_if_ready(
+            &mut self,
+            output: &mut FrameOutput,
+        ) -> Result<(), SlotError> {
+            let slot = self.current_slot;
+            let (zone, spec, position, tracking_id) = {
+                let slot_state = self.slot(slot)?;
+                let Ownership::Claimed(zone) = slot_state.ownership else {
+                    return Ok(());
+                };
+                let Some(spec) = self.slider_for_zone(zone) else {
+                    return Ok(());
+                };
+                let Some(position) = slider_position(self.caps, spec.axis, slot_state) else {
+                    return Ok(());
+                };
+                let Some(tracking_id) = slot_state.tracking_id else {
+                    return Ok(());
+                };
+                (zone, spec, position, tracking_id)
+            };
+
+            let slot_state = self.slot_mut(slot)?;
+            let Some(mut anchor) = slot_state.slider_anchor else {
+                slot_state.slider_anchor = Some(position);
+                return Ok(());
+            };
+
+            while position - anchor >= spec.step {
+                output.slider_steps.push(SliderStep {
+                    zone,
+                    direction: positive_slider_direction(spec.axis),
+                    slot,
+                    tracking_id,
+                });
+                anchor += spec.step;
+            }
+
+            while anchor - position >= spec.step {
+                output.slider_steps.push(SliderStep {
+                    zone,
+                    direction: negative_slider_direction(spec.axis),
+                    slot,
+                    tracking_id,
+                });
+                anchor -= spec.step;
+            }
+
+            slot_state.slider_anchor = Some(anchor);
+            Ok(())
+        }
+
+        fn slider_for_zone(&self, zone: Zone) -> Option<SliderSpec> {
+            self.sliders
+                .iter()
+                .copied()
+                .find(|slider| slider.zone == zone)
         }
 
         fn zone_for_current_slot(&self) -> Result<Option<Zone>, SlotError> {
@@ -390,7 +613,20 @@ pub mod core {
         }
     }
 
-    fn classify_gesture(slot: i32, zone: Zone, state: &SlotState) -> Option<Gesture> {
+    fn last_passthrough_slot(events: &[Event]) -> Option<i32> {
+        events.iter().rev().find_map(|event| match event {
+            Event::Slot(slot) => Some(*slot),
+            _ => None,
+        })
+    }
+
+    fn classify_gesture(
+        slot: i32,
+        zone: Zone,
+        state: &SlotState,
+        options: EngineOptions,
+        released_at: Option<Duration>,
+    ) -> Option<Gesture> {
         let start_x = state.start_x?;
         let start_y = state.start_y?;
         let current_x = state.current_x.unwrap_or(start_x);
@@ -399,6 +635,9 @@ pub mod core {
         let dy = current_y - start_y;
 
         let direction = if dx.abs() < 20 && dy.abs() < 20 {
+            if !tap_duration_is_valid(state.started_at, released_at, options.tap_min_duration) {
+                return None;
+            }
             GestureDirection::Tap
         } else if dx.abs() >= dy.abs() {
             if dx >= 0 {
@@ -418,6 +657,44 @@ pub mod core {
             slot,
             tracking_id: state.tracking_id?,
         })
+    }
+
+    fn tap_duration_is_valid(
+        started_at: Option<Duration>,
+        released_at: Option<Duration>,
+        min_duration: Duration,
+    ) -> bool {
+        if min_duration.is_zero() {
+            return true;
+        }
+
+        match (started_at, released_at) {
+            (Some(started_at), Some(released_at)) => released_at
+                .checked_sub(started_at)
+                .is_some_and(|duration| duration >= min_duration),
+            _ => true,
+        }
+    }
+
+    fn slider_position(caps: Capabilities, axis: SliderAxis, state: &SlotState) -> Option<f32> {
+        match axis {
+            SliderAxis::Horizontal => state.current_x.map(|x| caps.x.normalize(x)),
+            SliderAxis::Vertical => state.current_y.map(|y| caps.y.normalize(y)),
+        }
+    }
+
+    fn positive_slider_direction(axis: SliderAxis) -> SliderDirection {
+        match axis {
+            SliderAxis::Horizontal => SliderDirection::Right,
+            SliderAxis::Vertical => SliderDirection::Down,
+        }
+    }
+
+    fn negative_slider_direction(axis: SliderAxis) -> SliderDirection {
+        match axis {
+            SliderAxis::Horizontal => SliderDirection::Left,
+            SliderAxis::Vertical => SliderDirection::Up,
+        }
     }
 }
 
