@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, Event, GestureDirection,
-    SliderAxis, SliderDirection, SliderSpec, SlotError, Zone,
+    ResyncContact, SliderAxis, SliderDirection, SliderSpec, SlotError, Zone,
 };
 
 fn test_caps() -> Capabilities {
@@ -176,6 +176,7 @@ fn short_edge_touch_does_not_emit_tap_when_timing_is_known() {
         Vec::new(),
         EngineOptions {
             tap_min_duration: Duration::from_millis(80),
+            ..EngineOptions::default()
         },
     );
 
@@ -210,6 +211,7 @@ fn edge_touch_at_tap_min_duration_emits_tap() {
         Vec::new(),
         EngineOptions {
             tap_min_duration: Duration::from_millis(80),
+            ..EngineOptions::default()
         },
     );
 
@@ -245,6 +247,7 @@ fn zero_tap_min_duration_allows_immediate_tap() {
         Vec::new(),
         EngineOptions {
             tap_min_duration: Duration::ZERO,
+            ..EngineOptions::default()
         },
     );
 
@@ -280,6 +283,7 @@ fn short_edge_swipe_still_emits_directional_gesture() {
         Vec::new(),
         EngineOptions {
             tap_min_duration: Duration::from_millis(80),
+            ..EngineOptions::default()
         },
     );
 
@@ -414,4 +418,101 @@ fn syn_dropped_clears_state_and_requires_explicit_resync() {
         .expect("state was cleared after SYN_DROPPED");
 
     assert!(!restarted.resync_required);
+}
+
+#[test]
+fn restored_contact_is_passthrough_until_release_even_when_it_is_on_an_edge() {
+    let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
+    engine
+        .process_frame(&[Event::syn_dropped()])
+        .expect("SYN_DROPPED should reset the engine");
+
+    let restored = engine
+        .restore_passthrough_contacts(&[ResyncContact {
+            slot: 1,
+            tracking_id: 42,
+            x: 20,
+            y: 300,
+        }])
+        .expect("kernel snapshot should restore the active contact");
+
+    assert_eq!(
+        restored.passthrough,
+        vec![
+            Event::slot(1),
+            Event::tracking_id(42),
+            Event::x(20),
+            Event::y(300),
+        ]
+    );
+    assert!(restored.gestures.is_empty());
+
+    let released = engine
+        .process_frame(&[Event::slot(1), Event::tracking_id(-1)])
+        .expect("restored contact release should pass through");
+    assert_eq!(
+        released.passthrough,
+        vec![Event::slot(1), Event::tracking_id(-1)]
+    );
+    assert!(released.gestures.is_empty());
+}
+
+#[test]
+fn gesture_distance_is_invariant_across_touchpad_coordinate_ranges() {
+    let direction_for = |x_max: i32, start_x: i32, end_x: i32| {
+        let mut engine = Engine::new(
+            Capabilities {
+                x: AxisRange { min: 0, max: x_max },
+                ..test_caps()
+            },
+            EdgeWidths::all(0.10),
+        );
+        engine
+            .process_frame(&[
+                Event::slot(0),
+                Event::tracking_id(50),
+                Event::x(start_x),
+                Event::y(300),
+            ])
+            .expect("contact should start");
+        engine
+            .process_frame(&[Event::slot(0), Event::x(end_x), Event::y(300)])
+            .expect("contact should move");
+        engine
+            .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+            .expect("contact should release")
+            .gestures[0]
+            .direction
+    };
+
+    assert_eq!(direction_for(1000, 10, 25), GestureDirection::Tap);
+    assert_eq!(direction_for(2000, 20, 50), GestureDirection::Tap);
+}
+
+#[test]
+fn gesture_direction_compares_normalized_axis_travel() {
+    let mut engine = Engine::new(
+        Capabilities {
+            x: AxisRange { min: 0, max: 2000 },
+            y: AxisRange { min: 0, max: 1000 },
+            ..test_caps()
+        },
+        EdgeWidths::all(0.10),
+    );
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(51),
+            Event::x(20),
+            Event::y(500),
+        ])
+        .expect("contact should start");
+    engine
+        .process_frame(&[Event::slot(0), Event::x(220), Event::y(650)])
+        .expect("contact should move");
+    let released = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("contact should release");
+
+    assert_eq!(released.gestures[0].direction, GestureDirection::Down);
 }

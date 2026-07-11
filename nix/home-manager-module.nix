@@ -105,6 +105,7 @@ let
     device = cfg.device;
     edge_width = cfg.edgeWidth;
     tap_min_duration_ms = cfg.tapMinDurationMs;
+    swipe_min_distance = cfg.swipeMinDistance;
     gestures = map (gesture: {
       inherit (gesture) zone direction action;
     }) cfg.gestures;
@@ -145,6 +146,18 @@ in
       type = lib.types.ints.between 0 10000;
       default = 80;
       description = "Minimum edge contact duration in milliseconds required for a tap gesture.";
+    };
+
+    swipeMinDistance = lib.mkOption {
+      type = lib.types.float;
+      default = 0.02;
+      apply =
+        value:
+        if value > 0.0 && value <= 1.0 then
+          value
+        else
+          throw "services.edgepad.swipeMinDistance must be > 0 and <= 1";
+      description = "Normalized touchpad travel required to classify an edge contact as a swipe.";
     };
 
     gestures = lib.mkOption {
@@ -191,6 +204,9 @@ in
       };
 
       Service = {
+        Type = "notify";
+        NotifyAccess = "main";
+        TimeoutStartSec = "45s";
         ExecStart = "${lib.getExe cfg.package} daemon --config ${configFile}";
         Restart = "on-failure";
         RestartSec = "1s";

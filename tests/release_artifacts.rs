@@ -76,6 +76,9 @@ fn release_user_service_runs_installed_user_binary_with_config() {
     );
     assert!(service.contains("WantedBy=default.target"));
     assert!(service.contains("Restart=on-failure"));
+    assert!(service.contains("Type=notify"));
+    assert!(service.contains("NotifyAccess=main"));
+    assert!(service.contains("TimeoutStartSec=45s"));
 }
 
 #[test]
@@ -83,7 +86,7 @@ fn release_workflow_publishes_required_assets_and_checksums() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for required in [
-        "edgepad-x86_64-unknown-linux-gnu",
+        "edgepad-x86_64-unknown-linux-musl",
         "70-edgepad.rules",
         "edgepad.service",
         "edgepad.toml.example",
@@ -92,10 +95,22 @@ fn release_workflow_publishes_required_assets_and_checksums() {
         "v$PACKAGE_VERSION",
         "gh release create",
         "--generate-notes",
+        "targets: x86_64-unknown-linux-musl",
+        "--target x86_64-unknown-linux-musl",
+        "readelf -l",
+        "INTERP",
     ] {
         assert!(
             workflow.contains(required),
             "release workflow should mention {required}"
         );
     }
+}
+
+#[test]
+fn ci_uses_the_locked_dependency_graph_for_rust_checks() {
+    let workflow = include_str!("../.github/workflows/ci.yml");
+
+    assert!(workflow.contains("cargo clippy --locked --all-targets -- -D warnings"));
+    assert!(workflow.contains("cargo test --locked"));
 }

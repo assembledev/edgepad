@@ -241,10 +241,11 @@ fn check_config(config: &DoctorConfig, report: &mut DoctorReport) -> Option<Edge
                 DoctorSection::Config,
                 "file",
                 format!(
-                    "device {}, edge width {}, tap min {}ms, {}, {}",
+                    "device {}, edge width {}, tap min {}ms, swipe min {}, {}, {}",
                     device_config_value_label(&edgepad_config.device),
                     percent_label(edgepad_config.edge_width),
                     edgepad_config.tap_min_duration_ms,
+                    percent_label(edgepad_config.swipe_min_distance),
                     gesture_binding_count_label(edgepad_config.gestures.len()),
                     slider_count_label(edgepad_config.sliders.len())
                 ),
@@ -1205,7 +1206,10 @@ fn slider_direction_name(direction: SliderDirection) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{GestureActionConfig, GestureBindingConfig, DEFAULT_TAP_MIN_DURATION_MS};
+    use crate::config::{
+        GestureActionConfig, GestureBindingConfig, DEFAULT_SWIPE_MIN_DISTANCE,
+        DEFAULT_TAP_MIN_DURATION_MS,
+    };
 
     #[test]
     fn parses_current_tags_from_udevadm_properties() {
@@ -1253,6 +1257,7 @@ mod tests {
             device: DeviceConfig::Auto,
             edge_width: 0.20,
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
+            swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: vec![
                 GestureBindingConfig {
                     zone: Zone::Right,
@@ -1281,6 +1286,7 @@ mod tests {
             device: DeviceConfig::Path(PathBuf::from("/dev/input/event7")),
             edge_width: 0.10,
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
+            swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
             sliders: Vec::new(),
         };
@@ -1302,6 +1308,7 @@ mod tests {
             device: DeviceConfig::Auto,
             edge_width: 0.10,
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
+            swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
             sliders: Vec::new(),
         };
@@ -1327,6 +1334,7 @@ mod tests {
             device: DeviceConfig::Auto,
             edge_width: 0.10,
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
+            swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: vec![GestureBindingConfig {
                 zone: Zone::Right,
                 direction: GestureDirection::Up,

@@ -26,6 +26,11 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -34,18 +39,23 @@ jobs:
         run: cargo test --locked
 
       - name: Build release binary
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target x86_64-unknown-linux-musl
 
       - name: Prepare release assets
         run: |
           set -euo pipefail
           mkdir -p dist
-          cp target/release/edgepad dist/edgepad-x86_64-unknown-linux-gnu
-          strip dist/edgepad-x86_64-unknown-linux-gnu
+          cp target/x86_64-unknown-linux-musl/release/edgepad dist/edgepad-x86_64-unknown-linux-musl
+          strip dist/edgepad-x86_64-unknown-linux-musl
+          if readelf -l dist/edgepad-x86_64-unknown-linux-musl | grep -q 'INTERP'; then
+            echo "release binary unexpectedly requires a dynamic loader" >&2
+            exit 1
+          fi
+          dist/edgepad-x86_64-unknown-linux-musl --version
           cp packaging/70-edgepad.rules dist/70-edgepad.rules
           cp packaging/edgepad.service dist/edgepad.service
           cp examples/edgepad.toml.example dist/edgepad.toml.example
-          (cd dist && sha256sum edgepad-x86_64-unknown-linux-gnu 70-edgepad.rules edgepad.service edgepad.toml.example > checksums)
+          (cd dist && sha256sum edgepad-x86_64-unknown-linux-musl 70-edgepad.rules edgepad.service edgepad.toml.example > checksums)
 
       - name: Publish GitHub Release
         env:

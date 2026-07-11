@@ -32,7 +32,9 @@ Preview the install plan first:
 curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --dry-run
 ```
 
-The installer downloads the x86_64 Linux release binary, installs udev rules, writes a default config to `~/.config/edgepad/edgepad.toml`, installs a systemd user service, starts it, and runs `edgepad doctor`.
+The installer downloads a statically linked x86_64 Linux release binary, installs udev rules, writes a default config to `~/.config/edgepad/edgepad.toml`, installs a systemd user service, starts it, and runs `edgepad doctor`.
+Running the installer again upgrades the installed files and restarts the active daemon before
+checking its health.
 
 Uninstall files created by the release installer:
 
@@ -94,6 +96,10 @@ Check the current daemon, config, device, zones, and actions:
 edgepad status
 ```
 
+The service becomes active only after the virtual touchpad is created and the physical device is
+grabbed. Status output includes the ready daemon's PID, version, and selected device when systemd
+provides them.
+
 Run deeper diagnostics for device access, action executables, and service state:
 
 ```bash
@@ -118,6 +124,7 @@ Example config:
 device = "auto"
 edge_width = 0.10
 tap_min_duration_ms = 80
+swipe_min_distance = 0.02
 
 [[sliders]]
 zone = "left"
@@ -168,6 +175,14 @@ edge_width = 0.10
 
 ```toml
 tap_min_duration_ms = 80
+```
+
+`swipe_min_distance` is the minimum normalized touchpad travel that turns an edge contact into a
+directional gesture. It defaults to `0.02`, or 2% of the corresponding touchpad axis. Smaller
+movement remains a tap, so the same physical gesture behaves consistently across coordinate ranges.
+
+```toml
+swipe_min_distance = 0.02
 ```
 
 Each gesture binding has a zone, direction, and action:

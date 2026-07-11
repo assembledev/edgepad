@@ -8,6 +8,7 @@ pub mod config;
 pub mod device;
 pub mod doctor;
 pub mod dump;
+pub mod notify;
 pub mod proxy;
 pub mod raw;
 pub mod status;
@@ -17,6 +18,7 @@ pub mod core {
     use std::time::Duration;
 
     pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 80;
+    pub const DEFAULT_SWIPE_MIN_DISTANCE: f32 = 0.02;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct AxisRange {
@@ -28,6 +30,11 @@ pub mod core {
         fn normalize(self, value: i32) -> f32 {
             let span = (self.max - self.min).max(1) as f32;
             (value - self.min) as f32 / span
+        }
+
+        fn normalize_delta(self, start: i32, end: i32) -> f32 {
+            let span = (self.max - self.min).max(1) as f32;
+            (end - start) as f32 / span
         }
     }
 
@@ -135,15 +142,17 @@ pub mod core {
         pub step: f32,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct EngineOptions {
         pub tap_min_duration: Duration,
+        pub swipe_min_distance: f32,
     }
 
     impl Default for EngineOptions {
         fn default() -> Self {
             Self {
                 tap_min_duration: Duration::from_millis(DEFAULT_TAP_MIN_DURATION_MS),
+                swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             }
         }
     }
@@ -154,6 +163,14 @@ pub mod core {
         pub direction: SliderDirection,
         pub slot: i32,
         pub tracking_id: i32,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct ResyncContact {
+        pub slot: i32,
+        pub tracking_id: i32,
+        pub x: i32,
+        pub y: i32,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -307,6 +324,36 @@ pub mod core {
             self.process_frame_with_time(frame, Some(timestamp))
         }
 
+        pub fn restore_passthrough_contacts(
+            &mut self,
+            contacts: &[ResyncContact],
+        ) -> Result<FrameOutput, SlotError> {
+            self.reset_for_resync();
+            let mut output = FrameOutput::empty();
+
+            for contact in contacts {
+                self.ensure_slot(contact.slot)?;
+                self.current_slot = contact.slot;
+                let slot = self.slot_mut(contact.slot)?;
+                slot.active = true;
+                slot.tracking_id = Some(contact.tracking_id);
+                slot.ownership = Ownership::Passthrough;
+                slot.start_x = Some(contact.x);
+                slot.start_y = Some(contact.y);
+                slot.current_x = Some(contact.x);
+                slot.current_y = Some(contact.y);
+
+                output.passthrough.extend([
+                    Event::slot(contact.slot),
+                    Event::tracking_id(contact.tracking_id),
+                    Event::x(contact.x),
+                    Event::y(contact.y),
+                ]);
+            }
+
+            Ok(output)
+        }
+
         fn process_frame_with_time(
             &mut self,
             frame: &[Event],
@@ -383,9 +430,10 @@ pub mod core {
                 Ownership::Claimed(zone) => {
                     let releases_slider_zone = self.slider_for_zone(zone).is_some();
                     let options = self.options;
+                    let capabilities = self.caps;
                     let slot_state = self.slot_mut(slot)?;
                     if let Some(gesture) =
-                        classify_gesture(slot, zone, slot_state, options, timestamp)
+                        classify_gesture(capabilities, slot, zone, slot_state, options, timestamp)
                     {
                         if !releases_slider_zone || gesture.direction == GestureDirection::Tap {
                             output.gestures.push(gesture);
@@ -621,6 +669,7 @@ pub mod core {
     }
 
     fn classify_gesture(
+        capabilities: Capabilities,
         slot: i32,
         zone: Zone,
         state: &SlotState,
@@ -631,25 +680,26 @@ pub mod core {
         let start_y = state.start_y?;
         let current_x = state.current_x.unwrap_or(start_x);
         let current_y = state.current_y.unwrap_or(start_y);
-        let dx = current_x - start_x;
-        let dy = current_y - start_y;
+        let dx = capabilities.x.normalize_delta(start_x, current_x);
+        let dy = capabilities.y.normalize_delta(start_y, current_y);
 
-        let direction = if dx.abs() < 20 && dy.abs() < 20 {
-            if !tap_duration_is_valid(state.started_at, released_at, options.tap_min_duration) {
-                return None;
-            }
-            GestureDirection::Tap
-        } else if dx.abs() >= dy.abs() {
-            if dx >= 0 {
-                GestureDirection::Right
+        let direction =
+            if dx.abs() < options.swipe_min_distance && dy.abs() < options.swipe_min_distance {
+                if !tap_duration_is_valid(state.started_at, released_at, options.tap_min_duration) {
+                    return None;
+                }
+                GestureDirection::Tap
+            } else if dx.abs() >= dy.abs() {
+                if dx >= 0.0 {
+                    GestureDirection::Right
+                } else {
+                    GestureDirection::Left
+                }
+            } else if dy >= 0.0 {
+                GestureDirection::Down
             } else {
-                GestureDirection::Left
-            }
-        } else if dy >= 0 {
-            GestureDirection::Down
-        } else {
-            GestureDirection::Up
-        };
+                GestureDirection::Up
+            };
 
         Some(Gesture {
             zone,
