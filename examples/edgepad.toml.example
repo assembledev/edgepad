@@ -1,3 +1,6 @@
+# Safe example actions: these commands only show notifications.
+# Replace them with the volume, brightness, media, and workspace commands used by your desktop.
+
 device = "auto"
 edge_width = 0.10
 tap_min_duration_ms = 80

@@ -1,58 +1,54 @@
 # Nix
 
-`edgepad` ships a Nix flake for local builds, development shells, NixOS device access, and a Home Manager user service.
+`edgepad` provides two modules for a normal desktop installation:
 
-The flake uses `rust-overlay` for an explicit Rust toolchain, reads the package version from `Cargo.toml`, and keeps the package definition in `nix/package.nix`.
+- the NixOS module installs the package, loads `uinput`, and grants device access;
+- the Home Manager module writes the config and runs edgepad as a user service.
 
-## Build and run
+Use both modules for the complete setup. Building the package alone does not configure device access
+or start the daemon.
 
-```bash
-nix build .#edgepad
-./result/bin/edgepad --help
-```
+## Normal desktop installation
 
-Run commands without installing:
+### 1. Add the flake input
 
-```bash
-nix run .#edgepad -- devices
-nix run .#edgepad -- doctor
-nix run .#edgepad -- replay tests/fixtures/left-edge-swipe-right.ev
-```
-
-For read-only capture from `/dev/input/event*`, permissions may require `sudo`, group access, or active seat ACLs:
-
-```bash
-sudo ./result/bin/edgepad devices
-sudo ./result/bin/edgepad dump --device /dev/input/eventX --out bug.ev --frames 300
-./result/bin/edgepad replay bug.ev
-```
-
-For live diagnostics:
-
-```bash
-sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
-sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
-```
-
-For normal desktop gesture use, prefer the NixOS + Home Manager modules below. They run the daemon as a user service instead of a root shell command.
-
-## NixOS module
-
-The NixOS module prepares system access. It installs the package, loads `uinput`, and installs udev rules for the touchpad event node and `/dev/uinput`.
+Add edgepad to the inputs of your system flake:
 
 ```nix
 {
-  imports = [ inputs.edgepad.nixosModules.default ];
-
-  services.edgepad = {
-    enable = true;
+  inputs.edgepad = {
+    url = "github:assembledev/edgepad";
+    inputs.nixpkgs.follows = "nixpkgs";
   };
 }
 ```
 
-The default access mode uses systemd-logind seat ACLs through `TAG+="uaccess"`. This is the preferred desktop mode because the active local user gets device access without permanent membership in the `input` group.
+The examples below use `inputs` in NixOS and Home Manager modules. If your flake does not already
+pass it to modules, use:
 
-For systems without a normal local seat/logind session, use the group fallback:
+- `specialArgs = { inherit inputs; };` in `nixosSystem`;
+- `extraSpecialArgs = { inherit inputs; };` in a standalone `homeManagerConfiguration`; or
+- `home-manager.extraSpecialArgs = { inherit inputs; };` when Home Manager is a NixOS module.
+
+### 2. Enable system access
+
+Import the NixOS module in your system configuration:
+
+```nix
+{ inputs, ... }:
+
+{
+  imports = [ inputs.edgepad.nixosModules.default ];
+
+  services.edgepad.enable = true;
+}
+```
+
+The default access mode uses systemd-logind seat ACLs through `TAG+="uaccess"`. The active local
+user gets access to the touchpad and `/dev/uinput` without permanent membership in the `input`
+group.
+
+For a machine without a normal local seat or logind session, use the group fallback:
 
 ```nix
 {
@@ -64,13 +60,15 @@ For systems without a normal local seat/logind session, use the group fallback:
 }
 ```
 
-After adding a user to the input group, start a new login session before expecting group membership to be visible.
+Start a new login session after adding a user to the group.
 
-## Home Manager module
+### 3. Configure the user service
 
-The Home Manager module writes `~/.config/edgepad/edgepad.toml` and starts a systemd user service bound to `graphical-session.target`.
+Import the Home Manager module in your home configuration:
 
 ```nix
+{ inputs, pkgs, ... }:
+
 {
   imports = [ inputs.edgepad.homeManagerModules.default ];
 
@@ -85,59 +83,143 @@ The Home Manager module writes `~/.config/edgepad/edgepad.toml` and starts a sys
       {
         zone = "top";
         direction = "tap";
-        action = [ "notify-send" "edgepad" "play-pause" ];
+        action = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "play-pause" ];
       }
     ];
 
     sliders = [
       {
         zone = "right";
-        up = [ "notify-send" "edgepad" "brightness-up" ];
-        down = [ "notify-send" "edgepad" "brightness-down" ];
+        up = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "brightness-up" ];
+        down = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "brightness-down" ];
       }
     ];
   };
 }
 ```
 
-Gesture and slider actions are argv arrays and are not run through a shell. Use full paths or add packages to the user environment when you do not want to rely on `PATH`.
+These notification actions are safe examples. Replace them with the commands used by your desktop.
+Actions are argv arrays and are not run through a shell. Using package paths, as above, avoids
+depending on the service's `PATH`.
+
+### 4. Apply and verify
+
+Apply the NixOS and Home Manager configurations using your normal rebuild commands. If Home Manager
+is integrated into the NixOS configuration, the NixOS rebuild applies both modules.
+
+Then check the user service:
+
+```bash
+edgepad status
+edgepad doctor
+systemctl --user status edgepad.service
+```
+
+The service is ready only after edgepad has created the virtual touchpad and grabbed the physical
+device. If pointer input behaves incorrectly, stop it immediately:
+
+```bash
+systemctl --user stop edgepad.service
+```
+
+### Update
+
+Update the locked edgepad input, then apply your system and Home Manager configurations again:
+
+```bash
+nix flake update edgepad
+```
 
 ## Device selection
 
-`device = "auto"` scans readable `/dev/input/event*` nodes and succeeds only when exactly one touchpad candidate is present. If there are multiple candidates, list them:
+`device = "auto"` succeeds only when exactly one readable touchpad candidate is present. If edgepad
+finds more than one candidate, list them:
 
 ```bash
 edgepad devices
 ```
 
-and configure the explicit path:
+Then set the chosen event node in Home Manager:
 
 ```nix
 services.edgepad.device = "/dev/input/event7";
 ```
+
+## Package-only use
+
+Build the package from a checkout:
+
+```bash
+nix build .#edgepad
+./result/bin/edgepad --help
+```
+
+Run a command without installing:
+
+```bash
+nix run .#edgepad -- devices
+nix run .#edgepad -- replay tests/fixtures/left-edge-swipe-right.ev
+```
+
+From outside the repository, use the GitHub flake:
+
+```bash
+nix run github:assembledev/edgepad -- --help
+```
+
+These commands provide the binary only. For the daemon, device rules, and user service, use the two
+modules above.
 
 ## Development shell
 
 ```bash
 nix develop
 cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
 ```
 
 Or run one command inside the shell:
 
 ```bash
-nix develop -c cargo test
+nix develop -c cargo test --locked
 ```
 
-The dev shell includes stable Rust from `rust-overlay`, `rust-src`, `rust-analyzer`, `clippy`, `rustfmt`, `evtest`, and `libinput`.
+The shell includes stable Rust, `rust-src`, `rust-analyzer`, `clippy`, `rustfmt`, `evtest`, and
+`libinput`.
 
-For direnv:
+The repository includes an `.envrc`, so direnv users can run:
 
 ```bash
 direnv allow
 ```
+
+## Manual diagnostics
+
+Read-only device discovery and capture may require `sudo` when the current shell does not have a
+seat ACL:
+
+```bash
+sudo ./result/bin/edgepad devices
+sudo ./result/bin/edgepad dump --device /dev/input/eventX --out bug.ev --frames 300
+./result/bin/edgepad replay bug.ev
+```
+
+Dry-run proxy mode reads and routes events without grabbing the touchpad:
+
+```bash
+sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
+```
+
+The live proxy below grabs the physical touchpad and sends normal pointer input through a temporary
+virtual touchpad until the frame limit is reached:
+
+```bash
+sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
+```
+
+For normal desktop use, run the Home Manager service instead of a root shell command. Gesture
+actions started under `sudo` inherit root's environment, not the graphical user session.
 
 ## Flake outputs
 

@@ -65,6 +65,9 @@ For normal desktop use, run the daemon as a user service with access to `/dev/in
 
 ## Config example
 
+The commands below are safe notification examples. Replace them with the commands used by your
+desktop.
+
 ```toml
 device = "auto"
 edge_width = 0.10
