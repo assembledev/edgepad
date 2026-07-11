@@ -18,6 +18,19 @@ The hard part is input correctness: Type-B multitouch slots, mixed edge/center c
 - Bounded live proxy mode for testing real hardware.
 - Nix package, NixOS module, Home Manager module, release installer, and systemd user service.
 
+## Core concepts
+
+The touchpad is split into four edge zones: `left`, `right`, `top`, and `bottom`.
+
+- A **gesture** runs one action when the finger lifts. It can match either a directional swipe or a
+  tap.
+- A **tap** is a gesture with no meaningful movement.
+- A **slider** runs repeated steps while the finger moves, which is useful for volume or brightness.
+- An **action** is the command that edgepad starts for a gesture or slider step.
+
+A slider and a tap gesture can share the same edge. A slider and a directional gesture cannot,
+because both would need to own the same movement.
+
 ## Install
 
 ### Release installer
@@ -32,9 +45,17 @@ Preview the install plan first:
 curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --dry-run
 ```
 
-The installer downloads a statically linked x86_64 Linux release binary, installs udev rules, writes a default config to `~/.config/edgepad/edgepad.toml`, installs a systemd user service, starts it, and runs `edgepad doctor`.
-Running the installer again upgrades the installed files and restarts the active daemon before
-checking its health.
+The release installer is the complete setup for an x86_64 Linux desktop with systemd. It downloads
+a static binary, installs the udev rules, writes a default config to
+`~/.config/edgepad/edgepad.toml`, installs and starts the user service, then runs `edgepad doctor`.
+It asks for `sudo` only when installing the udev rules.
+
+### Update
+
+Run the same installer command again. It keeps your config, replaces the installed files, restarts
+the daemon, and checks that the service is healthy.
+
+### Uninstall
 
 Uninstall files created by the release installer:
 
@@ -50,6 +71,12 @@ curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh
 
 ### Nix
 
+For normal desktop use, install both the NixOS module and the Home Manager module. The NixOS module
+provides device access; the Home Manager module owns the config and user service. See the complete
+[Nix setup](docs/nix.md).
+
+The commands below only build or run the package. They do not install device rules or a user service.
+
 Build and run from the repository:
 
 ```bash
@@ -64,33 +91,13 @@ nix run github:assembledev/edgepad -- --help
 nix run github:assembledev/edgepad -- devices
 ```
 
-Development shell:
-
-```bash
-nix develop
-cargo test
-```
-
-See [Nix](docs/nix.md) for flake outputs, NixOS, and Home Manager setup.
-
-### Cargo
-
-```bash
-cargo install --git https://github.com/assembledev/edgepad
-```
-
-For local development:
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test
-cargo run -- --help
-```
-
 ## Quick start
 
-Check the current daemon, config, device, zones, and actions:
+The config installed by the release script uses desktop notifications as safe example actions.
+Gestures will show what they matched, but they will not change your volume, brightness, media state,
+or workspace until you replace those commands.
+
+Check that the service, config, and touchpad are ready:
 
 ```bash
 edgepad status
@@ -100,16 +107,10 @@ The service becomes active only after the virtual touchpad is created and the ph
 grabbed. Status output includes the ready daemon's PID, version, and selected device when systemd
 provides them.
 
-Run deeper diagnostics for device access, action executables, and service state:
+If status reports a problem, run the full check:
 
 ```bash
 edgepad doctor
-```
-
-List touchpad candidates:
-
-```bash
-edgepad devices
 ```
 
 Edit your config:
@@ -152,6 +153,18 @@ Watch logs:
 
 ```bash
 journalctl --user -u edgepad.service -f
+```
+
+If pointer input behaves incorrectly, stop edgepad immediately:
+
+```bash
+systemctl --user stop edgepad.service
+```
+
+The physical touchpad is ungrabbed when the daemon stops. Start it again with:
+
+```bash
+systemctl --user start edgepad.service
 ```
 
 For a foreground run, `edgepad daemon` reads `~/.config/edgepad/edgepad.toml` by default.
@@ -253,6 +266,28 @@ The preferred desktop setup is a user service with logind/uaccess ACLs. The NixO
 
 Manual commands that read real input devices may need `sudo`, the `input` group, or active seat ACLs. Use `edgepad doctor` to see what your system is missing.
 
+## Troubleshooting
+
+Start with these two commands:
+
+```bash
+edgepad status
+edgepad doctor
+```
+
+Common problems:
+
+- **More than one touchpad was found:** run `edgepad devices`, then set an explicit
+  `device = "/dev/input/eventX"` in the config.
+- **The touchpad or `/dev/uinput` is not accessible:** use the access fix reported by
+  `edgepad doctor`. If udev rules or group membership just changed, start a new login session.
+- **The service stays in `activating`:** edgepad is still waiting for a readable touchpad or
+  `/dev/uinput`. Check `edgepad doctor` and the service log.
+- **An action command is missing:** install that program, use its full path, or replace the example
+  action with a command available on your desktop.
+- **Pointer input is wrong:** stop the service with `systemctl --user stop edgepad.service`, then
+  inspect `journalctl --user -u edgepad.service -b`.
+
 ## Diagnostics and capture
 
 Device discovery is read-only:
@@ -284,6 +319,9 @@ edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
 
 Run a bounded live virtual-touchpad proxy test:
 
+This command grabs the physical touchpad for the duration of the test. Normal pointer input is sent
+through edgepad's temporary virtual touchpad until the frame limit is reached.
+
 ```bash
 edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
 ```
@@ -310,6 +348,25 @@ edgepad replay-raw  Replay a raw evdev capture through routing and output compos
 - [Passthrough and uinput](docs/passthrough-uinput.md)
 - [Replay fixture format](docs/replay-format.md)
 - [Nix](docs/nix.md)
+
+## Development
+
+Clone the repository and enter its development shell:
+
+```bash
+git clone https://github.com/assembledev/edgepad.git
+cd edgepad
+nix develop
+```
+
+Build and check the project from there:
+
+```bash
+cargo build --locked
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+```
 
 ## Contributing
 
