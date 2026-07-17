@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use edgepad::core::{AxisRange, Capabilities, Event};
-use edgepad::replay::{parse_replay_file, ReplayError};
+use edgepad::replay::{parse_replay_file, ReplayError, ReplayFrame};
 
 #[test]
 fn parse_replay_file_reads_capability_header_and_frames() {
@@ -15,7 +17,7 @@ ABS_MT_SLOT 0
 ABS_MT_TRACKING_ID 123
 ABS_MT_POSITION_X 20
 ABS_MT_POSITION_Y 300
-SYN_REPORT
+SYN_REPORT 16000
 "#,
     )
     .expect("metadata replay should parse");
@@ -31,19 +33,22 @@ SYN_REPORT
     );
     assert_eq!(
         replay.frames,
-        vec![vec![
-            Event::slot(0),
-            Event::tracking_id(123),
-            Event::x(20),
-            Event::y(300),
-        ]]
+        vec![ReplayFrame {
+            events: vec![
+                Event::slot(0),
+                Event::tracking_id(123),
+                Event::x(20),
+                Event::y(300),
+            ],
+            timestamp: Duration::from_micros(16000),
+        }]
     );
 }
 
 #[test]
-fn parse_replay_file_keeps_old_fixtures_without_metadata_compatible() {
+fn parse_replay_file_keeps_fixtures_without_capability_metadata() {
     let replay = parse_replay_file(include_str!("fixtures/left-edge-swipe-right.ev"))
-        .expect("old fixture without metadata should still parse");
+        .expect("fixture without capability metadata should still parse");
 
     assert_eq!(replay.capabilities, None);
     assert_eq!(replay.frames.len(), 3);
@@ -55,7 +60,7 @@ fn parse_replay_file_rejects_partial_capability_metadata() {
         r#"
 # slots: 0..=4
 ABS_MT_SLOT 0
-SYN_REPORT
+SYN_REPORT 0
 "#,
     )
     .expect_err("partial metadata should not silently fall back to defaults");

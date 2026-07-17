@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::core::{
@@ -18,6 +19,9 @@ pub const BTN_RIGHT: u16 = 0x111;
 pub const BTN_MIDDLE: u16 = 0x112;
 pub const BTN_SIDE: u16 = 0x113;
 pub const BTN_EXTRA: u16 = 0x114;
+pub const BTN_FORWARD: u16 = 0x115;
+pub const BTN_BACK: u16 = 0x116;
+pub const BTN_TASK: u16 = 0x117;
 pub const BTN_TOOL_FINGER: u16 = 0x145;
 pub const BTN_TOOL_QUINTTAP: u16 = 0x148;
 pub const BTN_TOUCH: u16 = 0x14a;
@@ -42,6 +46,10 @@ pub const ABS_MT_PRESSURE: u16 = 0x3a;
 pub const ABS_MT_DISTANCE: u16 = 0x3b;
 pub const ABS_MT_TOOL_X: u16 = 0x3c;
 pub const ABS_MT_TOOL_Y: u16 = 0x3d;
+
+pub const fn is_pointer_button_code(code: u16) -> bool {
+    matches!(code, BTN_LEFT..=BTN_TASK)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawEvent {
@@ -147,6 +155,18 @@ pub enum RawParseError {
     MissingMetadataField {
         field: &'static str,
     },
+    InvalidTimestamp {
+        line: usize,
+        value: String,
+    },
+    NonMonotonicTimestamp {
+        line: usize,
+        previous_us: u64,
+        current_us: u64,
+    },
+    UnterminatedFrame {
+        line: usize,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -164,6 +184,7 @@ pub struct RawDumpFile {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoutedRawFrame {
     pub passthrough: Vec<RawEvent>,
+    pub physical_buttons: Vec<RawEvent>,
     pub gestures: Vec<Gesture>,
     pub slider_steps: Vec<SliderStep>,
     pub resync_required: bool,
@@ -178,6 +199,7 @@ pub struct RawOutputComposer {
     last_tool_count: usize,
     last_abs_x: Option<i32>,
     last_abs_y: Option<i32>,
+    pressed_physical_buttons: BTreeSet<u16>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -266,6 +288,7 @@ impl RawOutputComposer {
             last_tool_count: 0,
             last_abs_x: None,
             last_abs_y: None,
+            pressed_physical_buttons: BTreeSet::new(),
         }
     }
 
@@ -282,6 +305,10 @@ impl RawOutputComposer {
             events.push(event);
         }
         self.append_legacy_state_events(&mut events);
+        for event in routed.physical_buttons.iter().copied() {
+            self.apply_physical_button_event(event);
+            events.push(event);
+        }
 
         Ok(RawFrame::new(events))
     }
@@ -319,6 +346,17 @@ impl RawOutputComposer {
             _ => {}
         }
         Ok(())
+    }
+
+    fn apply_physical_button_event(&mut self, event: RawEvent) {
+        if event.kind != EV_KEY || !is_pointer_button_code(event.code) {
+            return;
+        }
+        if event.value == 0 {
+            self.pressed_physical_buttons.remove(&event.code);
+        } else {
+            self.pressed_physical_buttons.insert(event.code);
+        }
     }
 
     fn append_legacy_state_events(&mut self, events: &mut Vec<RawEvent>) {
@@ -382,6 +420,9 @@ impl RawOutputComposer {
         }
         self.clear_slot_state();
         self.append_legacy_state_events(&mut events);
+        for code in std::mem::take(&mut self.pressed_physical_buttons) {
+            events.push(RawEvent::new(EV_KEY, code, 0));
+        }
         Ok(events)
     }
 
@@ -392,6 +433,7 @@ impl RawOutputComposer {
         self.last_tool_count = 0;
         self.last_abs_x = None;
         self.last_abs_y = None;
+        self.pressed_physical_buttons.clear();
     }
 
     fn clear_slot_state(&mut self) {
@@ -557,6 +599,7 @@ fn parse_metadata_range(
 pub fn parse_raw_frames(input: &str) -> Result<Vec<RawFrame>, RawParseError> {
     let mut frames = Vec::new();
     let mut current = Vec::new();
+    let mut last_timestamp = None;
 
     for (index, raw_line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -569,31 +612,43 @@ pub fn parse_raw_frames(input: &str) -> Result<Vec<RawFrame>, RawParseError> {
             continue;
         }
 
-        let event = parse_raw_event_line(line_number, line)?;
+        let (event, timestamp) = parse_raw_event_line(line_number, line)?;
         match (event.kind, event.code) {
             (EV_SYN, SYN_REPORT) => {
+                let timestamp = parse_frame_timestamp(line_number, timestamp.as_deref())?;
+                validate_frame_timestamp(line_number, timestamp, &mut last_timestamp)?;
                 if !current.is_empty() {
-                    frames.push(RawFrame::new(std::mem::take(&mut current)));
+                    frames.push(RawFrame::new_at(std::mem::take(&mut current), timestamp));
                 }
             }
             (EV_SYN, SYN_DROPPED) => {
-                if !current.is_empty() {
-                    frames.push(RawFrame::new(std::mem::take(&mut current)));
-                }
-                frames.push(RawFrame::new(vec![event]));
+                let timestamp = parse_frame_timestamp(line_number, timestamp.as_deref())?;
+                validate_frame_timestamp(line_number, timestamp, &mut last_timestamp)?;
+                current.clear();
+                frames.push(RawFrame::new_at(vec![event], timestamp));
             }
-            _ => current.push(event),
+            _ => {
+                if timestamp.is_some() {
+                    return Err(RawParseError::ExtraField { line: line_number });
+                }
+                current.push(event);
+            }
         }
     }
 
     if !current.is_empty() {
-        frames.push(RawFrame::new(current));
+        return Err(RawParseError::UnterminatedFrame {
+            line: input.lines().count().max(1),
+        });
     }
 
     Ok(frames)
 }
 
-fn parse_raw_event_line(line: usize, raw_line: &str) -> Result<RawEvent, RawParseError> {
+fn parse_raw_event_line(
+    line: usize,
+    raw_line: &str,
+) -> Result<(RawEvent, Option<String>), RawParseError> {
     let mut parts = raw_line.split_whitespace();
     let event_type = parts.next().ok_or(RawParseError::MissingField {
         line,
@@ -608,6 +663,7 @@ fn parse_raw_event_line(line: usize, raw_line: &str) -> Result<RawEvent, RawPars
         field: "value",
     })?;
 
+    let timestamp = parts.next().map(str::to_string);
     if parts.next().is_some() {
         return Err(RawParseError::ExtraField { line });
     }
@@ -616,7 +672,39 @@ fn parse_raw_event_line(line: usize, raw_line: &str) -> Result<RawEvent, RawPars
     let code = parse_event_code(line, event_type, kind, code)?;
     let value = parse_i32_field(line, "value", value)?;
 
-    Ok(RawEvent::new(kind, code, value))
+    Ok((RawEvent::new(kind, code, value), timestamp))
+}
+
+fn parse_frame_timestamp(line: usize, value: Option<&str>) -> Result<Duration, RawParseError> {
+    let value = value.ok_or(RawParseError::MissingField {
+        line,
+        field: "timestamp_us",
+    })?;
+    let micros = value
+        .parse::<u64>()
+        .map_err(|_| RawParseError::InvalidTimestamp {
+            line,
+            value: value.to_string(),
+        })?;
+    Ok(Duration::from_micros(micros))
+}
+
+fn validate_frame_timestamp(
+    line: usize,
+    timestamp: Duration,
+    last_timestamp: &mut Option<Duration>,
+) -> Result<(), RawParseError> {
+    if let Some(previous) = *last_timestamp {
+        if timestamp < previous {
+            return Err(RawParseError::NonMonotonicTimestamp {
+                line,
+                previous_us: previous.as_micros() as u64,
+                current_us: timestamp.as_micros() as u64,
+            });
+        }
+    }
+    *last_timestamp = Some(timestamp);
+    Ok(())
 }
 
 fn parse_event_type(line: usize, name: &str) -> Result<u16, RawParseError> {
@@ -749,15 +837,31 @@ pub fn extract_core_events(frame: &RawFrame) -> Vec<Event> {
 }
 
 pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRawFrame, SlotError> {
+    let physical_buttons = frame
+        .events
+        .iter()
+        .copied()
+        .filter(|event| event.kind == EV_KEY && is_pointer_button_code(event.code))
+        .collect::<Vec<_>>();
+    let mut promoted_contacts = Vec::new();
+    for event in physical_buttons.iter().filter(|event| event.value != 0) {
+        promoted_contacts.extend(engine.update_physical_button(event.code, true));
+    }
+
     let core_events = extract_core_events(frame);
     let output = match frame.timestamp {
         Some(timestamp) => engine.process_frame_at(&core_events, timestamp)?,
         None => engine.process_frame(&core_events)?,
     };
-    let passthrough = raw_passthrough_events_for_core_passthrough(frame, &output.passthrough);
+    for event in physical_buttons.iter().filter(|event| event.value == 0) {
+        engine.update_physical_button(event.code, false);
+    }
+    promoted_contacts.extend(output.passthrough.iter().copied());
+    let passthrough = raw_passthrough_events_for_core_passthrough(frame, &promoted_contacts);
 
     Ok(RoutedRawFrame {
         passthrough,
+        physical_buttons,
         gestures: output.gestures,
         slider_steps: output.slider_steps,
         resync_required: output.resync_required,
@@ -775,6 +879,7 @@ pub fn route_resync_contacts(
             .into_iter()
             .filter_map(raw_event_for_core_event)
             .collect(),
+        physical_buttons: Vec::new(),
         gestures: Vec::new(),
         slider_steps: Vec::new(),
         resync_required: false,

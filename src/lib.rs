@@ -15,6 +15,7 @@ pub mod status;
 pub mod uinput;
 
 pub mod core {
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
     pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 80;
@@ -260,6 +261,8 @@ pub mod core {
         edges: EdgeWidths,
         options: EngineOptions,
         sliders: Vec<SliderSpec>,
+        buttonpad: bool,
+        pressed_physical_buttons: BTreeSet<u16>,
         current_slot: i32,
         slots: Vec<SlotState>,
     }
@@ -279,6 +282,8 @@ pub mod core {
                 edges,
                 options: EngineOptions::default(),
                 sliders: Vec::new(),
+                buttonpad: false,
+                pressed_physical_buttons: BTreeSet::new(),
                 slots: vec![SlotState::default(); slot_count],
             }
         }
@@ -310,6 +315,34 @@ pub mod core {
             let mut engine = Self::with_sliders(caps, edges, sliders);
             engine.options = options;
             engine
+        }
+
+        pub fn set_buttonpad(&mut self, buttonpad: bool) {
+            self.buttonpad = buttonpad;
+            if !buttonpad {
+                self.pressed_physical_buttons.clear();
+            }
+        }
+
+        pub fn update_physical_button(&mut self, code: u16, pressed: bool) -> Vec<Event> {
+            if !self.buttonpad {
+                return Vec::new();
+            }
+
+            if !pressed {
+                self.pressed_physical_buttons.remove(&code);
+                return Vec::new();
+            }
+
+            self.pressed_physical_buttons.insert(code);
+            self.promote_claimed_contacts()
+        }
+
+        pub fn restore_pressed_physical_buttons(&mut self, codes: &[u16]) {
+            self.pressed_physical_buttons.clear();
+            if self.buttonpad {
+                self.pressed_physical_buttons.extend(codes.iter().copied());
+            }
         }
 
         pub fn process_frame(&mut self, frame: &[Event]) -> Result<FrameOutput, SlotError> {
@@ -499,7 +532,12 @@ pub mod core {
 
         fn decide_ownership_if_ready(&mut self, output: &mut FrameOutput) -> Result<(), SlotError> {
             let slot = self.current_slot;
-            let Some(zone) = self.zone_for_current_slot()? else {
+            let zone = if self.buttonpad && !self.pressed_physical_buttons.is_empty() {
+                None
+            } else {
+                self.zone_for_current_slot()?
+            };
+            let Some(zone) = zone else {
                 let held_events = {
                     let slot_state = self.slot_mut(slot)?;
                     if slot_state.active
@@ -544,6 +582,38 @@ pub mod core {
                 slot_state.held_events.clear();
             }
             Ok(())
+        }
+
+        fn promote_claimed_contacts(&mut self) -> Vec<Event> {
+            let mut events = Vec::new();
+            for index in 0..self.slots.len() {
+                let slot_number = self.caps.slot_min + index as i32;
+                let snapshot = {
+                    let slot = &mut self.slots[index];
+                    if !slot.active || !matches!(slot.ownership, Ownership::Claimed(_)) {
+                        None
+                    } else {
+                        match (slot.tracking_id, slot.current_x, slot.current_y) {
+                            (Some(tracking_id), Some(x), Some(y)) => {
+                                slot.ownership = Ownership::Passthrough;
+                                slot.slider_anchor = None;
+                                Some((tracking_id, x, y))
+                            }
+                            _ => None,
+                        }
+                    }
+                };
+
+                if let Some((tracking_id, x, y)) = snapshot {
+                    events.extend([
+                        Event::slot(slot_number),
+                        Event::tracking_id(tracking_id),
+                        Event::x(x),
+                        Event::y(y),
+                    ]);
+                }
+            }
+            events
         }
 
         fn emit_slider_steps_if_ready(
@@ -642,6 +712,7 @@ pub mod core {
             for slot in &mut self.slots {
                 slot.reset();
             }
+            self.pressed_physical_buttons.clear();
             self.current_slot = self.caps.slot_min;
         }
 
@@ -749,6 +820,8 @@ pub mod core {
 }
 
 pub mod replay {
+    use std::time::Duration;
+
     use crate::core::{AxisRange, Capabilities, Engine, Event, FrameOutput, SlotError};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,12 +847,26 @@ pub mod replay {
         MissingMetadataField {
             field: &'static str,
         },
+        NonMonotonicTimestamp {
+            line: usize,
+            previous_us: u64,
+            current_us: u64,
+        },
+        UnterminatedFrame {
+            line: usize,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ReplayFrame {
+        pub events: Vec<Event>,
+        pub timestamp: Duration,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ReplayFile {
         pub capabilities: Option<Capabilities>,
-        pub frames: Vec<Vec<Event>>,
+        pub frames: Vec<ReplayFrame>,
     }
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -793,18 +880,20 @@ pub mod replay {
         pub syn_dropped_events: usize,
     }
 
-    pub fn replay_stats(frames: &[Vec<Event>]) -> ReplayStats {
+    pub fn replay_stats(frames: &[ReplayFrame]) -> ReplayStats {
         let mut stats = ReplayStats::default();
 
-        for event in frames.iter().flatten() {
-            stats.total_events += 1;
-            match event {
-                Event::Slot(_) => stats.slot_events += 1,
-                Event::TrackingId(id) if *id >= 0 => stats.tracking_starts += 1,
-                Event::TrackingId(_) => stats.tracking_ends += 1,
-                Event::X(_) => stats.x_events += 1,
-                Event::Y(_) => stats.y_events += 1,
-                Event::SynDropped => stats.syn_dropped_events += 1,
+        for frame in frames {
+            for event in &frame.events {
+                stats.total_events += 1;
+                match event {
+                    Event::Slot(_) => stats.slot_events += 1,
+                    Event::TrackingId(id) if *id >= 0 => stats.tracking_starts += 1,
+                    Event::TrackingId(_) => stats.tracking_ends += 1,
+                    Event::X(_) => stats.x_events += 1,
+                    Event::Y(_) => stats.y_events += 1,
+                    Event::SynDropped => stats.syn_dropped_events += 1,
+                }
             }
         }
 
@@ -818,9 +907,10 @@ pub mod replay {
         })
     }
 
-    pub fn parse_frames(input: &str) -> Result<Vec<Vec<Event>>, ReplayError> {
+    pub fn parse_frames(input: &str) -> Result<Vec<ReplayFrame>, ReplayError> {
         let mut frames = Vec::new();
         let mut current = Vec::new();
+        let mut last_timestamp = None;
 
         for (index, raw_line) in input.lines().enumerate() {
             let line_number = index + 1;
@@ -838,15 +928,23 @@ pub mod replay {
 
             match name {
                 "SYN_REPORT" => {
+                    let timestamp = parse_timestamp(line_number, name, parts.next())?;
+                    validate_timestamp(line_number, timestamp, &mut last_timestamp)?;
                     if !current.is_empty() {
-                        frames.push(std::mem::take(&mut current));
+                        frames.push(ReplayFrame {
+                            events: std::mem::take(&mut current),
+                            timestamp,
+                        });
                     }
                 }
                 "SYN_DROPPED" => {
-                    if !current.is_empty() {
-                        frames.push(std::mem::take(&mut current));
-                    }
-                    frames.push(vec![Event::syn_dropped()]);
+                    let timestamp = parse_timestamp(line_number, name, parts.next())?;
+                    validate_timestamp(line_number, timestamp, &mut last_timestamp)?;
+                    current.clear();
+                    frames.push(ReplayFrame {
+                        events: vec![Event::syn_dropped()],
+                        timestamp,
+                    });
                 }
                 "ABS_MT_SLOT" => current.push(Event::slot(parse_i32_value(
                     line_number,
@@ -876,7 +974,9 @@ pub mod replay {
         }
 
         if !current.is_empty() {
-            frames.push(current);
+            return Err(ReplayError::UnterminatedFrame {
+                line: input.lines().count().max(1),
+            });
         }
 
         Ok(frames)
@@ -977,12 +1077,50 @@ pub mod replay {
 
     pub fn run_frames(
         engine: &mut Engine,
-        frames: &[Vec<Event>],
+        frames: &[ReplayFrame],
     ) -> Result<Vec<FrameOutput>, SlotError> {
         frames
             .iter()
-            .map(|frame| engine.process_frame(frame))
+            .map(|frame| engine.process_frame_at(&frame.events, frame.timestamp))
             .collect()
+    }
+
+    fn parse_timestamp(
+        line: usize,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<Duration, ReplayError> {
+        let value = value.ok_or_else(|| ReplayError::MissingValue {
+            line,
+            name: format!("{name} timestamp_us"),
+        })?;
+        let micros = value
+            .parse::<u64>()
+            .map_err(|_| ReplayError::InvalidValue {
+                line,
+                name: format!("{name} timestamp_us"),
+                value: value.to_string(),
+            })?;
+
+        Ok(Duration::from_micros(micros))
+    }
+
+    fn validate_timestamp(
+        line: usize,
+        timestamp: Duration,
+        last_timestamp: &mut Option<Duration>,
+    ) -> Result<(), ReplayError> {
+        if let Some(previous) = *last_timestamp {
+            if timestamp < previous {
+                return Err(ReplayError::NonMonotonicTimestamp {
+                    line,
+                    previous_us: previous.as_micros() as u64,
+                    current_us: timestamp.as_micros() as u64,
+                });
+            }
+        }
+        *last_timestamp = Some(timestamp);
+        Ok(())
     }
 
     fn parse_i32_value(line: usize, name: &str, value: Option<&str>) -> Result<i32, ReplayError> {

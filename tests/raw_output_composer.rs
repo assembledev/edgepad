@@ -1,5 +1,7 @@
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine};
-use edgepad::raw::{route_raw_frame, RawEvent, RawFrame, RawOutputComposer, RoutedRawFrame};
+use edgepad::raw::{
+    route_raw_frame, RawEvent, RawFrame, RawOutputComposer, RoutedRawFrame, BTN_LEFT, EV_KEY,
+};
 
 fn test_capabilities() -> Capabilities {
     Capabilities {
@@ -331,6 +333,7 @@ fn compose_frame_releases_each_active_passthrough_slot_on_resync() {
     let output = composer
         .compose_frame(&RoutedRawFrame {
             passthrough: vec![],
+            physical_buttons: vec![],
             gestures: vec![],
             slider_steps: vec![],
             resync_required: true,
@@ -347,6 +350,114 @@ fn compose_frame_releases_each_active_passthrough_slot_on_resync() {
             RawEvent::abs_mt_tracking_id(-1),
             RawEvent::btn_touch(false),
             RawEvent::btn_tool_doubletap(false),
+        ]
+    );
+}
+
+#[test]
+fn compose_frame_forwards_physical_button_and_finish_releases_it() {
+    let mut engine = test_engine();
+    let mut composer = RawOutputComposer::new(test_capabilities());
+
+    let press = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![RawEvent::new(EV_KEY, BTN_LEFT, 1)]),
+    );
+    assert_eq!(press, vec![RawEvent::new(EV_KEY, BTN_LEFT, 1)]);
+
+    let cleanup = composer
+        .finish()
+        .expect("finish should release a held physical button")
+        .events;
+    assert_eq!(cleanup, vec![RawEvent::new(EV_KEY, BTN_LEFT, 0)]);
+    assert!(composer
+        .finish()
+        .expect("button cleanup should be idempotent")
+        .events
+        .is_empty());
+}
+
+#[test]
+fn buttonpad_edge_click_emits_contact_state_before_button_and_supports_drag() {
+    let mut engine = test_engine();
+    engine.set_buttonpad(true);
+    let mut composer = RawOutputComposer::new(test_capabilities());
+
+    let down = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(100),
+            RawEvent::abs_mt_position_x(20),
+            RawEvent::abs_mt_position_y(300),
+        ]),
+    );
+    assert!(down.is_empty());
+
+    let press = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![RawEvent::new(EV_KEY, BTN_LEFT, 1)]),
+    );
+    assert_eq!(
+        press,
+        vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(100),
+            RawEvent::abs_mt_position_x(20),
+            RawEvent::abs_mt_position_y(300),
+            RawEvent::btn_touch(true),
+            RawEvent::btn_tool_finger(true),
+            RawEvent::abs_x(20),
+            RawEvent::abs_y(300),
+            RawEvent::new(EV_KEY, BTN_LEFT, 1),
+        ]
+    );
+
+    let drag = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_position_x(220),
+            RawEvent::abs_mt_position_y(310),
+        ]),
+    );
+    assert_eq!(
+        drag,
+        vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_position_x(220),
+            RawEvent::abs_mt_position_y(310),
+            RawEvent::abs_x(220),
+            RawEvent::abs_y(310),
+        ]
+    );
+
+    let button_up = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![RawEvent::new(EV_KEY, BTN_LEFT, 0)]),
+    );
+    assert_eq!(button_up, vec![RawEvent::new(EV_KEY, BTN_LEFT, 0)]);
+
+    let contact_up = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(-1),
+        ]),
+    );
+    assert_eq!(
+        contact_up,
+        vec![
+            RawEvent::abs_mt_slot(0),
+            RawEvent::abs_mt_tracking_id(-1),
+            RawEvent::btn_touch(false),
+            RawEvent::btn_tool_finger(false),
         ]
     );
 }

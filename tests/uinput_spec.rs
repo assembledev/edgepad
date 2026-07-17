@@ -1,8 +1,8 @@
 use edgepad::core::{AxisRange, Capabilities};
 use edgepad::raw::{
-    ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_X, ABS_Y,
-    BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER, BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP, BTN_TOOL_TRIPLETAP,
-    BTN_TOUCH,
+    ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_X, ABS_Y, BTN_LEFT,
+    BTN_RIGHT, BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER, BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP,
+    BTN_TOOL_TRIPLETAP, BTN_TOUCH,
 };
 use edgepad::uinput::{PhysicalTouchpadAbsInfo, VirtualAbsAxis, VirtualTouchpadSpec};
 use evdev::PropType;
@@ -52,6 +52,27 @@ fn virtual_touchpad_spec_can_use_a_custom_public_name() {
     let spec = VirtualTouchpadSpec::named(test_capabilities(), "edgepad test device");
 
     assert_eq!(spec.name, "edgepad test device");
+}
+
+#[test]
+fn virtual_touchpad_spec_preserves_physical_buttonpad_capabilities() {
+    let spec = VirtualTouchpadSpec::from_physical_device_info(
+        PhysicalTouchpadAbsInfo::from_capabilities(test_capabilities()),
+        vec![PropType::POINTER.0, PropType::BUTTONPAD.0],
+        vec![BTN_LEFT, BTN_RIGHT, 30],
+        "edgepad mirrored buttonpad",
+    );
+
+    assert_eq!(
+        spec.properties,
+        vec![PropType::POINTER.0, PropType::BUTTONPAD.0]
+    );
+    assert!(spec.keys.contains(&BTN_LEFT));
+    assert!(spec.keys.contains(&BTN_RIGHT));
+    assert!(
+        !spec.keys.contains(&30),
+        "keyboard keys must not be mirrored"
+    );
 }
 
 #[test]

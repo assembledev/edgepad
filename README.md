@@ -253,7 +253,9 @@ For live forwarding it:
 6. emits normal contacts through the virtual device;
 7. releases virtual contacts and ungrabs the physical device on shutdown.
 
-The output side does not blindly copy raw pointer-emulation events. `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` are synthesized from unclaimed passthrough contacts so an edge-owned finger does not leak into normal pointer movement.
+The output side does not blindly copy raw pointer-emulation events. `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` are synthesized from unclaimed passthrough contacts so an edge-owned finger does not leak into normal pointer movement. Physical touchpad buttons (`BTN_LEFT` and related pointer buttons) are passed through, and live mode preserves input properties such as `INPUT_PROP_BUTTONPAD` so libinput keeps clickpad behavior.
+
+On a buttonpad/clickpad, a physical button press takes priority over edge recognition. Active edge-owned contacts are promoted to normal passthrough contacts before the button event, and remain passthrough until they lift, so physical clicks and click-drag work even inside configured edge zones. This cancels the pending edge gesture; slider steps already emitted are not rolled back. Tap-to-click does not produce a physical button event, so an edge tap keeps the normal edge-gesture behavior. Touchpads with separate buttons keep independent edge and button handling.
 
 ## Permissions
 
@@ -289,6 +291,9 @@ Common problems:
   inspect `journalctl --user -u edgepad.service -b`.
 
 ## Diagnostics and capture
+
+`proxy`, `replay`, and `replay-raw` use the normal edgepad config. Pass `--config <file>` to use
+another config, or `--built-in-defaults` to ignore it.
 
 Device discovery is read-only:
 

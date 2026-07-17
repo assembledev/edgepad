@@ -1,9 +1,18 @@
 use edgepad::core::{AxisRange, Capabilities};
 use edgepad::dump::{
-    fixture_line_for_event, raw_line_for_event, write_capture_header, write_fixture_event,
-    write_fixture_events_with_limit, write_raw_events_with_limit,
+    fixture_line_for_event as format_fixture_line, raw_line_for_event as format_raw_line,
+    write_capture_header, write_fixture_event, write_fixture_events_with_limit,
+    write_raw_events_with_limit,
 };
 use evdev::{AbsoluteAxisCode, EventType, InputEvent, KeyCode, MiscCode, SynchronizationCode};
+
+fn fixture_line_for_event(event: InputEvent) -> Option<String> {
+    format_fixture_line(event).expect("event timestamp should format")
+}
+
+fn raw_line_for_event(event: InputEvent) -> String {
+    format_raw_line(event).expect("event timestamp should format")
+}
 
 #[test]
 fn write_capture_header_includes_device_capabilities_metadata() {
@@ -67,7 +76,7 @@ fn fixture_line_for_event_keeps_only_replay_relevant_multitouch_events() {
             SynchronizationCode::SYN_REPORT.0,
             0,
         )),
-        Some("SYN_REPORT".to_string())
+        Some("SYN_REPORT 0".to_string())
     );
     assert_eq!(
         fixture_line_for_event(InputEvent::new(
@@ -75,7 +84,7 @@ fn fixture_line_for_event_keeps_only_replay_relevant_multitouch_events() {
             SynchronizationCode::SYN_DROPPED.0,
             0,
         )),
-        Some("SYN_DROPPED".to_string())
+        Some("SYN_DROPPED 0".to_string())
     );
 
     assert_eq!(
@@ -118,7 +127,7 @@ fn write_fixture_event_adds_blank_line_after_sync_boundaries() {
 
     assert_eq!(
         String::from_utf8(out).expect("fixture output should be utf8"),
-        "ABS_MT_SLOT 0\nSYN_REPORT\n\nSYN_DROPPED\n\n"
+        "ABS_MT_SLOT 0\nSYN_REPORT 0\n\nSYN_DROPPED 0\n\n"
     );
 }
 
@@ -164,7 +173,7 @@ fn write_fixture_events_with_limit_stops_after_requested_sync_boundaries() {
     assert_eq!(remaining_frames, Some(0));
     assert_eq!(
         String::from_utf8(out).expect("fixture output should be utf8"),
-        "ABS_MT_SLOT 0\nSYN_REPORT\n\nABS_MT_POSITION_X 42\nSYN_DROPPED\n\n"
+        "ABS_MT_SLOT 0\nSYN_REPORT 0\n\nABS_MT_POSITION_X 42\nSYN_DROPPED 0\n\n"
     );
 }
 
@@ -236,7 +245,7 @@ fn raw_line_for_event_writes_touchpad_relevant_events_with_type_names() {
             SynchronizationCode::SYN_REPORT.0,
             0,
         )),
-        "EV_SYN SYN_REPORT 0"
+        "EV_SYN SYN_REPORT 0 0"
     );
     assert_eq!(
         raw_line_for_event(InputEvent::new(
@@ -244,7 +253,7 @@ fn raw_line_for_event_writes_touchpad_relevant_events_with_type_names() {
             SynchronizationCode::SYN_DROPPED.0,
             0,
         )),
-        "EV_SYN SYN_DROPPED 0"
+        "EV_SYN SYN_DROPPED 0 0"
     );
 }
 
@@ -291,6 +300,6 @@ fn write_raw_events_with_limit_keeps_all_events_and_stops_after_sync_boundaries(
     assert_eq!(remaining_frames, Some(0));
     assert_eq!(
         String::from_utf8(out).expect("raw output should be utf8"),
-        "EV_KEY BTN_TOUCH 1\nEV_ABS ABS_X 640\nEV_ABS ABS_MT_SLOT 1\nEV_SYN SYN_REPORT 0\n\nEV_KEY BTN_TOUCH 0\nEV_SYN SYN_DROPPED 0\n\n"
+        "EV_KEY BTN_TOUCH 1\nEV_ABS ABS_X 640\nEV_ABS ABS_MT_SLOT 1\nEV_SYN SYN_REPORT 0 0\n\nEV_KEY BTN_TOUCH 0\nEV_SYN SYN_DROPPED 0 0\n\n"
     );
 }

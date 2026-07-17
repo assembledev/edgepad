@@ -6,6 +6,11 @@ The live path reads a physical touchpad, claims contacts that start inside confi
 
 ## Modes
 
+The bounded `proxy` uses the recognizer profile from the default user config. `--config <file>`
+selects another config, while `--built-in-defaults` opts into the standalone profile and requires an
+explicit `--device`. CLI `--device` and `--edge-width` values override the selected config. Proxy
+reports gestures and slider steps but does not execute configured actions.
+
 ### Dry-run proxy
 
 `proxy --dry-run` is read-only inspection. It reads live frames, routes them through the recognizer and output composer, prints counters, and exits after the requested frame budget.
@@ -112,10 +117,20 @@ Those values can follow an edge-owned contact while another center contact is ac
 - `BTN_TOUCH` follows the count of unclaimed active contacts;
 - `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, and related tool keys follow the unclaimed active contact count;
 - legacy `ABS_X/Y` come from a representative unclaimed active slot;
+- physical `BTN_LEFT`, `BTN_RIGHT`, and related pointer-button events are forwarded and released
+  during output cleanup;
+- on devices marked `INPUT_PROP_BUTTONPAD`, a physical button press promotes every active
+  edge-owned contact to passthrough before the button event, giving libinput the contact and
+  position state required for click and click-drag;
+- a promoted contact stays passthrough until lift, and contacts that start while a physical button
+  is held also pass through. The press cancels pending edge recognition, without rolling back
+  slider steps that were already emitted;
+- tap-to-click has no physical button event, so edge taps remain edge gestures. Devices with
+  separate buttons do not use button presses to preempt edge ownership;
 - `SYN_DROPPED` releases tracked virtual contacts, ignores the unreliable tail through the next
-  `SYN_REPORT`, then queries the kernel's current multitouch slot state. Contacts that were already
-  held during resync are restored as passthrough until release so incomplete history cannot create
-  a gesture.
+  `SYN_REPORT`, then queries the kernel's current multitouch slot and physical-button state.
+  Contacts and buttons that were already held during resync are restored so incomplete history
+  cannot create a gesture or leave a virtual button stuck.
 
 ## uinput batching
 
@@ -125,11 +140,16 @@ The Rust `evdev` crate's `VirtualDevice::emit(&[InputEvent])` appends `SYN_REPOR
 
 `VirtualTouchpadSpec` mirrors the output events that the composer can emit:
 
-- properties: `INPUT_PROP_POINTER`;
-- keys: `BTN_TOUCH`, `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, `BTN_TOOL_TRIPLETAP`, `BTN_TOOL_QUADTAP`, `BTN_TOOL_QUINTTAP`;
+- properties: `INPUT_PROP_POINTER` plus the physical touchpad's properties, including
+  `INPUT_PROP_BUTTONPAD` for clickpads;
+- keys: `BTN_TOUCH`, `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, `BTN_TOOL_TRIPLETAP`,
+  `BTN_TOOL_QUADTAP`, `BTN_TOOL_QUINTTAP`, plus supported physical pointer buttons;
 - absolute axes: `ABS_X`, `ABS_Y`, `ABS_MT_SLOT`, `ABS_MT_TRACKING_ID`, `ABS_MT_POSITION_X`, `ABS_MT_POSITION_Y`.
 
-For live proxy mode, the virtual touchpad mirrors the physical device's absolute-axis value, min/max, fuzz, flat, and resolution where the physical device exposes them. This keeps compositor/libinput behavior close to the real device. Replay-only paths use captured metadata ranges and a conservative tracking-id range.
+For live proxy mode, the virtual touchpad mirrors the physical device's input properties, physical
+pointer-button capabilities, and absolute-axis value, min/max, fuzz, flat, and resolution where the
+physical device exposes them. This keeps compositor/libinput behavior close to the real device.
+Replay-only paths use captured metadata ranges and a conservative tracking-id range.
 
 ## Manual live uinput test
 

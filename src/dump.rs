@@ -1,5 +1,6 @@
 use std::io::{self, Write};
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
 use crate::core::{AxisRange, Capabilities};
 use evdev::raw_stream::RawDevice;
@@ -57,8 +58,8 @@ fn axis_info(device: &RawDevice, wanted: AbsoluteAxisCode) -> Option<AxisRange> 
     })
 }
 
-pub fn fixture_line_for_event(event: InputEvent) -> Option<String> {
-    match event.destructure() {
+pub fn fixture_line_for_event(event: InputEvent) -> io::Result<Option<String>> {
+    let line = match event.destructure() {
         EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_SLOT, value) => {
             Some(format!("ABS_MT_SLOT {value}"))
         }
@@ -72,17 +73,28 @@ pub fn fixture_line_for_event(event: InputEvent) -> Option<String> {
             Some(format!("ABS_MT_POSITION_Y {value}"))
         }
         EventSummary::Synchronization(_, SynchronizationCode::SYN_REPORT, _) => {
-            Some("SYN_REPORT".to_string())
+            Some(format!("SYN_REPORT {}", event_timestamp_us(event)?))
         }
         EventSummary::Synchronization(_, SynchronizationCode::SYN_DROPPED, _) => {
-            Some("SYN_DROPPED".to_string())
+            Some(format!("SYN_DROPPED {}", event_timestamp_us(event)?))
         }
         _ => None,
-    }
+    };
+    Ok(line)
 }
 
-pub fn raw_line_for_event(event: InputEvent) -> String {
-    match event.destructure() {
+pub fn raw_line_for_event(event: InputEvent) -> io::Result<String> {
+    let line = match event.destructure() {
+        EventSummary::Synchronization(_, code, value)
+            if code == SynchronizationCode::SYN_REPORT
+                || code == SynchronizationCode::SYN_DROPPED =>
+        {
+            format!(
+                "EV_SYN {} {value} {}",
+                synchronization_code_name(code),
+                event_timestamp_us(event)?
+            )
+        }
         EventSummary::Synchronization(_, code, value) => {
             format!("EV_SYN {} {value}", synchronization_code_name(code))
         }
@@ -97,7 +109,23 @@ pub fn raw_line_for_event(event: InputEvent) -> String {
             event.code(),
             event.value()
         ),
-    }
+    };
+    Ok(line)
+}
+
+fn event_timestamp_us(event: InputEvent) -> io::Result<u64> {
+    let timestamp = event.timestamp().duration_since(UNIX_EPOCH).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input event timestamp predates the Unix epoch",
+        )
+    })?;
+    u64::try_from(timestamp.as_micros()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "input event timestamp does not fit into microseconds",
+        )
+    })
 }
 
 fn synchronization_code_name(code: SynchronizationCode) -> String {
@@ -191,7 +219,7 @@ fn key_code_name(code: KeyCode) -> String {
 }
 
 pub fn write_fixture_event(mut writer: impl Write, event: InputEvent) -> io::Result<bool> {
-    let Some(line) = fixture_line_for_event(event) else {
+    let Some(line) = fixture_line_for_event(event)? else {
         return Ok(false);
     };
 
@@ -229,7 +257,7 @@ pub fn write_fixture_events_with_limit(
     }
 
     for event in events {
-        let Some(line) = fixture_line_for_event(event) else {
+        let Some(line) = fixture_line_for_event(event)? else {
             continue;
         };
         let is_sync_boundary = is_sync_boundary(&line);
@@ -264,7 +292,7 @@ pub fn write_raw_events_with_limit(
     }
 
     for event in events {
-        let line = raw_line_for_event(event);
+        let line = raw_line_for_event(event)?;
         let is_sync_boundary = is_sync_boundary(&line);
         write_event_line(&mut writer, &line)?;
         result.events_written += 1;
@@ -294,8 +322,8 @@ fn write_event_line(mut writer: impl Write, line: &str) -> io::Result<()> {
 }
 
 fn is_sync_boundary(line: &str) -> bool {
-    matches!(
-        line,
-        "SYN_REPORT" | "SYN_DROPPED" | "EV_SYN SYN_REPORT 0" | "EV_SYN SYN_DROPPED 0"
-    )
+    line.starts_with("SYN_REPORT ")
+        || line.starts_with("SYN_DROPPED ")
+        || line.starts_with("EV_SYN SYN_REPORT 0 ")
+        || line.starts_with("EV_SYN SYN_DROPPED 0 ")
 }
