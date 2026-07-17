@@ -23,7 +23,7 @@ use crate::raw::{
 use crate::uinput::{
     build_virtual_touchpad, UinputEventWriter, UinputRawOutputSink, VirtualTouchpadSpec,
 };
-use evdev::{raw_stream::RawDevice, KeyCode};
+use evdev::{raw_stream::RawDevice, KeyCode, PropType};
 
 nix::ioctl_read_buf!(eviocgmtslots, b'E', 0x0a, u8);
 
@@ -45,6 +45,7 @@ struct ProxyLoopConfig {
     edge_widths: EdgeWidths,
     engine_options: EngineOptions,
     slider_specs: Vec<SliderSpec>,
+    buttonpad: bool,
 }
 
 #[derive(Debug, Default)]
@@ -284,6 +285,7 @@ where
     H: GestureHandler,
 {
     let (mut device, capabilities) = open_proxy_device(&config.device_path)?;
+    let buttonpad = device.properties().contains(PropType::BUTTONPAD);
     let mut sink = RecordingRawOutputSink::default();
     let stats = run_proxy_loop(
         &mut device,
@@ -292,6 +294,7 @@ where
             edge_widths: config.edge_widths,
             engine_options: config.engine_options,
             slider_specs: config.slider_specs.clone(),
+            buttonpad,
         },
         &config.limit,
         &mut sink,
@@ -320,6 +323,7 @@ where
     let (mut device, capabilities) = open_proxy_device(&config.device_path)?;
     ensure_physical_touchpad_idle_at_start(&config.device_path, &device, capabilities)?;
 
+    let buttonpad = device.properties().contains(PropType::BUTTONPAD);
     let spec = VirtualTouchpadSpec::from_raw_device(&device, capabilities);
     let virtual_device = build_virtual_touchpad(&spec).map_err(|err| {
         format!("failed to create virtual touchpad via /dev/uinput before grabbing physical device: {err}")
@@ -351,6 +355,7 @@ where
             edge_widths: config.edge_widths,
             engine_options: config.engine_options,
             slider_specs: config.slider_specs.clone(),
+            buttonpad,
         },
         &config.limit,
         &mut sink,
@@ -555,6 +560,7 @@ where
         config.slider_specs,
         config.engine_options,
     );
+    engine.set_buttonpad(config.buttonpad);
     let mut composer = RawOutputComposer::new(config.capabilities);
     let mut stats = ProxyRuntimeStats::default();
     let mut touch_state = PhysicalTouchState::new(config.capabilities);
@@ -793,6 +799,7 @@ where
 {
     let mut routed = route_resync_contacts(engine, contacts)
         .map_err(|err| format!("proxy resync failed: {err:?}"))?;
+    engine.restore_pressed_physical_buttons(pressed_physical_buttons);
     routed.physical_buttons = pressed_physical_buttons
         .iter()
         .copied()
@@ -1151,7 +1158,7 @@ mod tests {
     use super::*;
     use crate::core::AxisRange;
     use crate::raw::{
-        ABS_X, BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER, BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP,
+        ABS_X, BTN_LEFT, BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER, BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP,
         BTN_TOOL_TRIPLETAP,
     };
 
@@ -1289,6 +1296,63 @@ mod tests {
         fn handle_slider_step(&mut self, step: SliderStep) {
             self.slider_steps.push(step);
         }
+    }
+
+    #[test]
+    fn resync_restores_held_buttonpad_button_before_new_edge_contacts() {
+        let capabilities = test_capabilities();
+        let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+        engine.set_buttonpad(true);
+        let mut composer = RawOutputComposer::new(capabilities);
+        let mut sink = RecordingRawOutputSink::default();
+        let mut stats = ProxyRuntimeStats::default();
+        let mut handler = RecordingGestureHandler::default();
+
+        process_proxy_resync_contacts(
+            &[],
+            &[BTN_LEFT],
+            &mut engine,
+            &mut composer,
+            &mut sink,
+            &mut stats,
+            &mut handler,
+        )
+        .expect("resync should restore held physical button");
+
+        process_proxy_frame_with_handler(
+            &mut engine,
+            &mut composer,
+            &mut sink,
+            &mut stats,
+            &RawFrame::new(vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(100),
+                RawEvent::abs_mt_position_x(20),
+                RawEvent::abs_mt_position_y(300),
+            ]),
+            &mut handler,
+        )
+        .expect("new edge contact while restored button is held should process");
+
+        assert_eq!(sink.frames().len(), 2);
+        assert_eq!(
+            sink.frames()[0].events,
+            vec![RawEvent::new(EV_KEY, BTN_LEFT, 1)]
+        );
+        assert_eq!(
+            sink.frames()[1].events,
+            vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(100),
+                RawEvent::abs_mt_position_x(20),
+                RawEvent::abs_mt_position_y(300),
+                RawEvent::btn_touch(true),
+                RawEvent::btn_tool_finger(true),
+                RawEvent::abs_x(20),
+                RawEvent::abs_y(300),
+            ]
+        );
+        assert!(handler.gestures.is_empty());
     }
 
     impl UinputEventWriter for RecordingUinputWriter {

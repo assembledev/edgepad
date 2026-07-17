@@ -117,8 +117,16 @@ Those values can follow an edge-owned contact while another center contact is ac
 - `BTN_TOUCH` follows the count of unclaimed active contacts;
 - `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, and related tool keys follow the unclaimed active contact count;
 - legacy `ABS_X/Y` come from a representative unclaimed active slot;
-- physical `BTN_LEFT`, `BTN_RIGHT`, and related pointer-button events are forwarded independently
-  of contact ownership and are released during output cleanup;
+- physical `BTN_LEFT`, `BTN_RIGHT`, and related pointer-button events are forwarded and released
+  during output cleanup;
+- on devices marked `INPUT_PROP_BUTTONPAD`, a physical button press promotes every active
+  edge-owned contact to passthrough before the button event, giving libinput the contact and
+  position state required for click and click-drag;
+- a promoted contact stays passthrough until lift, and contacts that start while a physical button
+  is held also pass through. The press cancels pending edge recognition, without rolling back
+  slider steps that were already emitted;
+- tap-to-click has no physical button event, so edge taps remain edge gestures. Devices with
+  separate buttons do not use button presses to preempt edge ownership;
 - `SYN_DROPPED` releases tracked virtual contacts, ignores the unreliable tail through the next
   `SYN_REPORT`, then queries the kernel's current multitouch slot and physical-button state.
   Contacts and buttons that were already held during resync are restored so incomplete history

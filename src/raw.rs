@@ -837,21 +837,31 @@ pub fn extract_core_events(frame: &RawFrame) -> Vec<Event> {
 }
 
 pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRawFrame, SlotError> {
+    let physical_buttons = frame
+        .events
+        .iter()
+        .copied()
+        .filter(|event| event.kind == EV_KEY && is_pointer_button_code(event.code))
+        .collect::<Vec<_>>();
+    let mut promoted_contacts = Vec::new();
+    for event in physical_buttons.iter().filter(|event| event.value != 0) {
+        promoted_contacts.extend(engine.update_physical_button(event.code, true));
+    }
+
     let core_events = extract_core_events(frame);
     let output = match frame.timestamp {
         Some(timestamp) => engine.process_frame_at(&core_events, timestamp)?,
         None => engine.process_frame(&core_events)?,
     };
-    let passthrough = raw_passthrough_events_for_core_passthrough(frame, &output.passthrough);
+    for event in physical_buttons.iter().filter(|event| event.value == 0) {
+        engine.update_physical_button(event.code, false);
+    }
+    promoted_contacts.extend(output.passthrough.iter().copied());
+    let passthrough = raw_passthrough_events_for_core_passthrough(frame, &promoted_contacts);
 
     Ok(RoutedRawFrame {
         passthrough,
-        physical_buttons: frame
-            .events
-            .iter()
-            .copied()
-            .filter(|event| event.kind == EV_KEY && is_pointer_button_code(event.code))
-            .collect(),
+        physical_buttons,
         gestures: output.gestures,
         slider_steps: output.slider_steps,
         resync_required: output.resync_required,

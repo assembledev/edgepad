@@ -15,6 +15,7 @@ pub mod status;
 pub mod uinput;
 
 pub mod core {
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
     pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 80;
@@ -260,6 +261,8 @@ pub mod core {
         edges: EdgeWidths,
         options: EngineOptions,
         sliders: Vec<SliderSpec>,
+        buttonpad: bool,
+        pressed_physical_buttons: BTreeSet<u16>,
         current_slot: i32,
         slots: Vec<SlotState>,
     }
@@ -279,6 +282,8 @@ pub mod core {
                 edges,
                 options: EngineOptions::default(),
                 sliders: Vec::new(),
+                buttonpad: false,
+                pressed_physical_buttons: BTreeSet::new(),
                 slots: vec![SlotState::default(); slot_count],
             }
         }
@@ -310,6 +315,34 @@ pub mod core {
             let mut engine = Self::with_sliders(caps, edges, sliders);
             engine.options = options;
             engine
+        }
+
+        pub fn set_buttonpad(&mut self, buttonpad: bool) {
+            self.buttonpad = buttonpad;
+            if !buttonpad {
+                self.pressed_physical_buttons.clear();
+            }
+        }
+
+        pub fn update_physical_button(&mut self, code: u16, pressed: bool) -> Vec<Event> {
+            if !self.buttonpad {
+                return Vec::new();
+            }
+
+            if !pressed {
+                self.pressed_physical_buttons.remove(&code);
+                return Vec::new();
+            }
+
+            self.pressed_physical_buttons.insert(code);
+            self.promote_claimed_contacts()
+        }
+
+        pub fn restore_pressed_physical_buttons(&mut self, codes: &[u16]) {
+            self.pressed_physical_buttons.clear();
+            if self.buttonpad {
+                self.pressed_physical_buttons.extend(codes.iter().copied());
+            }
         }
 
         pub fn process_frame(&mut self, frame: &[Event]) -> Result<FrameOutput, SlotError> {
@@ -499,7 +532,12 @@ pub mod core {
 
         fn decide_ownership_if_ready(&mut self, output: &mut FrameOutput) -> Result<(), SlotError> {
             let slot = self.current_slot;
-            let Some(zone) = self.zone_for_current_slot()? else {
+            let zone = if self.buttonpad && !self.pressed_physical_buttons.is_empty() {
+                None
+            } else {
+                self.zone_for_current_slot()?
+            };
+            let Some(zone) = zone else {
                 let held_events = {
                     let slot_state = self.slot_mut(slot)?;
                     if slot_state.active
@@ -544,6 +582,38 @@ pub mod core {
                 slot_state.held_events.clear();
             }
             Ok(())
+        }
+
+        fn promote_claimed_contacts(&mut self) -> Vec<Event> {
+            let mut events = Vec::new();
+            for index in 0..self.slots.len() {
+                let slot_number = self.caps.slot_min + index as i32;
+                let snapshot = {
+                    let slot = &mut self.slots[index];
+                    if !slot.active || !matches!(slot.ownership, Ownership::Claimed(_)) {
+                        None
+                    } else {
+                        match (slot.tracking_id, slot.current_x, slot.current_y) {
+                            (Some(tracking_id), Some(x), Some(y)) => {
+                                slot.ownership = Ownership::Passthrough;
+                                slot.slider_anchor = None;
+                                Some((tracking_id, x, y))
+                            }
+                            _ => None,
+                        }
+                    }
+                };
+
+                if let Some((tracking_id, x, y)) = snapshot {
+                    events.extend([
+                        Event::slot(slot_number),
+                        Event::tracking_id(tracking_id),
+                        Event::x(x),
+                        Event::y(y),
+                    ]);
+                }
+            }
+            events
         }
 
         fn emit_slider_steps_if_ready(
@@ -642,6 +712,7 @@ pub mod core {
             for slot in &mut self.slots {
                 slot.reset();
             }
+            self.pressed_physical_buttons.clear();
             self.current_slot = self.caps.slot_min;
         }
 

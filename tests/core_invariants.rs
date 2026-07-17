@@ -4,6 +4,7 @@ use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, Event, GestureDirection,
     ResyncContact, SliderAxis, SliderDirection, SliderSpec, SlotError, Zone,
 };
+use edgepad::raw::BTN_LEFT;
 
 fn test_caps() -> Capabilities {
     Capabilities {
@@ -91,6 +92,157 @@ fn claimed_edge_touch_does_not_emit_initial_down_to_passthrough() {
 }
 
 #[test]
+fn buttonpad_press_promotes_claimed_contact_and_cancels_edge_gesture() {
+    let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
+    engine.set_buttonpad(true);
+
+    let down = engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(20),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left edge contact is valid");
+    assert!(down.passthrough.is_empty());
+
+    assert_eq!(
+        engine.update_physical_button(BTN_LEFT, true),
+        vec![
+            Event::slot(0),
+            Event::tracking_id(20),
+            Event::x(20),
+            Event::y(300),
+        ]
+    );
+
+    let motion = engine
+        .process_frame(&[Event::slot(0), Event::x(220), Event::y(310)])
+        .expect("promoted contact motion passes through");
+    assert_eq!(
+        motion.passthrough,
+        vec![Event::slot(0), Event::x(220), Event::y(310)]
+    );
+    assert!(motion.gestures.is_empty());
+
+    assert!(engine.update_physical_button(BTN_LEFT, false).is_empty());
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("promoted contact release passes through");
+    assert_eq!(up.passthrough, vec![Event::slot(0), Event::tracking_id(-1)]);
+    assert!(up.gestures.is_empty());
+}
+
+#[test]
+fn buttonpad_press_promotes_all_claimed_contacts_for_clickfinger() {
+    let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
+    engine.set_buttonpad(true);
+
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(20),
+            Event::x(20),
+            Event::y(300),
+            Event::slot(1),
+            Event::tracking_id(21),
+            Event::x(980),
+            Event::y(320),
+        ])
+        .expect("two edge contacts are valid");
+
+    assert_eq!(
+        engine.update_physical_button(BTN_LEFT, true),
+        vec![
+            Event::slot(0),
+            Event::tracking_id(20),
+            Event::x(20),
+            Event::y(300),
+            Event::slot(1),
+            Event::tracking_id(21),
+            Event::x(980),
+            Event::y(320),
+        ]
+    );
+}
+
+#[test]
+fn button_held_on_buttonpad_forces_new_edge_contact_to_passthrough() {
+    let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
+    engine.set_buttonpad(true);
+    assert!(engine.update_physical_button(BTN_LEFT, true).is_empty());
+
+    let down = engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(20),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("edge contact while button is held is valid");
+    assert_eq!(
+        down.passthrough,
+        vec![
+            Event::slot(0),
+            Event::tracking_id(20),
+            Event::x(20),
+            Event::y(300),
+        ]
+    );
+
+    assert!(engine.update_physical_button(BTN_LEFT, false).is_empty());
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("contact remains passthrough after button release");
+    assert_eq!(up.passthrough, vec![Event::slot(0), Event::tracking_id(-1)]);
+    assert!(up.gestures.is_empty());
+}
+
+#[test]
+fn physical_button_on_non_buttonpad_does_not_preempt_edge_ownership() {
+    let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
+
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(20),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left edge contact is valid");
+    assert!(engine.update_physical_button(BTN_LEFT, true).is_empty());
+
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("separate button does not cancel edge gesture");
+    assert!(up.passthrough.is_empty());
+    assert_eq!(up.gestures.len(), 1);
+    assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
+}
+
+#[test]
+fn buttonpad_tap_without_hardware_button_remains_edge_gesture() {
+    let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
+    engine.set_buttonpad(true);
+
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(20),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left edge contact is valid");
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("tap release is valid");
+
+    assert!(up.passthrough.is_empty());
+    assert_eq!(up.gestures.len(), 1);
+    assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
+}
+
+#[test]
 fn slider_edge_touch_emits_steps_during_motion_without_release_swipe() {
     let mut engine = Engine::with_sliders(
         test_caps(),
@@ -135,6 +287,54 @@ fn slider_edge_touch_emits_steps_during_motion_without_release_swipe() {
     assert!(up.slider_steps.is_empty());
     assert!(up.gestures.is_empty());
     assert!(up.passthrough.is_empty());
+}
+
+#[test]
+fn buttonpad_press_keeps_emitted_slider_steps_but_cancels_future_steps_and_gesture() {
+    let mut engine = Engine::with_sliders(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        vec![SliderSpec {
+            zone: Zone::Left,
+            axis: SliderAxis::Vertical,
+            step: 0.09,
+        }],
+    );
+    engine.set_buttonpad(true);
+
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(22),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left slider contact is valid");
+    let before_click = engine
+        .process_frame(&[Event::slot(0), Event::y(510)])
+        .expect("slider motion emits steps before click");
+    assert_eq!(before_click.slider_steps.len(), 3);
+
+    assert_eq!(
+        engine.update_physical_button(BTN_LEFT, true),
+        vec![
+            Event::slot(0),
+            Event::tracking_id(22),
+            Event::x(20),
+            Event::y(510),
+        ]
+    );
+    let after_click = engine
+        .process_frame(&[Event::slot(0), Event::y(650)])
+        .expect("motion after click passes through");
+    assert_eq!(after_click.passthrough, vec![Event::slot(0), Event::y(650)]);
+    assert!(after_click.slider_steps.is_empty());
+
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("promoted slider contact releases cleanly");
+    assert!(up.slider_steps.is_empty());
+    assert!(up.gestures.is_empty());
 }
 
 #[test]
