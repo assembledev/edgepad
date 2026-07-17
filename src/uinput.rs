@@ -1,8 +1,8 @@
 use crate::core::Capabilities;
 use crate::raw::{
-    RawEvent, RawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID,
-    ABS_X, ABS_Y, BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER, BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP,
-    BTN_TOOL_TRIPLETAP, BTN_TOUCH,
+    is_pointer_button_code, RawEvent, RawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y,
+    ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_X, ABS_Y, BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER,
+    BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP, BTN_TOOL_TRIPLETAP, BTN_TOUCH,
 };
 use evdev::{
     raw_stream::RawDevice, uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AttributeSet,
@@ -147,8 +147,22 @@ impl VirtualTouchpadSpec {
     }
 
     pub fn from_raw_device(device: &RawDevice, capabilities: Capabilities) -> Self {
-        Self::from_physical_abs_info(
+        let properties = device
+            .properties()
+            .iter()
+            .map(|property| property.0)
+            .collect();
+        let physical_buttons = device
+            .supported_keys()
+            .into_iter()
+            .flat_map(|keys| keys.iter())
+            .map(|key| key.0)
+            .filter(|code| is_pointer_button_code(*code))
+            .collect();
+        Self::from_physical_device_info(
             PhysicalTouchpadAbsInfo::from_raw_device(device, capabilities),
+            properties,
+            physical_buttons,
             DEFAULT_VIRTUAL_TOUCHPAD_NAME,
         )
     }
@@ -193,6 +207,26 @@ impl VirtualTouchpadSpec {
             ],
             misc: Vec::new(),
         }
+    }
+
+    pub fn from_physical_device_info(
+        abs_info: PhysicalTouchpadAbsInfo,
+        properties: Vec<u16>,
+        physical_buttons: Vec<u16>,
+        name: impl Into<String>,
+    ) -> Self {
+        let mut spec = Self::from_physical_abs_info(abs_info, name);
+        for property in properties {
+            if !spec.properties.contains(&property) {
+                spec.properties.push(property);
+            }
+        }
+        for button in physical_buttons {
+            if is_pointer_button_code(button) && !spec.keys.contains(&button) {
+                spec.keys.push(button);
+            }
+        }
+        spec
     }
 }
 

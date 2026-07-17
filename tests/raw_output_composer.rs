@@ -1,5 +1,7 @@
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine};
-use edgepad::raw::{route_raw_frame, RawEvent, RawFrame, RawOutputComposer, RoutedRawFrame};
+use edgepad::raw::{
+    route_raw_frame, RawEvent, RawFrame, RawOutputComposer, RoutedRawFrame, BTN_LEFT, EV_KEY,
+};
 
 fn test_capabilities() -> Capabilities {
     Capabilities {
@@ -331,6 +333,7 @@ fn compose_frame_releases_each_active_passthrough_slot_on_resync() {
     let output = composer
         .compose_frame(&RoutedRawFrame {
             passthrough: vec![],
+            physical_buttons: vec![],
             gestures: vec![],
             slider_steps: vec![],
             resync_required: true,
@@ -349,6 +352,30 @@ fn compose_frame_releases_each_active_passthrough_slot_on_resync() {
             RawEvent::btn_tool_doubletap(false),
         ]
     );
+}
+
+#[test]
+fn compose_frame_forwards_physical_button_and_finish_releases_it() {
+    let mut engine = test_engine();
+    let mut composer = RawOutputComposer::new(test_capabilities());
+
+    let press = route_and_compose(
+        &mut engine,
+        &mut composer,
+        RawFrame::new(vec![RawEvent::new(EV_KEY, BTN_LEFT, 1)]),
+    );
+    assert_eq!(press, vec![RawEvent::new(EV_KEY, BTN_LEFT, 1)]);
+
+    let cleanup = composer
+        .finish()
+        .expect("finish should release a held physical button")
+        .events;
+    assert_eq!(cleanup, vec![RawEvent::new(EV_KEY, BTN_LEFT, 0)]);
+    assert!(composer
+        .finish()
+        .expect("button cleanup should be idempotent")
+        .events
+        .is_empty());
 }
 
 #[test]

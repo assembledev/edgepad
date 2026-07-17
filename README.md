@@ -253,7 +253,7 @@ For live forwarding it:
 6. emits normal contacts through the virtual device;
 7. releases virtual contacts and ungrabs the physical device on shutdown.
 
-The output side does not blindly copy raw pointer-emulation events. `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` are synthesized from unclaimed passthrough contacts so an edge-owned finger does not leak into normal pointer movement.
+The output side does not blindly copy raw pointer-emulation events. `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` are synthesized from unclaimed passthrough contacts so an edge-owned finger does not leak into normal pointer movement. Physical touchpad buttons (`BTN_LEFT` and related pointer buttons) are passed through independently, and live mode preserves input properties such as `INPUT_PROP_BUTTONPAD` so libinput keeps clickpad behavior.
 
 ## Permissions
 

@@ -3,7 +3,9 @@ use std::time::Duration;
 use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, ResyncContact, Zone,
 };
-use edgepad::raw::{route_raw_frame, route_resync_contacts, RawEvent, RawFrame};
+use edgepad::raw::{
+    route_raw_frame, route_resync_contacts, RawEvent, RawFrame, BTN_LEFT, BTN_TOUCH, EV_KEY,
+};
 
 fn test_engine() -> Engine {
     Engine::new(
@@ -61,6 +63,27 @@ fn route_raw_frame_drops_claimed_edge_recognizer_raw_events() {
     assert!(routed.passthrough.is_empty());
     assert!(routed.gestures.is_empty());
     assert!(!routed.resync_required);
+}
+
+#[test]
+fn route_raw_frame_preserves_physical_button_but_not_touch_state_key() {
+    let mut engine = test_engine();
+    let frame = RawFrame::new(vec![
+        RawEvent::btn_touch(true),
+        RawEvent::new(EV_KEY, BTN_LEFT, 1),
+    ]);
+
+    let routed = route_raw_frame(&mut engine, &frame).expect("button frame should route");
+
+    assert!(routed.passthrough.is_empty());
+    assert_eq!(
+        routed.physical_buttons,
+        vec![RawEvent::new(EV_KEY, BTN_LEFT, 1)]
+    );
+    assert!(!routed
+        .physical_buttons
+        .iter()
+        .any(|event| event.code == BTN_TOUCH));
 }
 
 #[test]

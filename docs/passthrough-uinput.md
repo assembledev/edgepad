@@ -117,10 +117,12 @@ Those values can follow an edge-owned contact while another center contact is ac
 - `BTN_TOUCH` follows the count of unclaimed active contacts;
 - `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, and related tool keys follow the unclaimed active contact count;
 - legacy `ABS_X/Y` come from a representative unclaimed active slot;
+- physical `BTN_LEFT`, `BTN_RIGHT`, and related pointer-button events are forwarded independently
+  of contact ownership and are released during output cleanup;
 - `SYN_DROPPED` releases tracked virtual contacts, ignores the unreliable tail through the next
-  `SYN_REPORT`, then queries the kernel's current multitouch slot state. Contacts that were already
-  held during resync are restored as passthrough until release so incomplete history cannot create
-  a gesture.
+  `SYN_REPORT`, then queries the kernel's current multitouch slot and physical-button state.
+  Contacts and buttons that were already held during resync are restored so incomplete history
+  cannot create a gesture or leave a virtual button stuck.
 
 ## uinput batching
 
@@ -130,11 +132,16 @@ The Rust `evdev` crate's `VirtualDevice::emit(&[InputEvent])` appends `SYN_REPOR
 
 `VirtualTouchpadSpec` mirrors the output events that the composer can emit:
 
-- properties: `INPUT_PROP_POINTER`;
-- keys: `BTN_TOUCH`, `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, `BTN_TOOL_TRIPLETAP`, `BTN_TOOL_QUADTAP`, `BTN_TOOL_QUINTTAP`;
+- properties: `INPUT_PROP_POINTER` plus the physical touchpad's properties, including
+  `INPUT_PROP_BUTTONPAD` for clickpads;
+- keys: `BTN_TOUCH`, `BTN_TOOL_FINGER`, `BTN_TOOL_DOUBLETAP`, `BTN_TOOL_TRIPLETAP`,
+  `BTN_TOOL_QUADTAP`, `BTN_TOOL_QUINTTAP`, plus supported physical pointer buttons;
 - absolute axes: `ABS_X`, `ABS_Y`, `ABS_MT_SLOT`, `ABS_MT_TRACKING_ID`, `ABS_MT_POSITION_X`, `ABS_MT_POSITION_Y`.
 
-For live proxy mode, the virtual touchpad mirrors the physical device's absolute-axis value, min/max, fuzz, flat, and resolution where the physical device exposes them. This keeps compositor/libinput behavior close to the real device. Replay-only paths use captured metadata ranges and a conservative tracking-id range.
+For live proxy mode, the virtual touchpad mirrors the physical device's input properties, physical
+pointer-button capabilities, and absolute-axis value, min/max, fuzz, flat, and resolution where the
+physical device exposes them. This keeps compositor/libinput behavior close to the real device.
+Replay-only paths use captured metadata ranges and a conservative tracking-id range.
 
 ## Manual live uinput test
 

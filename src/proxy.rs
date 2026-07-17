@@ -15,9 +15,10 @@ use crate::core::{
 };
 use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
-    extract_core_events, route_raw_frame, route_resync_contacts, RawEvent, RawFrame,
-    RawOutputComposer, RawOutputSink, RecordingRawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y,
-    ABS_MT_SLOT, ABS_MT_TRACKING_ID, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED, SYN_REPORT,
+    extract_core_events, is_pointer_button_code, route_raw_frame, route_resync_contacts, RawEvent,
+    RawFrame, RawOutputComposer, RawOutputSink, RecordingRawOutputSink, ABS_MT_POSITION_X,
+    ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN,
+    SYN_DROPPED, SYN_REPORT,
 };
 use crate::uinput::{
     build_virtual_touchpad, UinputEventWriter, UinputRawOutputSink, VirtualTouchpadSpec,
@@ -456,6 +457,18 @@ fn read_resync_contacts(
     ))
 }
 
+fn read_pressed_physical_buttons(device: &RawDevice) -> Result<Vec<u16>, String> {
+    device
+        .get_key_state()
+        .map(|keys| {
+            keys.iter()
+                .map(|key| key.0)
+                .filter(|code| is_pointer_button_code(*code))
+                .collect()
+        })
+        .map_err(|err| format!("failed to read current physical button state: {err}"))
+}
+
 fn resync_contacts_from_slot_values(
     capabilities: Capabilities,
     tracking_ids: &[i32],
@@ -594,8 +607,10 @@ where
                 }
                 ResyncStreamAction::CompleteResync => {
                     let contacts = read_resync_contacts(device, config.capabilities)?;
+                    let pressed_physical_buttons = read_pressed_physical_buttons(device)?;
                     process_proxy_resync_contacts(
                         &contacts,
+                        &pressed_physical_buttons,
                         &mut engine,
                         &mut composer,
                         sink,
@@ -764,6 +779,7 @@ where
 
 fn process_proxy_resync_contacts<S, H>(
     contacts: &[ResyncContact],
+    pressed_physical_buttons: &[u16],
     engine: &mut Engine,
     composer: &mut RawOutputComposer,
     sink: &mut S,
@@ -775,8 +791,13 @@ where
     S::Error: std::fmt::Debug,
     H: GestureHandler,
 {
-    let routed = route_resync_contacts(engine, contacts)
+    let mut routed = route_resync_contacts(engine, contacts)
         .map_err(|err| format!("proxy resync failed: {err:?}"))?;
+    routed.physical_buttons = pressed_physical_buttons
+        .iter()
+        .copied()
+        .map(|code| RawEvent::new(EV_KEY, code, 1))
+        .collect();
     let recognizer_events = routed.passthrough.len();
     stats.recognizer_events += recognizer_events;
     process_proxy_routed_frame(recognizer_events, composer, sink, stats, routed, handler)

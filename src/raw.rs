@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use crate::core::{
@@ -18,6 +19,9 @@ pub const BTN_RIGHT: u16 = 0x111;
 pub const BTN_MIDDLE: u16 = 0x112;
 pub const BTN_SIDE: u16 = 0x113;
 pub const BTN_EXTRA: u16 = 0x114;
+pub const BTN_FORWARD: u16 = 0x115;
+pub const BTN_BACK: u16 = 0x116;
+pub const BTN_TASK: u16 = 0x117;
 pub const BTN_TOOL_FINGER: u16 = 0x145;
 pub const BTN_TOOL_QUINTTAP: u16 = 0x148;
 pub const BTN_TOUCH: u16 = 0x14a;
@@ -42,6 +46,10 @@ pub const ABS_MT_PRESSURE: u16 = 0x3a;
 pub const ABS_MT_DISTANCE: u16 = 0x3b;
 pub const ABS_MT_TOOL_X: u16 = 0x3c;
 pub const ABS_MT_TOOL_Y: u16 = 0x3d;
+
+pub const fn is_pointer_button_code(code: u16) -> bool {
+    matches!(code, BTN_LEFT..=BTN_TASK)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RawEvent {
@@ -176,6 +184,7 @@ pub struct RawDumpFile {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoutedRawFrame {
     pub passthrough: Vec<RawEvent>,
+    pub physical_buttons: Vec<RawEvent>,
     pub gestures: Vec<Gesture>,
     pub slider_steps: Vec<SliderStep>,
     pub resync_required: bool,
@@ -190,6 +199,7 @@ pub struct RawOutputComposer {
     last_tool_count: usize,
     last_abs_x: Option<i32>,
     last_abs_y: Option<i32>,
+    pressed_physical_buttons: BTreeSet<u16>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -278,6 +288,7 @@ impl RawOutputComposer {
             last_tool_count: 0,
             last_abs_x: None,
             last_abs_y: None,
+            pressed_physical_buttons: BTreeSet::new(),
         }
     }
 
@@ -294,6 +305,10 @@ impl RawOutputComposer {
             events.push(event);
         }
         self.append_legacy_state_events(&mut events);
+        for event in routed.physical_buttons.iter().copied() {
+            self.apply_physical_button_event(event);
+            events.push(event);
+        }
 
         Ok(RawFrame::new(events))
     }
@@ -331,6 +346,17 @@ impl RawOutputComposer {
             _ => {}
         }
         Ok(())
+    }
+
+    fn apply_physical_button_event(&mut self, event: RawEvent) {
+        if event.kind != EV_KEY || !is_pointer_button_code(event.code) {
+            return;
+        }
+        if event.value == 0 {
+            self.pressed_physical_buttons.remove(&event.code);
+        } else {
+            self.pressed_physical_buttons.insert(event.code);
+        }
     }
 
     fn append_legacy_state_events(&mut self, events: &mut Vec<RawEvent>) {
@@ -394,6 +420,9 @@ impl RawOutputComposer {
         }
         self.clear_slot_state();
         self.append_legacy_state_events(&mut events);
+        for code in std::mem::take(&mut self.pressed_physical_buttons) {
+            events.push(RawEvent::new(EV_KEY, code, 0));
+        }
         Ok(events)
     }
 
@@ -404,6 +433,7 @@ impl RawOutputComposer {
         self.last_tool_count = 0;
         self.last_abs_x = None;
         self.last_abs_y = None;
+        self.pressed_physical_buttons.clear();
     }
 
     fn clear_slot_state(&mut self) {
@@ -816,6 +846,12 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
 
     Ok(RoutedRawFrame {
         passthrough,
+        physical_buttons: frame
+            .events
+            .iter()
+            .copied()
+            .filter(|event| event.kind == EV_KEY && is_pointer_button_code(event.code))
+            .collect(),
         gestures: output.gestures,
         slider_steps: output.slider_steps,
         resync_required: output.resync_required,
@@ -833,6 +869,7 @@ pub fn route_resync_contacts(
             .into_iter()
             .filter_map(raw_event_for_core_event)
             .collect(),
+        physical_buttons: Vec::new(),
         gestures: Vec::new(),
         slider_steps: Vec::new(),
         resync_required: false,
