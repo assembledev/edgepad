@@ -964,7 +964,7 @@ fn proxy(args: &ProxyArgs) -> Result<(), String> {
         .ok_or_else(|| "proxy --built-in-defaults requires --device auto|<event-node>".to_string())?
         .resolve(&args.input_root)?;
 
-    print_recognition_profile(&profile, true);
+    print_recognition_profile(&profile);
     let summary = run_proxy(&ProxyRunConfig {
         device_path: device,
         limit: ProxyRunLimit::Frames {
@@ -1305,17 +1305,12 @@ fn edge_widths_label(widths: EdgeWidths) -> String {
     )
 }
 
-fn print_recognition_profile(profile: &RecognitionProfile, tap_timing_available: bool) {
+fn print_recognition_profile(profile: &RecognitionProfile) {
     println!("profile: {}", profile.source_label());
     println!(
-        "profile_settings: edge_widths={} tap_min_duration_ms={} tap_timing={} swipe_min_distance={:.3} sliders={}",
+        "profile_settings: edge_widths={} tap_min_duration_ms={} swipe_min_distance={:.3} sliders={}",
         edge_widths_label(profile.edge_widths),
         profile.engine_options.tap_min_duration.as_millis(),
-        if tap_timing_available {
-            "available"
-        } else {
-            "unavailable"
-        },
         profile.engine_options.swipe_min_distance,
         profile.slider_specs.len()
     );
@@ -1323,7 +1318,7 @@ fn print_recognition_profile(profile: &RecognitionProfile, tap_timing_available:
 
 fn replay(args: &ReplayArgs) -> Result<(), String> {
     let profile = load_recognition_profile(&args.profile)?;
-    print_recognition_profile(&profile, false);
+    print_recognition_profile(&profile);
     let input = fs::read_to_string(&args.path)
         .map_err(|err| format!("failed to read {}: {err}", args.path.display()))?;
     let replay = parse_replay_file(&input).map_err(|err| format!("parse failed: {err:?}"))?;
@@ -1411,7 +1406,7 @@ fn replay(args: &ReplayArgs) -> Result<(), String> {
 
 fn replay_raw(args: &ReplayArgs) -> Result<(), String> {
     let profile = load_recognition_profile(&args.profile)?;
-    print_recognition_profile(&profile, false);
+    print_recognition_profile(&profile);
     let input = fs::read_to_string(&args.path)
         .map_err(|err| format!("failed to read {}: {err}", args.path.display()))?;
     let raw_dump = parse_raw_dump_file(&input).map_err(|err| format!("parse failed: {err:?}"))?;

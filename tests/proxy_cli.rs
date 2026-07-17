@@ -336,10 +336,6 @@ fn proxy_cli_uses_config_device_and_recognition_profile() {
     );
     assert!(stdout.contains("sliders=1"), "stdout was: {stdout}");
     assert!(
-        stdout.contains("tap_timing=available"),
-        "stdout was: {stdout}"
-    );
-    assert!(
         stderr.contains(&missing_device.display().to_string()),
         "stderr was: {stderr}"
     );

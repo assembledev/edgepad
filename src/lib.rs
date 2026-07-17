@@ -749,6 +749,8 @@ pub mod core {
 }
 
 pub mod replay {
+    use std::time::Duration;
+
     use crate::core::{AxisRange, Capabilities, Engine, Event, FrameOutput, SlotError};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,12 +776,26 @@ pub mod replay {
         MissingMetadataField {
             field: &'static str,
         },
+        NonMonotonicTimestamp {
+            line: usize,
+            previous_us: u64,
+            current_us: u64,
+        },
+        UnterminatedFrame {
+            line: usize,
+        },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ReplayFrame {
+        pub events: Vec<Event>,
+        pub timestamp: Duration,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct ReplayFile {
         pub capabilities: Option<Capabilities>,
-        pub frames: Vec<Vec<Event>>,
+        pub frames: Vec<ReplayFrame>,
     }
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -793,18 +809,20 @@ pub mod replay {
         pub syn_dropped_events: usize,
     }
 
-    pub fn replay_stats(frames: &[Vec<Event>]) -> ReplayStats {
+    pub fn replay_stats(frames: &[ReplayFrame]) -> ReplayStats {
         let mut stats = ReplayStats::default();
 
-        for event in frames.iter().flatten() {
-            stats.total_events += 1;
-            match event {
-                Event::Slot(_) => stats.slot_events += 1,
-                Event::TrackingId(id) if *id >= 0 => stats.tracking_starts += 1,
-                Event::TrackingId(_) => stats.tracking_ends += 1,
-                Event::X(_) => stats.x_events += 1,
-                Event::Y(_) => stats.y_events += 1,
-                Event::SynDropped => stats.syn_dropped_events += 1,
+        for frame in frames {
+            for event in &frame.events {
+                stats.total_events += 1;
+                match event {
+                    Event::Slot(_) => stats.slot_events += 1,
+                    Event::TrackingId(id) if *id >= 0 => stats.tracking_starts += 1,
+                    Event::TrackingId(_) => stats.tracking_ends += 1,
+                    Event::X(_) => stats.x_events += 1,
+                    Event::Y(_) => stats.y_events += 1,
+                    Event::SynDropped => stats.syn_dropped_events += 1,
+                }
             }
         }
 
@@ -818,9 +836,10 @@ pub mod replay {
         })
     }
 
-    pub fn parse_frames(input: &str) -> Result<Vec<Vec<Event>>, ReplayError> {
+    pub fn parse_frames(input: &str) -> Result<Vec<ReplayFrame>, ReplayError> {
         let mut frames = Vec::new();
         let mut current = Vec::new();
+        let mut last_timestamp = None;
 
         for (index, raw_line) in input.lines().enumerate() {
             let line_number = index + 1;
@@ -838,15 +857,23 @@ pub mod replay {
 
             match name {
                 "SYN_REPORT" => {
+                    let timestamp = parse_timestamp(line_number, name, parts.next())?;
+                    validate_timestamp(line_number, timestamp, &mut last_timestamp)?;
                     if !current.is_empty() {
-                        frames.push(std::mem::take(&mut current));
+                        frames.push(ReplayFrame {
+                            events: std::mem::take(&mut current),
+                            timestamp,
+                        });
                     }
                 }
                 "SYN_DROPPED" => {
-                    if !current.is_empty() {
-                        frames.push(std::mem::take(&mut current));
-                    }
-                    frames.push(vec![Event::syn_dropped()]);
+                    let timestamp = parse_timestamp(line_number, name, parts.next())?;
+                    validate_timestamp(line_number, timestamp, &mut last_timestamp)?;
+                    current.clear();
+                    frames.push(ReplayFrame {
+                        events: vec![Event::syn_dropped()],
+                        timestamp,
+                    });
                 }
                 "ABS_MT_SLOT" => current.push(Event::slot(parse_i32_value(
                     line_number,
@@ -876,7 +903,9 @@ pub mod replay {
         }
 
         if !current.is_empty() {
-            frames.push(current);
+            return Err(ReplayError::UnterminatedFrame {
+                line: input.lines().count().max(1),
+            });
         }
 
         Ok(frames)
@@ -977,12 +1006,50 @@ pub mod replay {
 
     pub fn run_frames(
         engine: &mut Engine,
-        frames: &[Vec<Event>],
+        frames: &[ReplayFrame],
     ) -> Result<Vec<FrameOutput>, SlotError> {
         frames
             .iter()
-            .map(|frame| engine.process_frame(frame))
+            .map(|frame| engine.process_frame_at(&frame.events, frame.timestamp))
             .collect()
+    }
+
+    fn parse_timestamp(
+        line: usize,
+        name: &str,
+        value: Option<&str>,
+    ) -> Result<Duration, ReplayError> {
+        let value = value.ok_or_else(|| ReplayError::MissingValue {
+            line,
+            name: format!("{name} timestamp_us"),
+        })?;
+        let micros = value
+            .parse::<u64>()
+            .map_err(|_| ReplayError::InvalidValue {
+                line,
+                name: format!("{name} timestamp_us"),
+                value: value.to_string(),
+            })?;
+
+        Ok(Duration::from_micros(micros))
+    }
+
+    fn validate_timestamp(
+        line: usize,
+        timestamp: Duration,
+        last_timestamp: &mut Option<Duration>,
+    ) -> Result<(), ReplayError> {
+        if let Some(previous) = *last_timestamp {
+            if timestamp < previous {
+                return Err(ReplayError::NonMonotonicTimestamp {
+                    line,
+                    previous_us: previous.as_micros() as u64,
+                    current_us: timestamp.as_micros() as u64,
+                });
+            }
+        }
+        *last_timestamp = Some(timestamp);
+        Ok(())
     }
 
     fn parse_i32_value(line: usize, name: &str, value: Option<&str>) -> Result<i32, ReplayError> {

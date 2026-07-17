@@ -11,8 +11,7 @@ width, swipe threshold, and sliders match the daemon. Select another config with
 For a hermetic fixture run that intentionally ignores user configuration, pass
 `--built-in-defaults`. The output always names the selected profile and recognizer settings. Replay
 does not execute configured actions.
-Replay files do not contain wall-clock frame timestamps. The configured tap duration is shown for
-context, but replay reports `tap_timing=unavailable` and cannot use it to accept or reject taps.
+Every frame carries a timestamp, so replay applies `tap_min_duration_ms` like the live proxy.
 
 ## Replay-format syntax
 
@@ -23,8 +22,8 @@ ABS_MT_SLOT <slot>
 ABS_MT_TRACKING_ID <id|-1>
 ABS_MT_POSITION_X <x>
 ABS_MT_POSITION_Y <y>
-SYN_REPORT
-SYN_DROPPED
+SYN_REPORT <timestamp_us>
+SYN_DROPPED <timestamp_us>
 ```
 
 Comments are allowed:
@@ -34,9 +33,12 @@ Comments are allowed:
 ABS_MT_SLOT 0 # inline comment
 ```
 
-`SYN_REPORT` ends the current frame. Events before the next `SYN_REPORT` are processed together.
+`SYN_REPORT` ends the current frame. Events before it are processed together at the supplied kernel
+timestamp. Timestamps are integer microseconds and must not decrease. Handwritten fixtures may use
+relative values starting at zero because the recognizer only compares elapsed time.
 
-`SYN_DROPPED` creates a standalone frame that tells the engine to clear local touch state and require resync.
+`SYN_DROPPED` creates a standalone timestamped frame that tells the engine to clear local touch
+state and require resync. A frame boundary without a timestamp is rejected.
 The live proxy additionally ignores events through the next `SYN_REPORT`, queries the kernel slot
 snapshot, and restores already-held contacts as passthrough. Text replay has no physical device to
 query, so a fixture must provide a fresh complete contact after `SYN_DROPPED` when it wants to model
@@ -56,8 +58,12 @@ EV_KEY BTN_TOOL_FINGER 1
 EV_ABS ABS_X 500
 EV_ABS ABS_Y 300
 EV_MSC MSC_TIMESTAMP 123456
-EV_SYN SYN_REPORT 0
+EV_SYN SYN_REPORT 0 123456789
 ```
+
+For `SYN_REPORT` and `SYN_DROPPED`, the fourth value is the required frame timestamp in
+microseconds. `EV_MSC MSC_TIMESTAMP` remains a raw device event and is not a substitute for the
+kernel frame timestamp.
 
 Unknown event types/codes are preserved with numeric fallback. Raw replay routes only recognizer-relevant MT events into the engine, then composes output events for passthrough contacts. It does not blindly forward raw `BTN_TOUCH`, `BTN_TOOL_*`, or legacy `ABS_X/Y`; those are synthesized from unclaimed passthrough contacts.
 
@@ -75,7 +81,7 @@ Real captures can include capability metadata in comments:
 
 `edgepad replay` and `edgepad replay-raw` use this metadata when present instead of fixture defaults. Edge-zone decisions use the real touchpad coordinate range and slot range.
 
-Old handwritten fixtures without metadata still work; replay falls back to temporary defaults:
+Fixtures without capability metadata use these temporary ranges:
 
 ```text
 slots: 0..=9
@@ -92,16 +98,16 @@ ABS_MT_SLOT 0
 ABS_MT_TRACKING_ID 123
 ABS_MT_POSITION_X 20
 ABS_MT_POSITION_Y 300
-SYN_REPORT
+SYN_REPORT 0
 
 ABS_MT_SLOT 0
 ABS_MT_POSITION_X 220
 ABS_MT_POSITION_Y 310
-SYN_REPORT
+SYN_REPORT 50000
 
 ABS_MT_SLOT 0
 ABS_MT_TRACKING_ID -1
-SYN_REPORT
+SYN_REPORT 100000
 ```
 
 Human translation:

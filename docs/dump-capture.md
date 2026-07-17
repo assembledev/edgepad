@@ -23,8 +23,8 @@ Reading `/dev/input/event*` may require `sudo`, the `input` group, or seat/login
 sliders aligned with the daemon. Use `--built-in-defaults` only when intentionally testing the
 standalone recognizer profile. The commands print `profile: config ...` or
 `profile: built-in defaults`; replay never executes configured actions.
-Saved captures do not include frame timestamps, so replay cannot re-evaluate
-`tap_min_duration_ms`; its profile line reports `tap_timing=unavailable`.
+Dump files include the kernel timestamp on every frame boundary, so replay applies
+`tap_min_duration_ms` exactly like the live proxy.
 
 ## Replay-format capture
 
@@ -58,8 +58,10 @@ EV_KEY BTN_TOOL_FINGER 1
 EV_ABS ABS_X 500
 EV_ABS ABS_Y 300
 EV_MSC MSC_TIMESTAMP 123456
-EV_SYN SYN_REPORT 0
+EV_SYN SYN_REPORT 0 123456789
 ```
+
+The final value is the frame timestamp in microseconds.
 
 Unknown event types and codes are kept with numeric fallback instead of being silently dropped.
 

@@ -1,8 +1,17 @@
+use std::time::Duration;
+
 use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, Event, FrameOutput, Gesture, GestureDirection,
     SlotError, Zone,
 };
-use edgepad::replay::{parse_frames, run_frames, ReplayError};
+use edgepad::replay::{parse_frames, run_frames, ReplayError, ReplayFrame};
+
+fn frame(timestamp_us: u64, events: Vec<Event>) -> ReplayFrame {
+    ReplayFrame {
+        events,
+        timestamp: Duration::from_micros(timestamp_us),
+    }
+}
 
 fn test_caps() -> Capabilities {
     Capabilities {
@@ -41,14 +50,17 @@ fn parses_left_edge_swipe_fixture_into_frames() {
     assert_eq!(
         frames,
         vec![
-            vec![
-                Event::slot(0),
-                Event::tracking_id(123),
-                Event::x(20),
-                Event::y(300),
-            ],
-            vec![Event::slot(0), Event::x(220), Event::y(310)],
-            vec![Event::slot(0), Event::tracking_id(-1)],
+            frame(
+                0,
+                vec![
+                    Event::slot(0),
+                    Event::tracking_id(123),
+                    Event::x(20),
+                    Event::y(300),
+                ]
+            ),
+            frame(50000, vec![Event::slot(0), Event::x(220), Event::y(310)]),
+            frame(100000, vec![Event::slot(0), Event::tracking_id(-1)]),
         ]
     );
 }
@@ -160,20 +172,60 @@ ABS_MT_SLOT 1 # inline comment
 ABS_MT_TRACKING_ID 7
 ABS_MT_POSITION_X 500
 ABS_MT_POSITION_Y 300
-SYN_REPORT
+SYN_REPORT 16000
 "#;
 
     let frames = parse_frames(input).expect("comments should be ignored");
 
     assert_eq!(
         frames,
-        vec![vec![
-            Event::slot(1),
-            Event::tracking_id(7),
-            Event::x(500),
-            Event::y(300),
-        ]]
+        vec![frame(
+            16000,
+            vec![
+                Event::slot(1),
+                Event::tracking_id(7),
+                Event::x(500),
+                Event::y(300),
+            ],
+        )]
     );
+}
+
+#[test]
+fn parser_requires_timestamp_on_every_frame_boundary() {
+    let err = parse_frames("ABS_MT_SLOT 0\nSYN_REPORT\n")
+        .expect_err("frame boundary without timestamp must fail");
+
+    assert_eq!(
+        err,
+        ReplayError::MissingValue {
+            line: 2,
+            name: "SYN_REPORT timestamp_us".to_string(),
+        }
+    );
+}
+
+#[test]
+fn parser_rejects_non_monotonic_frame_timestamps() {
+    let err = parse_frames("ABS_MT_SLOT 0\nSYN_REPORT 20\nABS_MT_SLOT 0\nSYN_REPORT 10\n")
+        .expect_err("frame timestamps must not go backwards");
+
+    assert_eq!(
+        err,
+        ReplayError::NonMonotonicTimestamp {
+            line: 4,
+            previous_us: 20,
+            current_us: 10,
+        }
+    );
+}
+
+#[test]
+fn parser_rejects_unterminated_frame() {
+    let err = parse_frames("ABS_MT_SLOT 0\n")
+        .expect_err("events without a timestamped boundary must fail");
+
+    assert_eq!(err, ReplayError::UnterminatedFrame { line: 1 });
 }
 
 #[test]

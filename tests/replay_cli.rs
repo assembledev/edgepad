@@ -33,10 +33,6 @@ fn replay_cli_prints_summary_for_valid_fixture() {
         stdout.contains("profile: built-in defaults"),
         "stdout was: {stdout}"
     );
-    assert!(
-        stdout.contains("tap_timing=unavailable"),
-        "stdout was: {stdout}"
-    );
     assert!(stdout.contains("frames: 3"), "stdout was: {stdout}");
     assert!(
         stdout.contains("passthrough_events: 0"),
@@ -75,7 +71,7 @@ EV_ABS ABS_MT_SLOT 1
 EV_ABS ABS_MT_TRACKING_ID 200
 EV_ABS ABS_MT_POSITION_X 520
 EV_ABS ABS_MT_POSITION_Y 320
-EV_SYN SYN_REPORT 0
+EV_SYN SYN_REPORT 0 0
 "#,
     )
     .expect("raw fixture should be written");
@@ -129,7 +125,7 @@ fn replay_raw_cli_includes_final_release_when_capture_ends_mid_passthrough_conta
 EV_ABS ABS_MT_TRACKING_ID 123
 EV_ABS ABS_MT_POSITION_X 1200
 EV_ABS ABS_MT_POSITION_Y 900
-EV_SYN SYN_REPORT 0
+EV_SYN SYN_REPORT 0 0
 "#,
     )
     .expect("raw fixture should be written");
@@ -174,7 +170,7 @@ ABS_MT_SLOT 1
 ABS_MT_TRACKING_ID 123
 ABS_MT_POSITION_X 500
 ABS_MT_POSITION_Y 300
-SYN_REPORT
+SYN_REPORT 0
 "#,
     )
     .expect("metadata fixture should be written");
@@ -210,7 +206,7 @@ fn replay_cli_explains_capture_without_contact_start() {
 
 ABS_MT_POSITION_X 1200
 ABS_MT_POSITION_Y 900
-SYN_REPORT
+SYN_REPORT 0
 "#,
     )
     .expect("midstream fixture should be written");
@@ -254,7 +250,7 @@ fn replay_cli_explains_frame_budget_stopping_mid_contact_without_bad_lift_hint()
 ABS_MT_TRACKING_ID 123
 ABS_MT_POSITION_X 1200
 ABS_MT_POSITION_Y 900
-SYN_REPORT
+SYN_REPORT 0
 "#,
     )
     .expect("active-at-end fixture should be written");
@@ -398,6 +394,71 @@ action = { log = true }
 }
 
 #[test]
+fn replay_cli_applies_tap_min_duration_from_frame_timestamps() {
+    let config_path = unique_temp_path("edgepad-replay-tap-duration-config.toml");
+    let short_path = unique_temp_path("edgepad-replay-short-tap.ev");
+    let accepted_path = unique_temp_path("edgepad-replay-accepted-tap.ev");
+    for path in [&config_path, &short_path, &accepted_path] {
+        let _ = fs::remove_file(path);
+    }
+    write_config(
+        &config_path,
+        r#"
+edge_width = 0.10
+tap_min_duration_ms = 80
+
+[[gestures]]
+zone = "left"
+direction = "tap"
+action = { log = true }
+"#,
+    );
+    fs::write(&short_path, tap_fixture(79_999)).expect("short tap fixture should be written");
+    fs::write(&accepted_path, tap_fixture(80_000)).expect("accepted tap fixture should be written");
+
+    let short = edgepad()
+        .arg("replay")
+        .arg(&short_path)
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("edgepad binary should run");
+    let accepted = edgepad()
+        .arg("replay")
+        .arg(&accepted_path)
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("edgepad binary should run");
+
+    for path in [&config_path, &short_path, &accepted_path] {
+        fs::remove_file(path).expect("temporary replay input should be removed");
+    }
+
+    assert!(
+        short.status.success(),
+        "short tap replay should succeed, stderr: {}",
+        String::from_utf8_lossy(&short.stderr)
+    );
+    let short_stdout = String::from_utf8_lossy(&short.stdout);
+    assert!(
+        short_stdout.contains("gestures: 0"),
+        "tap shorter than the configured duration must be rejected: {short_stdout}"
+    );
+
+    assert!(
+        accepted.status.success(),
+        "accepted tap replay should succeed, stderr: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    let accepted_stdout = String::from_utf8_lossy(&accepted.stdout);
+    assert!(
+        accepted_stdout.contains("gesture slot=0 tracking_id=123 zone=left direction=tap"),
+        "tap at the configured duration must be recognized: {accepted_stdout}"
+    );
+}
+
+#[test]
 fn replay_cli_never_executes_configured_actions() {
     let config_path = unique_temp_path("edgepad-replay-action-config.toml");
     let action_marker = unique_temp_path("edgepad-replay-action-marker");
@@ -468,15 +529,15 @@ EV_ABS ABS_MT_SLOT 0
 EV_ABS ABS_MT_TRACKING_ID 123
 EV_ABS ABS_MT_POSITION_X 20
 EV_ABS ABS_MT_POSITION_Y 700
-EV_SYN SYN_REPORT 0
+EV_SYN SYN_REPORT 0 0
 
 EV_ABS ABS_MT_SLOT 0
 EV_ABS ABS_MT_POSITION_Y 200
-EV_SYN SYN_REPORT 0
+EV_SYN SYN_REPORT 0 50000
 
 EV_ABS ABS_MT_SLOT 0
 EV_ABS ABS_MT_TRACKING_ID -1
-EV_SYN SYN_REPORT 0
+EV_SYN SYN_REPORT 0 100000
 "#,
     )
     .expect("raw fixture should be written");
@@ -556,6 +617,12 @@ fn write_config(path: &std::path::Path, contents: &str) {
         fs::create_dir_all(parent).expect("config parent should be created");
     }
     fs::write(path, contents).expect("config should be written");
+}
+
+fn tap_fixture(released_at_us: u64) -> String {
+    format!(
+        "ABS_MT_SLOT 0\nABS_MT_TRACKING_ID 123\nABS_MT_POSITION_X 20\nABS_MT_POSITION_Y 300\nSYN_REPORT 0\n\nABS_MT_SLOT 0\nABS_MT_TRACKING_ID -1\nSYN_REPORT {released_at_us}\n"
+    )
 }
 
 fn unique_temp_path(prefix: &str) -> PathBuf {

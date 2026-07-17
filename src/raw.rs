@@ -147,6 +147,18 @@ pub enum RawParseError {
     MissingMetadataField {
         field: &'static str,
     },
+    InvalidTimestamp {
+        line: usize,
+        value: String,
+    },
+    NonMonotonicTimestamp {
+        line: usize,
+        previous_us: u64,
+        current_us: u64,
+    },
+    UnterminatedFrame {
+        line: usize,
+    },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -557,6 +569,7 @@ fn parse_metadata_range(
 pub fn parse_raw_frames(input: &str) -> Result<Vec<RawFrame>, RawParseError> {
     let mut frames = Vec::new();
     let mut current = Vec::new();
+    let mut last_timestamp = None;
 
     for (index, raw_line) in input.lines().enumerate() {
         let line_number = index + 1;
@@ -569,31 +582,43 @@ pub fn parse_raw_frames(input: &str) -> Result<Vec<RawFrame>, RawParseError> {
             continue;
         }
 
-        let event = parse_raw_event_line(line_number, line)?;
+        let (event, timestamp) = parse_raw_event_line(line_number, line)?;
         match (event.kind, event.code) {
             (EV_SYN, SYN_REPORT) => {
+                let timestamp = parse_frame_timestamp(line_number, timestamp.as_deref())?;
+                validate_frame_timestamp(line_number, timestamp, &mut last_timestamp)?;
                 if !current.is_empty() {
-                    frames.push(RawFrame::new(std::mem::take(&mut current)));
+                    frames.push(RawFrame::new_at(std::mem::take(&mut current), timestamp));
                 }
             }
             (EV_SYN, SYN_DROPPED) => {
-                if !current.is_empty() {
-                    frames.push(RawFrame::new(std::mem::take(&mut current)));
-                }
-                frames.push(RawFrame::new(vec![event]));
+                let timestamp = parse_frame_timestamp(line_number, timestamp.as_deref())?;
+                validate_frame_timestamp(line_number, timestamp, &mut last_timestamp)?;
+                current.clear();
+                frames.push(RawFrame::new_at(vec![event], timestamp));
             }
-            _ => current.push(event),
+            _ => {
+                if timestamp.is_some() {
+                    return Err(RawParseError::ExtraField { line: line_number });
+                }
+                current.push(event);
+            }
         }
     }
 
     if !current.is_empty() {
-        frames.push(RawFrame::new(current));
+        return Err(RawParseError::UnterminatedFrame {
+            line: input.lines().count().max(1),
+        });
     }
 
     Ok(frames)
 }
 
-fn parse_raw_event_line(line: usize, raw_line: &str) -> Result<RawEvent, RawParseError> {
+fn parse_raw_event_line(
+    line: usize,
+    raw_line: &str,
+) -> Result<(RawEvent, Option<String>), RawParseError> {
     let mut parts = raw_line.split_whitespace();
     let event_type = parts.next().ok_or(RawParseError::MissingField {
         line,
@@ -608,6 +633,7 @@ fn parse_raw_event_line(line: usize, raw_line: &str) -> Result<RawEvent, RawPars
         field: "value",
     })?;
 
+    let timestamp = parts.next().map(str::to_string);
     if parts.next().is_some() {
         return Err(RawParseError::ExtraField { line });
     }
@@ -616,7 +642,39 @@ fn parse_raw_event_line(line: usize, raw_line: &str) -> Result<RawEvent, RawPars
     let code = parse_event_code(line, event_type, kind, code)?;
     let value = parse_i32_field(line, "value", value)?;
 
-    Ok(RawEvent::new(kind, code, value))
+    Ok((RawEvent::new(kind, code, value), timestamp))
+}
+
+fn parse_frame_timestamp(line: usize, value: Option<&str>) -> Result<Duration, RawParseError> {
+    let value = value.ok_or(RawParseError::MissingField {
+        line,
+        field: "timestamp_us",
+    })?;
+    let micros = value
+        .parse::<u64>()
+        .map_err(|_| RawParseError::InvalidTimestamp {
+            line,
+            value: value.to_string(),
+        })?;
+    Ok(Duration::from_micros(micros))
+}
+
+fn validate_frame_timestamp(
+    line: usize,
+    timestamp: Duration,
+    last_timestamp: &mut Option<Duration>,
+) -> Result<(), RawParseError> {
+    if let Some(previous) = *last_timestamp {
+        if timestamp < previous {
+            return Err(RawParseError::NonMonotonicTimestamp {
+                line,
+                previous_us: previous.as_micros() as u64,
+                current_us: timestamp.as_micros() as u64,
+            });
+        }
+    }
+    *last_timestamp = Some(timestamp);
+    Ok(())
 }
 
 fn parse_event_type(line: usize, name: &str) -> Result<u16, RawParseError> {

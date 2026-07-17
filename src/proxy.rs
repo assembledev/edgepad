@@ -675,11 +675,17 @@ fn fetch_proxy_events(
     let events = device
         .fetch_events()
         .map_err(|err| format!("failed to read events from proxy device: {err}"))?
-        .map(|event| ProxyInputEvent {
-            raw: RawEvent::new(event.event_type().0, event.code(), event.value()),
-            timestamp: event.timestamp().duration_since(UNIX_EPOCH).ok(),
+        .map(|event| {
+            let timestamp = event
+                .timestamp()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| "proxy input event timestamp predates the Unix epoch".to_string())?;
+            Ok(ProxyInputEvent {
+                raw: RawEvent::new(event.event_type().0, event.code(), event.value()),
+                timestamp: Some(timestamp),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
     Ok(Some(events))
 }
 
