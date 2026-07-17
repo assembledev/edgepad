@@ -4,6 +4,16 @@ Replay fixtures are small text files that describe evdev-style input frames with
 
 They are for tests and debugging, not user configuration.
 
+## Recognition profile
+
+`edgepad replay` and `edgepad replay-raw` load the default user config so their active zones, edge
+width, swipe threshold, and sliders match the daemon. Select another config with `--config <file>`.
+For a hermetic fixture run that intentionally ignores user configuration, pass
+`--built-in-defaults`. The output always names the selected profile and recognizer settings. Replay
+does not execute configured actions.
+Replay files do not contain wall-clock frame timestamps. The configured tap duration is shown for
+context, but replay reports `tap_timing=unavailable` and cannot use it to accept or reject taps.
+
 ## Replay-format syntax
 
 Each non-empty non-comment line is one recognizer-level event:
@@ -119,7 +129,7 @@ These cover the minimum lifecycle cases before real device I/O: claimed edge con
 Run a replay-format fixture or capture through the current engine:
 
 ```bash
-cargo run -- replay tests/fixtures/left-edge-swipe-right.ev
+cargo run -- replay tests/fixtures/left-edge-swipe-right.ev --built-in-defaults
 ```
 
 Expected shape:
@@ -139,7 +149,7 @@ resync_required: false
 Run a raw capture through routing and output composition:
 
 ```bash
-cargo run -- replay-raw bug.raw.ev
+cargo run -- replay-raw bug.raw.ev --built-in-defaults
 ```
 
 Expected shape:

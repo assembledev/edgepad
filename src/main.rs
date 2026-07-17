@@ -13,7 +13,7 @@ use edgepad::config::{
 };
 use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, GestureDirection, SliderDirection,
-    Zone,
+    SliderSpec, Zone,
 };
 use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
 use edgepad::doctor::{run_doctor, DoctorCheck, DoctorConfig, DoctorReport, DoctorSection};
@@ -33,7 +33,7 @@ use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use edgepad::status::{run_status, StatusConfig, StatusReport};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> | edgepad replay-raw <raw.ev> | edgepad devices [--root <input-root>] [--all] | edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> [--config <file> | --built-in-defaults] | edgepad replay-raw <raw.ev> [--config <file> | --built-in-defaults] | edgepad devices [--root <input-root>] [--all] | edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const HELP: &str = "\
 Usage:
   edgepad <command> [options]
@@ -52,19 +52,31 @@ Global options:
   -h, --help     Show this help
   -V, --version  Show version
 ";
-const REPLAY_USAGE: &str = "usage: edgepad replay <fixture.ev>";
+const REPLAY_USAGE: &str =
+    "usage: edgepad replay <fixture.ev> [--config <file> | --built-in-defaults]";
 const REPLAY_HELP: &str = "\
 Usage:
-  edgepad replay <fixture.ev>
+  edgepad replay <fixture.ev> [--config <file> | --built-in-defaults]
 
 Replay a parsed fixture through the recognizer and print summary statistics.
+
+Options:
+      --config <file>        TOML config path
+                             [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
+      --built-in-defaults    Use the built-in recognizer profile instead of a config
 ";
-const REPLAY_RAW_USAGE: &str = "usage: edgepad replay-raw <raw.ev>";
+const REPLAY_RAW_USAGE: &str =
+    "usage: edgepad replay-raw <raw.ev> [--config <file> | --built-in-defaults]";
 const REPLAY_RAW_HELP: &str = "\
 Usage:
-  edgepad replay-raw <raw.ev>
+  edgepad replay-raw <raw.ev> [--config <file> | --built-in-defaults]
 
 Replay a raw evdev capture through recognizer routing and output composition.
+
+Options:
+      --config <file>        TOML config path
+                             [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
+      --built-in-defaults    Use the built-in recognizer profile instead of a config
 ";
 const DEVICES_USAGE: &str = "usage: edgepad devices [--root <input-root>] [--all]";
 const DEVICES_HELP: &str = "\
@@ -87,18 +99,21 @@ Options:
       --frames N             Stop after N frame boundaries
       --raw                  Write raw evdev events instead of replay fixture events
 ";
-const PROXY_USAGE: &str =
-    "usage: edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]";
+const PROXY_USAGE: &str = "usage: edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const PROXY_HELP: &str = "\
 Usage:
-  edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab) [--edge-width F]
+  edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]
 
 Options:
-      --device <event-node>  Physical touchpad event node to proxy
-      --frames N             Stop after N frame boundaries
-      --dry-run              Recognize and report without emitting output
-      --uinput --grab        Grab the physical device and emit through /dev/uinput
-      --edge-width F         Edge zone width as a fraction of the touchpad axis
+      --config <file>             TOML config path
+                                  [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
+      --built-in-defaults         Use the built-in recognizer profile instead of a config
+      --device auto|<event-node>  Override config device selection; required with built-in defaults
+      --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
+      --frames N                  Stop after N frame boundaries
+      --dry-run                   Recognize and report without emitting output
+      --uinput --grab             Grab the physical device and emit through /dev/uinput
+      --edge-width F              Override edge zone width from the selected profile
 ";
 const DAEMON_USAGE: &str = "usage: edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const DAEMON_HELP: &str = "\
@@ -174,12 +189,8 @@ fn run() -> Result<i32, String> {
                 print_help(REPLAY_HELP);
                 return Ok(0);
             }
-            let mut args = args.into_iter();
-            let path = args.next().ok_or_else(|| REPLAY_USAGE.to_string())?;
-            if args.next().is_some() {
-                return Err(REPLAY_USAGE.to_string());
-            }
-            replay(Path::new(&path)).map(|()| 0)
+            let args = parse_replay_args(args.into_iter(), REPLAY_USAGE, "replay")?;
+            replay(&args).map(|()| 0)
         }
         Some("replay-raw") => {
             let args = args.collect::<Vec<_>>();
@@ -187,12 +198,8 @@ fn run() -> Result<i32, String> {
                 print_help(REPLAY_RAW_HELP);
                 return Ok(0);
             }
-            let mut args = args.into_iter();
-            let path = args.next().ok_or_else(|| REPLAY_RAW_USAGE.to_string())?;
-            if args.next().is_some() {
-                return Err(REPLAY_RAW_USAGE.to_string());
-            }
-            replay_raw(Path::new(&path)).map(|()| 0)
+            let args = parse_replay_args(args.into_iter(), REPLAY_RAW_USAGE, "replay-raw")?;
+            replay_raw(&args).map(|()| 0)
         }
         Some("devices") => {
             let args = args.collect::<Vec<_>>();
@@ -272,11 +279,84 @@ struct DumpArgs {
     raw: bool,
 }
 
+#[derive(Default)]
+struct RecognitionProfileArgs {
+    config_path: Option<PathBuf>,
+    built_in_defaults: bool,
+}
+
+struct ReplayArgs {
+    path: PathBuf,
+    profile: RecognitionProfileArgs,
+}
+
 struct ProxyArgs {
-    device: PathBuf,
+    device_override: Option<DeviceConfig>,
+    input_root: PathBuf,
     frames: usize,
     mode: ProxyMode,
-    edge_width: f32,
+    edge_width_override: Option<f32>,
+    profile: RecognitionProfileArgs,
+}
+
+enum RecognitionProfileSource {
+    Config(PathBuf),
+    BuiltInDefaults,
+}
+
+struct RecognitionProfile {
+    source: RecognitionProfileSource,
+    device: Option<DeviceConfig>,
+    edge_widths: EdgeWidths,
+    engine_options: EngineOptions,
+    slider_specs: Vec<SliderSpec>,
+}
+
+impl RecognitionProfile {
+    fn from_config(path: PathBuf, config: EdgepadConfig) -> Self {
+        Self {
+            source: RecognitionProfileSource::Config(path),
+            device: Some(config.device.clone()),
+            edge_widths: config.active_edge_widths(),
+            engine_options: config.engine_options(),
+            slider_specs: config.slider_specs(),
+        }
+    }
+
+    fn built_in_defaults() -> Self {
+        Self {
+            source: RecognitionProfileSource::BuiltInDefaults,
+            device: None,
+            edge_widths: EdgeWidths::all(DEFAULT_EDGE_WIDTH),
+            engine_options: EngineOptions::default(),
+            slider_specs: Vec::new(),
+        }
+    }
+
+    fn override_edge_width(&mut self, width: f32) {
+        match self.source {
+            RecognitionProfileSource::BuiltInDefaults => {
+                self.edge_widths = EdgeWidths::all(width);
+            }
+            RecognitionProfileSource::Config(_) => {
+                self.edge_widths = EdgeWidths {
+                    left: active_width_override(self.edge_widths.left, width),
+                    right: active_width_override(self.edge_widths.right, width),
+                    top: active_width_override(self.edge_widths.top, width),
+                    bottom: active_width_override(self.edge_widths.bottom, width),
+                };
+            }
+        }
+    }
+
+    fn source_label(&self) -> String {
+        match &self.source {
+            RecognitionProfileSource::Config(path) => {
+                format!("config {}", path.display())
+            }
+            RecognitionProfileSource::BuiltInDefaults => "built-in defaults".to_string(),
+        }
+    }
 }
 
 struct DaemonArgs {
@@ -391,17 +471,59 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
     })
 }
 
+fn parse_replay_args(
+    mut args: impl Iterator<Item = String>,
+    usage: &str,
+    command: &str,
+) -> Result<ReplayArgs, String> {
+    let mut path = None;
+    let mut profile = RecognitionProfileArgs::default();
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" => {
+                profile.config_path = Some(args.next().ok_or_else(|| usage.to_string())?.into());
+            }
+            "--built-in-defaults" => profile.built_in_defaults = true,
+            other if other.starts_with('-') => {
+                return Err(format!("unknown {command} option {other}"));
+            }
+            _ if path.is_none() => path = Some(PathBuf::from(arg)),
+            _ => return Err(usage.to_string()),
+        }
+    }
+
+    validate_profile_args(&profile, command)?;
+    Ok(ReplayArgs {
+        path: path.ok_or_else(|| usage.to_string())?,
+        profile,
+    })
+}
+
 fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs, String> {
-    let mut device = None;
+    let mut device_override = None;
+    let mut input_root = PathBuf::from("/dev/input");
     let mut frames = None;
     let mut dry_run = false;
     let mut uinput = false;
     let mut grab = false;
-    let mut edge_width = DEFAULT_EDGE_WIDTH;
+    let mut edge_width_override = None;
+    let mut profile = RecognitionProfileArgs::default();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--device" => device = Some(args.next().ok_or_else(|| PROXY_USAGE.to_string())?.into()),
+            "--config" => {
+                profile.config_path =
+                    Some(args.next().ok_or_else(|| PROXY_USAGE.to_string())?.into());
+            }
+            "--built-in-defaults" => profile.built_in_defaults = true,
+            "--device" => {
+                let raw_value = args.next().ok_or_else(|| PROXY_USAGE.to_string())?;
+                device_override = Some(DeviceConfig::parse(&raw_value)?);
+            }
+            "--input-root" => {
+                input_root = args.next().ok_or_else(|| PROXY_USAGE.to_string())?.into();
+            }
             "--frames" => {
                 let raw_value = args.next().ok_or_else(|| PROXY_USAGE.to_string())?;
                 frames = Some(parse_positive_frame_limit(&raw_value)?);
@@ -411,7 +533,7 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
             "--grab" => grab = true,
             "--edge-width" => {
                 let raw_value = args.next().ok_or_else(|| PROXY_USAGE.to_string())?;
-                edge_width = parse_edge_width(&raw_value)?;
+                edge_width_override = Some(parse_edge_width(&raw_value)?);
             }
             "--no-grab" => return Err("unknown proxy option --no-grab".to_string()),
             other if other.starts_with('-') => return Err(format!("unknown proxy option {other}")),
@@ -419,7 +541,6 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
         }
     }
 
-    let device = device.ok_or_else(|| PROXY_USAGE.to_string())?;
     let frames = frames.ok_or_else(|| PROXY_USAGE.to_string())?;
     let mode = match (dry_run, uinput, grab) {
         (true, false, false) => ProxyMode::DryRun,
@@ -431,13 +552,25 @@ fn parse_proxy_args(mut args: impl Iterator<Item = String>) -> Result<ProxyArgs,
         }
         _ => return Err("proxy modes are mutually exclusive".to_string()),
     };
+    validate_profile_args(&profile, "proxy")?;
 
     Ok(ProxyArgs {
-        device,
+        device_override,
+        input_root,
         frames,
         mode,
-        edge_width,
+        edge_width_override,
+        profile,
     })
+}
+
+fn validate_profile_args(profile: &RecognitionProfileArgs, command: &str) -> Result<(), String> {
+    if profile.built_in_defaults && profile.config_path.is_some() {
+        return Err(format!(
+            "{command} --config and --built-in-defaults are mutually exclusive"
+        ));
+    }
+    Ok(())
 }
 
 fn parse_daemon_args(mut args: impl Iterator<Item = String>) -> Result<DaemonArgs, String> {
@@ -506,6 +639,46 @@ fn load_daemon_config(path: &Path) -> Result<EdgepadConfig, String> {
     }
 }
 
+fn load_recognition_profile(
+    profile_args: &RecognitionProfileArgs,
+) -> Result<RecognitionProfile, String> {
+    if profile_args.built_in_defaults {
+        return Ok(RecognitionProfile::built_in_defaults());
+    }
+
+    let path = match &profile_args.config_path {
+        Some(path) => path.clone(),
+        None => default_edgepad_config_path()?,
+    };
+    let config = load_recognition_config(&path)?;
+    if config.gestures.is_empty() && config.sliders.is_empty() {
+        return Err(format!(
+            "recognition config {} has no bindings; add at least one [[gestures]] or [[sliders]] entry, or pass --built-in-defaults",
+            path.display()
+        ));
+    }
+
+    Ok(RecognitionProfile::from_config(path, config))
+}
+
+fn load_recognition_config(path: &Path) -> Result<EdgepadConfig, String> {
+    match fs::metadata(path) {
+        Ok(metadata) if !metadata.is_file() => Err(format!(
+            "recognition config path is not a file: {}",
+            path.display()
+        )),
+        Ok(_) => load_edgepad_config(path),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Err(format!(
+            "recognition config not found: {}; pass --config <file> or --built-in-defaults",
+            path.display()
+        )),
+        Err(err) => Err(format!(
+            "failed to inspect recognition config {}: {err}",
+            path.display()
+        )),
+    }
+}
+
 fn validate_daemon_config(config: &EdgepadConfig, config_path: &Path) -> Result<(), String> {
     if config.gestures.is_empty() && config.sliders.is_empty() {
         return Err(format!(
@@ -529,6 +702,14 @@ fn parse_positive_frame_limit(raw_value: &str) -> Result<usize, String> {
 
 fn parse_edge_width(raw_value: &str) -> Result<f32, String> {
     edgepad::config::parse_edge_width(raw_value)
+}
+
+fn active_width_override(active_width: f32, override_width: f32) -> f32 {
+    if active_width > 0.0 {
+        override_width
+    } else {
+        0.0
+    }
 }
 
 fn devices(root: &Path, show_all: bool) -> Result<(), String> {
@@ -772,8 +953,20 @@ fn dump_next_command(format: DumpFormat, out_path: &Path) -> String {
 }
 
 fn proxy(args: &ProxyArgs) -> Result<(), String> {
+    let mut profile = load_recognition_profile(&args.profile)?;
+    if let Some(edge_width) = args.edge_width_override {
+        profile.override_edge_width(edge_width);
+    }
+    let device = args
+        .device_override
+        .as_ref()
+        .or(profile.device.as_ref())
+        .ok_or_else(|| "proxy --built-in-defaults requires --device auto|<event-node>".to_string())?
+        .resolve(&args.input_root)?;
+
+    print_recognition_profile(&profile, true);
     let summary = run_proxy(&ProxyRunConfig {
-        device_path: args.device.clone(),
+        device_path: device,
         limit: ProxyRunLimit::Frames {
             frame_boundaries: args.frames,
             stop_after_limit: match args.mode {
@@ -781,9 +974,9 @@ fn proxy(args: &ProxyArgs) -> Result<(), String> {
                 ProxyMode::UinputGrab => StopAfterFrameLimit::WhenIdle,
             },
         },
-        edge_widths: EdgeWidths::all(args.edge_width),
-        engine_options: EngineOptions::default(),
-        slider_specs: Vec::new(),
+        edge_widths: profile.edge_widths,
+        engine_options: profile.engine_options,
+        slider_specs: profile.slider_specs,
         mode: args.mode,
     })?;
     print_proxy_summary(&summary);
@@ -1112,16 +1305,39 @@ fn edge_widths_label(widths: EdgeWidths) -> String {
     )
 }
 
-fn replay(path: &Path) -> Result<(), String> {
-    let input = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+fn print_recognition_profile(profile: &RecognitionProfile, tap_timing_available: bool) {
+    println!("profile: {}", profile.source_label());
+    println!(
+        "profile_settings: edge_widths={} tap_min_duration_ms={} tap_timing={} swipe_min_distance={:.3} sliders={}",
+        edge_widths_label(profile.edge_widths),
+        profile.engine_options.tap_min_duration.as_millis(),
+        if tap_timing_available {
+            "available"
+        } else {
+            "unavailable"
+        },
+        profile.engine_options.swipe_min_distance,
+        profile.slider_specs.len()
+    );
+}
+
+fn replay(args: &ReplayArgs) -> Result<(), String> {
+    let profile = load_recognition_profile(&args.profile)?;
+    print_recognition_profile(&profile, false);
+    let input = fs::read_to_string(&args.path)
+        .map_err(|err| format!("failed to read {}: {err}", args.path.display()))?;
     let replay = parse_replay_file(&input).map_err(|err| format!("parse failed: {err:?}"))?;
 
     let (capability_source, capabilities) = match replay.capabilities {
         Some(capabilities) => ("metadata", capabilities),
         None => ("defaults", default_capabilities()),
     };
-    let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+    let mut engine = Engine::with_options(
+        capabilities,
+        profile.edge_widths,
+        profile.slider_specs.clone(),
+        profile.engine_options,
+    );
 
     let stats = replay_stats(&replay.frames);
     let outputs =
@@ -1193,16 +1409,23 @@ fn replay(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn replay_raw(path: &Path) -> Result<(), String> {
-    let input = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+fn replay_raw(args: &ReplayArgs) -> Result<(), String> {
+    let profile = load_recognition_profile(&args.profile)?;
+    print_recognition_profile(&profile, false);
+    let input = fs::read_to_string(&args.path)
+        .map_err(|err| format!("failed to read {}: {err}", args.path.display()))?;
     let raw_dump = parse_raw_dump_file(&input).map_err(|err| format!("parse failed: {err:?}"))?;
 
     let (capability_source, capabilities) = match raw_dump.capabilities {
         Some(capabilities) => ("metadata", capabilities),
         None => ("defaults", default_capabilities()),
     };
-    let mut engine = Engine::new(capabilities, EdgeWidths::all(0.10));
+    let mut engine = Engine::with_options(
+        capabilities,
+        profile.edge_widths,
+        profile.slider_specs.clone(),
+        profile.engine_options,
+    );
     let mut composer = RawOutputComposer::new(capabilities);
 
     let raw_events = raw_dump

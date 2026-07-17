@@ -6,6 +6,11 @@ The live path reads a physical touchpad, claims contacts that start inside confi
 
 ## Modes
 
+The bounded `proxy` uses the recognizer profile from the default user config. `--config <file>`
+selects another config, while `--built-in-defaults` opts into the standalone profile and requires an
+explicit `--device`. CLI `--device` and `--edge-width` values override the selected config. Proxy
+reports gestures and slider steps but does not execute configured actions.
+
 ### Dry-run proxy
 
 `proxy --dry-run` is read-only inspection. It reads live frames, routes them through the recognizer and output composer, prints counters, and exits after the requested frame budget.

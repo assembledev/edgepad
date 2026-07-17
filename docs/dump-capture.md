@@ -16,6 +16,16 @@ edgepad devices --all
 
 Reading `/dev/input/event*` may require `sudo`, the `input` group, or seat/logind ACLs.
 
+## Recognition profile
+
+`edgepad replay`, `edgepad replay-raw`, and `edgepad proxy` use the default user config unless
+`--config <file>` selects another one. This keeps active zones, edge width, swipe threshold, and
+sliders aligned with the daemon. Use `--built-in-defaults` only when intentionally testing the
+standalone recognizer profile. The commands print `profile: config ...` or
+`profile: built-in defaults`; replay never executes configured actions.
+Saved captures do not include frame timestamps, so replay cannot re-evaluate
+`tap_min_duration_ms`; its profile line reports `tap_timing=unavailable`.
+
 ## Replay-format capture
 
 Replay-format capture keeps the Type-B multitouch events used by the recognizer:

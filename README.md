@@ -290,6 +290,9 @@ Common problems:
 
 ## Diagnostics and capture
 
+`proxy`, `replay`, and `replay-raw` use the normal edgepad config. Pass `--config <file>` to use
+another config, or `--built-in-defaults` to ignore it.
+
 Device discovery is read-only:
 
 ```bash

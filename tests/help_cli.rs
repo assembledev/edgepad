@@ -79,10 +79,16 @@ fn subcommand_help_flags_print_command_help() {
         ),
         (
             "proxy",
-            "edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab)",
+            "edgepad proxy --frames N (--dry-run | --uinput --grab)",
         ),
-        ("replay", "edgepad replay <fixture.ev>"),
-        ("replay-raw", "edgepad replay-raw <raw.ev>"),
+        (
+            "replay",
+            "edgepad replay <fixture.ev> [--config <file> | --built-in-defaults]",
+        ),
+        (
+            "replay-raw",
+            "edgepad replay-raw <raw.ev> [--config <file> | --built-in-defaults]",
+        ),
     ] {
         for flag in ["--help", "-h"] {
             let output = edgepad()

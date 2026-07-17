@@ -6,7 +6,7 @@ fn edgepad() -> Command {
 }
 
 #[test]
-fn proxy_cli_requires_device_frames_and_mode() {
+fn proxy_cli_requires_frames_and_mode() {
     let output = edgepad()
         .arg("proxy")
         .arg("--device")
@@ -21,9 +21,7 @@ fn proxy_cli_requires_device_frames_and_mode() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(
-            "edgepad proxy --device <event-node> --frames N (--dry-run | --uinput --grab)"
-        ),
+        stderr.contains("edgepad proxy --frames N (--dry-run | --uinput --grab)"),
         "stderr was: {stderr}"
     );
 }
@@ -149,6 +147,7 @@ fn proxy_cli_accepts_uinput_grab_arguments_before_device_open() {
         .arg("2")
         .arg("--uinput")
         .arg("--grab")
+        .arg("--built-in-defaults")
         .output()
         .expect("edgepad binary should run");
 
@@ -203,6 +202,7 @@ fn proxy_cli_accepts_dry_run_arguments_before_device_open() {
         .arg("--frames")
         .arg("2")
         .arg("--dry-run")
+        .arg("--built-in-defaults")
         .output()
         .expect("edgepad binary should run");
 
@@ -235,6 +235,7 @@ fn proxy_cli_accepts_edge_width_before_device_open() {
         .arg("--edge-width")
         .arg("0.20")
         .arg("--dry-run")
+        .arg("--built-in-defaults")
         .output()
         .expect("edgepad binary should run");
 
@@ -276,6 +277,154 @@ fn proxy_cli_rejects_invalid_edge_width_before_device_open() {
         !stderr.contains("failed to open device"),
         "edge-width validation should happen before device open, stderr was: {stderr}"
     );
+}
+
+#[test]
+fn proxy_cli_requires_device_with_built_in_defaults() {
+    let output = edgepad()
+        .arg("proxy")
+        .arg("--frames")
+        .arg("2")
+        .arg("--dry-run")
+        .arg("--built-in-defaults")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(!output.status.success(), "missing device should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("proxy --built-in-defaults requires --device"),
+        "stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn proxy_cli_uses_config_device_and_recognition_profile() {
+    let config_path = unique_temp_path("edgepad-proxy-config-profile.toml");
+    let missing_device = unique_temp_path("edgepad-proxy-config-device");
+    let _ = std::fs::remove_file(&config_path);
+    let _ = std::fs::remove_file(&missing_device);
+    write_proxy_config(&config_path, &missing_device);
+
+    let output = edgepad()
+        .arg("proxy")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--frames")
+        .arg("2")
+        .arg("--edge-width")
+        .arg("0.22")
+        .arg("--dry-run")
+        .output()
+        .expect("edgepad binary should run");
+
+    std::fs::remove_file(&config_path).expect("config should be removed");
+
+    assert!(
+        !output.status.success(),
+        "proxy should still fail for missing configured device"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains(&format!("profile: config {}", config_path.display())),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("edge_widths=left=0.220 right=0.000 top=0.000 bottom=0.000"),
+        "stdout was: {stdout}"
+    );
+    assert!(stdout.contains("sliders=1"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("tap_timing=available"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stderr.contains(&missing_device.display().to_string()),
+        "stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn proxy_cli_device_override_wins_over_config_device() {
+    let config_path = unique_temp_path("edgepad-proxy-device-override-config.toml");
+    let configured_device = unique_temp_path("edgepad-proxy-configured-device");
+    let override_device = unique_temp_path("edgepad-proxy-override-device");
+    let _ = std::fs::remove_file(&config_path);
+    let _ = std::fs::remove_file(&configured_device);
+    let _ = std::fs::remove_file(&override_device);
+    write_proxy_config(&config_path, &configured_device);
+
+    let output = edgepad()
+        .arg("proxy")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--device")
+        .arg(&override_device)
+        .arg("--frames")
+        .arg("2")
+        .arg("--dry-run")
+        .output()
+        .expect("edgepad binary should run");
+
+    std::fs::remove_file(&config_path).expect("config should be removed");
+
+    assert!(
+        !output.status.success(),
+        "missing override device should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&override_device.display().to_string()),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        !stderr.contains(&configured_device.display().to_string()),
+        "CLI device should replace config device, stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn proxy_cli_rejects_config_with_built_in_defaults() {
+    let output = edgepad()
+        .arg("proxy")
+        .arg("--config")
+        .arg("/tmp/edgepad.toml")
+        .arg("--built-in-defaults")
+        .arg("--frames")
+        .arg("2")
+        .arg("--dry-run")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(!output.status.success(), "conflicting profiles should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("proxy --config and --built-in-defaults are mutually exclusive"),
+        "stderr was: {stderr}"
+    );
+}
+
+fn write_proxy_config(path: &std::path::Path, device: &std::path::Path) {
+    std::fs::write(
+        path,
+        format!(
+            r#"
+device = "{}"
+edge_width = 0.17
+tap_min_duration_ms = 120
+swipe_min_distance = 0.03
+
+[[sliders]]
+zone = "left"
+step = 0.05
+up = ["notify-send", "up"]
+down = ["notify-send", "down"]
+"#,
+            device.display()
+        ),
+    )
+    .expect("config should be written");
 }
 
 fn unique_temp_path(prefix: &str) -> PathBuf {

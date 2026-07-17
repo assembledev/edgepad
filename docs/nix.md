@@ -158,7 +158,7 @@ Run a command without installing:
 
 ```bash
 nix run .#edgepad -- devices
-nix run .#edgepad -- replay tests/fixtures/left-edge-swipe-right.ev
+nix run .#edgepad -- replay tests/fixtures/left-edge-swipe-right.ev --built-in-defaults
 ```
 
 From outside the repository, use the GitHub flake:
@@ -208,14 +208,18 @@ sudo ./result/bin/edgepad dump --device /dev/input/eventX --out bug.ev --frames 
 Dry-run proxy mode reads and routes events without grabbing the touchpad:
 
 ```bash
-sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
+sudo ./result/bin/edgepad proxy \
+  --config "$HOME/.config/edgepad/edgepad.toml" \
+  --device /dev/input/eventX --frames 300 --dry-run
 ```
 
 The live proxy below grabs the physical touchpad and sends normal pointer input through a temporary
 virtual touchpad until the frame limit is reached:
 
 ```bash
-sudo ./result/bin/edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
+sudo ./result/bin/edgepad proxy \
+  --config "$HOME/.config/edgepad/edgepad.toml" \
+  --device /dev/input/eventX --frames 300 --uinput --grab
 ```
 
 For normal desktop use, run the Home Manager service instead of a root shell command. Gesture
