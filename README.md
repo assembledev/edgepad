@@ -24,7 +24,7 @@ The touchpad is split into four edge zones: `left`, `right`, `top`, and `bottom`
 
 - A **gesture** runs one action when the finger lifts. It can match either a directional swipe or a
   tap.
-- A **tap** is a gesture with no meaningful movement.
+- A **tap** is a gesture whose contact never leaves the configured movement tolerance.
 - A **slider** runs repeated steps while the finger moves, which is useful for volume or brightness.
 - An **action** is the command that edgepad starts for a gesture or slider step.
 
@@ -193,6 +193,9 @@ tap_min_duration_ms = 80
 `swipe_min_distance` is the minimum normalized touchpad travel that turns an edge contact into a
 directional gesture. It defaults to `0.02`, or 2% of the corresponding touchpad axis. Smaller
 movement remains a tap, so the same physical gesture behaves consistently across coordinate ranges.
+Once a contact reaches this distance it no longer qualifies as a tap, even if it returns to its
+starting point. A slider contact that emits any steps is also consumed by the slider and does not
+emit an additional tap when released.
 
 ```toml
 swipe_min_distance = 0.02

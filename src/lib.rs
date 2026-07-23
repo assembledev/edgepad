@@ -218,11 +218,19 @@ pub mod core {
         Passthrough,
     }
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ContactPhase {
+        TapCandidate,
+        Motion,
+        ConsumedBySlider,
+    }
+
     #[derive(Debug, Clone)]
     struct SlotState {
         active: bool,
         tracking_id: Option<i32>,
         ownership: Ownership,
+        contact_phase: ContactPhase,
         start_x: Option<i32>,
         start_y: Option<i32>,
         current_x: Option<i32>,
@@ -238,6 +246,7 @@ pub mod core {
                 active: false,
                 tracking_id: None,
                 ownership: Ownership::Unknown,
+                contact_phase: ContactPhase::TapCandidate,
                 start_x: None,
                 start_y: None,
                 current_x: None,
@@ -252,6 +261,33 @@ pub mod core {
     impl SlotState {
         fn reset(&mut self) {
             *self = Self::default();
+        }
+
+        fn observe_position(&mut self, capabilities: Capabilities, swipe_min_distance: f32) {
+            if self.contact_phase != ContactPhase::TapCandidate {
+                return;
+            }
+
+            let moved_x = match (self.start_x, self.current_x) {
+                (Some(start), Some(current)) => {
+                    capabilities.x.normalize_delta(start, current).abs() >= swipe_min_distance
+                }
+                _ => false,
+            };
+            let moved_y = match (self.start_y, self.current_y) {
+                (Some(start), Some(current)) => {
+                    capabilities.y.normalize_delta(start, current).abs() >= swipe_min_distance
+                }
+                _ => false,
+            };
+
+            if moved_x || moved_y {
+                self.contact_phase = ContactPhase::Motion;
+            }
+        }
+
+        fn consume_by_slider(&mut self) {
+            self.contact_phase = ContactPhase::ConsumedBySlider;
         }
     }
 
@@ -418,6 +454,7 @@ pub mod core {
                         slot_state.active = true;
                         slot_state.tracking_id = Some(tracking_id);
                         slot_state.ownership = Ownership::Unknown;
+                        slot_state.contact_phase = ContactPhase::TapCandidate;
                         slot_state.started_at = timestamp;
                         slot_state.held_events.push(event);
                     }
@@ -428,19 +465,25 @@ pub mod core {
                         self.release_current_slot(event, timestamp, &mut output)?;
                     }
                     Event::X(x) => {
+                        let capabilities = self.caps;
+                        let swipe_min_distance = self.options.swipe_min_distance;
                         let slot_state = self.slot_mut(self.current_slot)?;
                         slot_state.current_x = Some(x);
                         if slot_state.active && slot_state.start_x.is_none() {
                             slot_state.start_x = Some(x);
                         }
+                        slot_state.observe_position(capabilities, swipe_min_distance);
                         self.route_event_for_current_slot(event, &mut output)?;
                     }
                     Event::Y(y) => {
+                        let capabilities = self.caps;
+                        let swipe_min_distance = self.options.swipe_min_distance;
                         let slot_state = self.slot_mut(self.current_slot)?;
                         slot_state.current_y = Some(y);
                         if slot_state.active && slot_state.start_y.is_none() {
                             slot_state.start_y = Some(y);
                         }
+                        slot_state.observe_position(capabilities, swipe_min_distance);
                         self.route_event_for_current_slot(event, &mut output)?;
                     }
                 }
@@ -645,22 +688,30 @@ pub mod core {
             };
 
             while position - anchor >= spec.step {
-                output.slider_steps.push(SliderStep {
-                    zone,
-                    direction: positive_slider_direction(spec.axis),
-                    slot,
-                    tracking_id,
-                });
+                push_slider_step(
+                    slot_state,
+                    output,
+                    SliderStep {
+                        zone,
+                        direction: positive_slider_direction(spec.axis),
+                        slot,
+                        tracking_id,
+                    },
+                );
                 anchor += spec.step;
             }
 
             while anchor - position >= spec.step {
-                output.slider_steps.push(SliderStep {
-                    zone,
-                    direction: negative_slider_direction(spec.axis),
-                    slot,
-                    tracking_id,
-                });
+                push_slider_step(
+                    slot_state,
+                    output,
+                    SliderStep {
+                        zone,
+                        direction: negative_slider_direction(spec.axis),
+                        slot,
+                        tracking_id,
+                    },
+                );
                 anchor -= spec.step;
             }
 
@@ -739,6 +790,11 @@ pub mod core {
         })
     }
 
+    fn push_slider_step(slot_state: &mut SlotState, output: &mut FrameOutput, step: SliderStep) {
+        slot_state.consume_by_slider();
+        output.slider_steps.push(step);
+    }
+
     fn classify_gesture(
         capabilities: Capabilities,
         slot: i32,
@@ -754,29 +810,52 @@ pub mod core {
         let dx = capabilities.x.normalize_delta(start_x, current_x);
         let dy = capabilities.y.normalize_delta(start_y, current_y);
 
-        let direction =
-            if dx.abs() < options.swipe_min_distance && dy.abs() < options.swipe_min_distance {
-                if !tap_duration_is_valid(state.started_at, released_at, options.tap_min_duration) {
-                    return None;
+        let final_direction = direction_for_displacement(dx, dy, options.swipe_min_distance);
+        let direction = match state.contact_phase {
+            ContactPhase::TapCandidate => match final_direction {
+                Some(direction) => direction,
+                None => {
+                    if !tap_duration_is_valid(
+                        state.started_at,
+                        released_at,
+                        options.tap_min_duration,
+                    ) {
+                        return None;
+                    }
+                    GestureDirection::Tap
                 }
-                GestureDirection::Tap
-            } else if dx.abs() >= dy.abs() {
-                if dx >= 0.0 {
-                    GestureDirection::Right
-                } else {
-                    GestureDirection::Left
-                }
-            } else if dy >= 0.0 {
-                GestureDirection::Down
-            } else {
-                GestureDirection::Up
-            };
+            },
+            ContactPhase::Motion => final_direction?,
+            ContactPhase::ConsumedBySlider => return None,
+        };
 
         Some(Gesture {
             zone,
             direction,
             slot,
             tracking_id: state.tracking_id?,
+        })
+    }
+
+    fn direction_for_displacement(
+        dx: f32,
+        dy: f32,
+        swipe_min_distance: f32,
+    ) -> Option<GestureDirection> {
+        if dx.abs() < swipe_min_distance && dy.abs() < swipe_min_distance {
+            return None;
+        }
+
+        Some(if dx.abs() >= dy.abs() {
+            if dx >= 0.0 {
+                GestureDirection::Right
+            } else {
+                GestureDirection::Left
+            }
+        } else if dy >= 0.0 {
+            GestureDirection::Down
+        } else {
+            GestureDirection::Up
         })
     }
 
