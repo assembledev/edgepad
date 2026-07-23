@@ -144,7 +144,7 @@ in
 
     tapMinDurationMs = lib.mkOption {
       type = lib.types.ints.between 0 10000;
-      default = 80;
+      default = 40;
       description = "Minimum edge contact duration in milliseconds required for a tap gesture.";
     };
 

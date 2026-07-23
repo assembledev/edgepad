@@ -124,7 +124,7 @@ Example config:
 ```toml
 device = "auto"
 edge_width = 0.10
-tap_min_duration_ms = 80
+tap_min_duration_ms = 40
 swipe_min_distance = 0.02
 
 [[sliders]]
@@ -184,10 +184,10 @@ device = "auto"
 edge_width = 0.10
 ```
 
-`tap_min_duration_ms` ignores very short edge taps. It defaults to `80`; set it to `0` to disable the guard.
+`tap_min_duration_ms` ignores very short edge taps. It defaults to `40`; set it to `0` to disable the guard.
 
 ```toml
-tap_min_duration_ms = 80
+tap_min_duration_ms = 40
 ```
 
 `swipe_min_distance` is the minimum normalized touchpad travel that turns an edge contact into a

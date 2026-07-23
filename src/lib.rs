@@ -18,7 +18,7 @@ pub mod core {
     use std::collections::BTreeSet;
     use std::time::Duration;
 
-    pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 80;
+    pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 40;
     pub const DEFAULT_SWIPE_MIN_DISTANCE: f32 = 0.02;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

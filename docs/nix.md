@@ -76,7 +76,7 @@ Import the Home Manager module in your home configuration:
     enable = true;
     device = "auto";
     edgeWidth = 0.10;
-    tapMinDurationMs = 80;
+    tapMinDurationMs = 40;
     swipeMinDistance = 0.02;
 
     gestures = [

@@ -267,7 +267,7 @@ fn route_raw_frame_suppresses_short_timed_tap() {
         &mut engine,
         &RawFrame::new_at(
             vec![RawEvent::abs_mt_slot(0), RawEvent::abs_mt_tracking_id(-1)],
-            Duration::from_millis(1079),
+            Duration::from_millis(1039),
         ),
     )
     .expect("edge release should route");
