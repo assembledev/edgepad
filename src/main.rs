@@ -15,7 +15,9 @@ use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, GestureDirection, SliderDirection,
     SliderSpec, Zone,
 };
-use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
+use edgepad::device::{
+    discover_device_report, format_device_line, touchpad_candidates, wait_for_raw_device_events,
+};
 use edgepad::doctor::{run_doctor, DoctorCheck, DoctorConfig, DoctorReport, DoctorSection};
 use edgepad::dump::{
     capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
@@ -93,6 +95,9 @@ const DUMP_HELP: &str = "\
 Usage:
   edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]
 
+The physical device must not be grabbed by another process.
+Stop edgepad.service before capturing when the daemon owns the touchpad.
+
 Options:
       --device auto|<event-node>  Physical touchpad selection
       --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
@@ -154,6 +159,7 @@ Options:
       --service <unit>            systemd user unit to inspect [default: edgepad.service]
 ";
 const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
+const DUMP_FIRST_EVENT_WARNING_TIMEOUT: Duration = Duration::from_secs(3);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DAEMON_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -893,13 +899,33 @@ fn dump(
         .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
     let mut total = WriteEventsResult::default();
 
-    loop {
-        let events = device.fetch_events().map_err(|err| {
+    eprintln!("edgepad dump: device={}", device_path.display());
+    eprintln!("edgepad dump: waiting for input events");
+    let mut no_events_warning_emitted =
+        !wait_for_raw_device_events(&device, DUMP_FIRST_EVENT_WARNING_TIMEOUT).map_err(|err| {
             format!(
-                "failed to read events from {}: {err}",
+                "failed to wait for events from {}: {err}",
                 device_path.display()
             )
         })?;
+    if no_events_warning_emitted {
+        eprintln!("{}", dump_no_events_warning(device_path));
+    }
+
+    loop {
+        let mut events = device
+            .fetch_events()
+            .map_err(|err| {
+                format!(
+                    "failed to read events from {}: {err}",
+                    device_path.display()
+                )
+            })?
+            .peekable();
+        if no_events_warning_emitted && events.peek().is_some() {
+            eprintln!("edgepad dump: input events received; capture started");
+            no_events_warning_emitted = false;
+        }
         let result = if raw {
             write_raw_events_with_limit(&mut writer, events, &mut remaining_frames)
         } else {
@@ -919,6 +945,14 @@ fn dump(
             return Ok(());
         }
     }
+}
+
+fn dump_no_events_warning(device_path: &Path) -> String {
+    format!(
+        "edgepad dump: no events received from {} after {}s; device may be grabbed; continuing to wait (stop edgepad.service before capturing)",
+        device_path.display(),
+        DUMP_FIRST_EVENT_WARNING_TIMEOUT.as_secs()
+    )
 }
 
 fn print_dump_summary(
@@ -1587,6 +1621,14 @@ mod tests {
         assert_eq!(
             dump_next_command(DumpFormat::Replay, Path::new("bug.ev")),
             "edgepad replay bug.ev"
+        );
+    }
+
+    #[test]
+    fn dump_no_events_warning_explains_likely_grab() {
+        assert_eq!(
+            dump_no_events_warning(Path::new("/dev/input/event10")),
+            "edgepad dump: no events received from /dev/input/event10 after 3s; device may be grabbed; continuing to wait (stop edgepad.service before capturing)"
         );
     }
 

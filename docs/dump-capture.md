@@ -16,6 +16,25 @@ edgepad devices --all
 
 Reading `/dev/input/event*` may require `sudo`, the `input` group, or seat/logind ACLs.
 
+## Running daemon
+
+The live edgepad daemon holds the physical touchpad with `EVIOCGRAB`, so a separate `edgepad dump`
+process cannot receive physical events while `edgepad.service` is running. Stop the service before
+capturing and start it again afterward:
+
+```bash
+(
+  systemctl --user stop edgepad.service
+  trap 'systemctl --user start edgepad.service' EXIT
+  edgepad dump --device auto --out bug.ev --frames 300
+)
+```
+
+`dump` never stops the service or probes the device with `EVIOCGRAB`. It prints the selected device
+and waits normally; if no input arrives within three seconds, it warns that the device may be
+grabbed and continues waiting. If input arrives later, it confirms that capture has started and
+writes the events normally.
+
 ## Recognition profile
 
 `edgepad replay`, `edgepad replay-raw`, and `edgepad proxy` use the default user config unless

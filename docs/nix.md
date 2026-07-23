@@ -205,6 +205,10 @@ sudo ./result/bin/edgepad dump --device auto --out bug.ev --frames 300
 ./result/bin/edgepad replay bug.ev
 ```
 
+Stop `edgepad.service` before running `dump`; the daemon's `EVIOCGRAB` prevents a separate process
+from receiving physical events. `dump` warns when no events arrive but does not stop or restart the
+service.
+
 Dry-run proxy mode reads and routes events without grabbing the touchpad:
 
 ```bash

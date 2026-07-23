@@ -1,7 +1,10 @@
 use std::fs;
 use std::io;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use evdev::raw_stream::RawDevice;
 use evdev::{AbsoluteAxisCode, Device, PropType};
 
 use crate::uinput::DEFAULT_VIRTUAL_TOUCHPAD_NAME;
@@ -110,6 +113,40 @@ pub fn discover_device_report(input_root: &Path) -> io::Result<DiscoveryReport> 
     })
 }
 
+pub fn wait_for_raw_device_events(device: &RawDevice, timeout: Duration) -> io::Result<bool> {
+    wait_for_fd_readable(device.as_raw_fd(), timeout)
+}
+
+fn wait_for_fd_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = poll_timeout_ms(timeout);
+
+    loop {
+        let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+        if result >= 0 {
+            return Ok(result > 0);
+        }
+
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+fn poll_timeout_ms(timeout: Duration) -> i32 {
+    let millis = timeout.as_millis();
+    if millis == 0 {
+        0
+    } else {
+        millis.min(i32::MAX as u128) as i32
+    }
+}
+
 pub fn touchpad_candidates(summaries: &[DeviceSummary]) -> Vec<&DeviceSummary> {
     summaries
         .iter()
@@ -203,5 +240,31 @@ fn format_axis(axis: Option<AxisInfo>) -> String {
     match axis {
         Some(axis) => format!("{}..={}", axis.min, axis.max),
         None => "n/a".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    use super::*;
+
+    #[test]
+    fn wait_for_fd_readable_reports_timeout_and_ready_data() {
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair should be created");
+
+        assert!(!wait_for_fd_readable(reader.as_raw_fd(), Duration::ZERO)
+            .expect("empty socket should be polled"));
+
+        writer
+            .write_all(b"x")
+            .expect("socket should accept test data");
+
+        assert!(
+            wait_for_fd_readable(reader.as_raw_fd(), Duration::from_millis(100))
+                .expect("readable socket should be polled")
+        );
     }
 }

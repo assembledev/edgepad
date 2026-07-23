@@ -312,6 +312,11 @@ edgepad dump --device auto --out bug.ev --frames 300
 edgepad replay bug.ev
 ```
 
+Stop `edgepad.service` before capture: the running daemon holds the physical touchpad with
+`EVIOCGRAB`, so another reader receives no events. `dump` warns after three seconds without input
+but never stops the service automatically. If input arrives later, it confirms that capture has
+started and records it normally.
+
 Capture raw evdev events for passthrough/output debugging:
 
 ```bash

@@ -13,6 +13,7 @@ use crate::core::{
     Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureDirection, ResyncContact,
     SliderDirection, SliderSpec, SliderStep, Zone,
 };
+use crate::device::wait_for_raw_device_events;
 use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
     extract_core_events, is_pointer_button_code, route_raw_frame, route_resync_contacts, RawEvent,
@@ -672,23 +673,9 @@ fn fetch_proxy_events(
     timeout: Option<Duration>,
 ) -> Result<Option<Vec<ProxyInputEvent>>, String> {
     if let Some(timeout) = timeout {
-        let timeout_ms = poll_timeout_ms(timeout);
-        let mut poll_fd = libc::pollfd {
-            fd: device.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = loop {
-            let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
-            if result >= 0 {
-                break result;
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                return Err(format!("failed to wait for proxy events: {err}"));
-            }
-        };
-        if ready == 0 {
+        let ready = wait_for_raw_device_events(device, timeout)
+            .map_err(|err| format!("failed to wait for proxy events: {err}"))?;
+        if !ready {
             return Ok(None);
         }
     }
@@ -708,15 +695,6 @@ fn fetch_proxy_events(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(Some(events))
-}
-
-fn poll_timeout_ms(timeout: Duration) -> i32 {
-    let millis = timeout.as_millis();
-    if millis == 0 {
-        0
-    } else {
-        millis.min(i32::MAX as u128) as i32
-    }
 }
 
 fn process_proxy_raw_frame<S, H>(

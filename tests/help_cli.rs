@@ -116,3 +116,23 @@ fn subcommand_help_flags_print_command_help() {
         }
     }
 }
+
+#[test]
+fn dump_help_explains_running_daemon_limit() {
+    let output = edgepad()
+        .arg("dump")
+        .arg("--help")
+        .output()
+        .expect("edgepad binary should run");
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("must not be grabbed by another process"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        stdout.contains("Stop edgepad.service before capturing"),
+        "stdout was: {stdout}"
+    );
+}
