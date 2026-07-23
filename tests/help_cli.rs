@@ -60,7 +60,10 @@ fn root_version_flags_print_package_version() {
 #[test]
 fn subcommand_help_flags_print_command_help() {
     for (command, usage) in [
-        ("devices", "edgepad devices [--root <input-root>] [--all]"),
+        (
+            "devices",
+            "edgepad devices [--input-root <input-root>] [--all]",
+        ),
         (
             "status",
             "edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>]",
@@ -75,7 +78,7 @@ fn subcommand_help_flags_print_command_help() {
         ),
         (
             "dump",
-            "edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]",
+            "edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]",
         ),
         (
             "proxy",

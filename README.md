@@ -308,14 +308,14 @@ edgepad devices --all
 Capture recognizer-level events from a real touchpad:
 
 ```bash
-edgepad dump --device /dev/input/eventX --out bug.ev --frames 300
+edgepad dump --device auto --out bug.ev --frames 300
 edgepad replay bug.ev
 ```
 
 Capture raw evdev events for passthrough/output debugging:
 
 ```bash
-edgepad dump --raw --device /dev/input/eventX --out bug.raw.ev --frames 300
+edgepad dump --raw --device auto --out bug.raw.ev --frames 300
 edgepad replay-raw bug.raw.ev
 ```
 
@@ -334,7 +334,9 @@ through edgepad's temporary virtual touchpad until the frame limit is reached.
 edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
 ```
 
-Replace `/dev/input/eventX` with the touchpad node reported by `edgepad devices`. If the OS denies access to the event node or `/dev/uinput`, run `edgepad doctor` and use the access model it reports for your system.
+If auto-detection finds multiple touchpads, use the event node reported by `edgepad devices`. If the
+OS denies access to the event node or `/dev/uinput`, run `edgepad doctor` and use the access model it
+reports for your system.
 
 ## Commands
 

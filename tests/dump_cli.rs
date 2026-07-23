@@ -17,8 +17,49 @@ fn dump_cli_requires_device_and_out_arguments() {
     assert!(!output.status.success(), "dump without --out should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]"),
+        stderr.contains("edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]"),
         "stderr was: {stderr}"
+    );
+}
+
+#[test]
+fn dump_cli_resolves_auto_device_under_input_root() {
+    let root = unique_temp_path("edgepad-dump-cli-auto-input-root");
+    let out_path = unique_temp_path("edgepad-dump-cli-auto-output.ev");
+    let _ = std::fs::remove_dir_all(&root);
+    let _ = std::fs::remove_file(&out_path);
+    std::fs::create_dir_all(&root).expect("input root should be created");
+
+    let output = edgepad()
+        .arg("dump")
+        .arg("--device")
+        .arg("auto")
+        .arg("--input-root")
+        .arg(&root)
+        .arg("--out")
+        .arg(&out_path)
+        .output()
+        .expect("edgepad binary should run");
+
+    std::fs::remove_dir_all(&root).expect("input root should be removed");
+
+    assert!(!output.status.success(), "empty input root should fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("device=auto found no event devices"),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        stderr.contains(&root.display().to_string()),
+        "stderr was: {stderr}"
+    );
+    assert!(
+        !stderr.contains("failed to open device auto"),
+        "auto must be resolved before the device is opened, stderr was: {stderr}"
+    );
+    assert!(
+        !out_path.exists(),
+        "failed auto-detection must not create output file"
     );
 }
 
@@ -174,7 +215,7 @@ fn dump_cli_rejects_unknown_dump_flag_before_device_open() {
     assert!(!output.status.success(), "unknown dump flag should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]"),
+        stderr.contains("edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]"),
         "stderr was: {stderr}"
     );
     assert!(

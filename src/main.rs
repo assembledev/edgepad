@@ -33,7 +33,7 @@ use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use edgepad::status::{run_status, StatusConfig, StatusReport};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> [--config <file> | --built-in-defaults] | edgepad replay-raw <raw.ev> [--config <file> | --built-in-defaults] | edgepad devices [--root <input-root>] [--all] | edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> [--config <file> | --built-in-defaults] | edgepad replay-raw <raw.ev> [--config <file> | --built-in-defaults] | edgepad devices [--input-root <input-root>] [--all] | edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw] | edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const HELP: &str = "\
 Usage:
   edgepad <command> [options]
@@ -78,26 +78,27 @@ Options:
                              [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
       --built-in-defaults    Use the built-in recognizer profile instead of a config
 ";
-const DEVICES_USAGE: &str = "usage: edgepad devices [--root <input-root>] [--all]";
+const DEVICES_USAGE: &str = "usage: edgepad devices [--input-root <input-root>] [--all]";
 const DEVICES_HELP: &str = "\
 Usage:
-  edgepad devices [--root <input-root>] [--all]
+  edgepad devices [--input-root <input-root>] [--all]
 
 Options:
-      --root <input-root>  Input device directory [default: /dev/input]
-      --all                Show all readable event devices, not only touchpad candidates
+      --input-root <input-root>  Input device directory [default: /dev/input]
+      --root <input-root>        Alias for --input-root
+      --all                      Show all readable event devices, not only touchpad candidates
 ";
-const DUMP_USAGE: &str =
-    "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
+const DUMP_USAGE: &str = "usage: edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]";
 const DUMP_HELP: &str = "\
 Usage:
-  edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]
+  edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]
 
 Options:
-      --device <event-node>  Physical touchpad event node to read
-      --out <file.ev>        Output fixture path
-      --frames N             Stop after N frame boundaries
-      --raw                  Write raw evdev events instead of replay fixture events
+      --device auto|<event-node>  Physical touchpad selection
+      --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
+      --out <file.ev>             Output fixture path
+      --frames N                  Stop after N frame boundaries
+      --raw                       Write raw evdev events instead of replay fixture events
 ";
 const PROXY_USAGE: &str = "usage: edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const PROXY_HELP: &str = "\
@@ -235,7 +236,8 @@ fn run() -> Result<i32, String> {
                 return Ok(0);
             }
             let args = parse_dump_args(args.into_iter())?;
-            dump(&args.device, &args.out, args.frames, args.raw).map(|()| 0)
+            let device_path = args.device.resolve(&args.input_root)?;
+            dump(&device_path, &args.out, args.frames, args.raw).map(|()| 0)
         }
         Some("proxy") => {
             let args = args.collect::<Vec<_>>();
@@ -273,7 +275,8 @@ struct DeviceArgs {
 }
 
 struct DumpArgs {
-    device: PathBuf,
+    device: DeviceConfig,
+    input_root: PathBuf,
     out: PathBuf,
     frames: Option<usize>,
     raw: bool,
@@ -371,7 +374,7 @@ fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceAr
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--root" => {
+            "--input-root" | "--root" => {
                 root = args.next().ok_or_else(|| DEVICES_USAGE.to_string())?.into();
             }
             "--all" => show_all = true,
@@ -445,13 +448,20 @@ fn parse_status_args(mut args: impl Iterator<Item = String>) -> Result<StatusCon
 
 fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, String> {
     let mut device = None;
+    let mut input_root = PathBuf::from("/dev/input");
     let mut out = None;
     let mut frames = None;
     let mut raw = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--device" => device = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
+            "--device" => {
+                let raw_value = args.next().ok_or_else(|| DUMP_USAGE.to_string())?;
+                device = Some(DeviceConfig::parse(&raw_value)?);
+            }
+            "--input-root" => {
+                input_root = args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into();
+            }
             "--out" => out = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
             "--frames" => {
                 let raw_value = args.next().ok_or_else(|| DUMP_USAGE.to_string())?;
@@ -465,6 +475,7 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
 
     Ok(DumpArgs {
         device: device.ok_or_else(|| DUMP_USAGE.to_string())?,
+        input_root,
         out: out.ok_or_else(|| DUMP_USAGE.to_string())?,
         frames,
         raw,

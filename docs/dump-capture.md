@@ -31,18 +31,19 @@ Dump files include the kernel timestamp on every frame boundary, so replay appli
 Replay-format capture keeps the Type-B multitouch events used by the recognizer:
 
 ```bash
-edgepad dump --device /dev/input/event5 --out bug.ev --frames 300
+edgepad dump --device auto --out bug.ev --frames 300
 edgepad replay bug.ev
 ```
 
 The output uses the same text fixture format as the replay tests. A useful bug capture can be copied into `tests/fixtures/` and promoted into a regression test.
+If auto-detection finds multiple touchpads, use the event node reported by `edgepad devices`.
 
 ## Raw capture
 
 Raw capture keeps the evdev event shape needed for passthrough and virtual touchpad output:
 
 ```bash
-edgepad dump --raw --device /dev/input/event5 --out bug.raw.ev --frames 300
+edgepad dump --raw --device auto --out bug.raw.ev --frames 300
 edgepad replay-raw bug.raw.ev
 ```
 

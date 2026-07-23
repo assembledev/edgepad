@@ -201,7 +201,7 @@ seat ACL:
 
 ```bash
 sudo ./result/bin/edgepad devices
-sudo ./result/bin/edgepad dump --device /dev/input/eventX --out bug.ev --frames 300
+sudo ./result/bin/edgepad dump --device auto --out bug.ev --frames 300
 ./result/bin/edgepad replay bug.ev
 ```
 

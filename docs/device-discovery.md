@@ -23,9 +23,11 @@ edgepad devices --all
 For tests/debugging, the input root can be overridden:
 
 ```bash
-edgepad devices --root /tmp/fake-input-root
-edgepad devices --root /tmp/fake-input-root --all
+edgepad devices --input-root /tmp/fake-input-root
+edgepad devices --input-root /tmp/fake-input-root --all
 ```
+
+`--root` remains available as an alias for compatibility.
 
 ## Permissions
 
@@ -48,6 +50,8 @@ This command is read-only:
 
 ## Rationale
 
-Before `edgepad dump --device ... --out bug.ev`, users need a way to identify the correct touchpad event node without guessing.
+Auto-selection in `edgepad dump --device auto` and `daemon --device auto` uses these same discovery
+rules. When multiple candidates are present, use `edgepad devices` and pass the chosen path
+explicitly.
 
-`daemon --device auto` uses the same discovery rules and starts only when exactly one readable touchpad candidate is found. If multiple candidates are present, use `edgepad devices` and pass the chosen path explicitly.
+Auto-selection succeeds only when exactly one readable touchpad candidate is found.
