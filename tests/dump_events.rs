@@ -1,8 +1,8 @@
 use edgepad::core::{AxisRange, Capabilities};
 use edgepad::dump::{
     fixture_line_for_event as format_fixture_line, raw_line_for_event as format_raw_line,
-    write_capture_header, write_fixture_event, write_fixture_events_with_limit,
-    write_raw_events_with_limit,
+    write_capture_header, write_fixture_event, write_fixture_events_with_budget,
+    write_raw_events_with_budget, DumpCaptureDecision, DumpFrameBudget,
 };
 use evdev::{AbsoluteAxisCode, EventType, InputEvent, KeyCode, MiscCode, SynchronizationCode};
 
@@ -132,7 +132,7 @@ fn write_fixture_event_adds_blank_line_after_sync_boundaries() {
 }
 
 #[test]
-fn write_fixture_events_with_limit_stops_after_requested_sync_boundaries() {
+fn write_fixture_events_with_budget_keeps_complete_fetched_batch() {
     let mut out = Vec::new();
     let events = vec![
         InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_MT_SLOT.0, 0),
@@ -162,18 +162,47 @@ fn write_fixture_events_with_limit_stops_after_requested_sync_boundaries() {
             0,
         ),
     ];
-    let mut remaining_frames = Some(2);
+    let mut frame_budget = DumpFrameBudget::new(Some(2));
 
-    let result = write_fixture_events_with_limit(&mut out, events, &mut remaining_frames)
+    let result = write_fixture_events_with_budget(&mut out, events, &mut frame_budget)
         .expect("events should write");
 
-    assert!(result.reached_limit);
-    assert_eq!(result.events_written, 4);
-    assert_eq!(result.frame_boundaries_written, 2);
-    assert_eq!(remaining_frames, Some(0));
+    assert!(frame_budget.is_reached());
+    assert_eq!(result.events_written, 6);
+    assert_eq!(result.frame_boundaries_written, 3);
+    assert!(result.ends_at_frame_boundary);
+    assert_eq!(
+        frame_budget.decide_after_batch(false),
+        DumpCaptureDecision::Finish
+    );
     assert_eq!(
         String::from_utf8(out).expect("fixture output should be utf8"),
-        "ABS_MT_SLOT 0\nSYN_REPORT 0\n\nABS_MT_POSITION_X 42\nSYN_DROPPED 0\n\n"
+        "ABS_MT_SLOT 0\nSYN_REPORT 0\n\nABS_MT_POSITION_X 42\nSYN_DROPPED 0\n\nABS_MT_POSITION_Y 99\nSYN_REPORT 0\n\n"
+    );
+}
+
+#[test]
+fn frame_budget_waits_for_active_contact_to_release() {
+    let mut frame_budget = DumpFrameBudget::new(Some(2));
+
+    frame_budget.observe_frame_boundary();
+    assert_eq!(
+        frame_budget.decide_after_batch(true),
+        DumpCaptureDecision::Continue
+    );
+
+    frame_budget.observe_frame_boundary();
+    assert_eq!(
+        frame_budget.decide_after_batch(true),
+        DumpCaptureDecision::DrainStarted
+    );
+    assert_eq!(
+        frame_budget.decide_after_batch(true),
+        DumpCaptureDecision::Continue
+    );
+    assert_eq!(
+        frame_budget.decide_after_batch(false),
+        DumpCaptureDecision::Finish
     );
 }
 
@@ -270,7 +299,7 @@ fn raw_line_for_event_falls_back_to_numeric_codes_for_unknown_events() {
 }
 
 #[test]
-fn write_raw_events_with_limit_keeps_all_events_and_stops_after_sync_boundaries() {
+fn write_raw_events_with_budget_keeps_events_after_budget_until_a_complete_frame() {
     let mut out = Vec::new();
     let events = vec![
         InputEvent::new(EventType::KEY.0, KeyCode::BTN_TOUCH.0, 1),
@@ -289,17 +318,17 @@ fn write_raw_events_with_limit_keeps_all_events_and_stops_after_sync_boundaries(
         ),
         InputEvent::new(EventType::ABSOLUTE.0, AbsoluteAxisCode::ABS_Y.0, 320),
     ];
-    let mut remaining_frames = Some(2);
+    let mut frame_budget = DumpFrameBudget::new(Some(2));
 
-    let result = write_raw_events_with_limit(&mut out, events, &mut remaining_frames)
+    let result = write_raw_events_with_budget(&mut out, events, &mut frame_budget)
         .expect("events should write");
 
-    assert!(result.reached_limit);
-    assert_eq!(result.events_written, 6);
+    assert!(frame_budget.is_reached());
+    assert_eq!(result.events_written, 7);
     assert_eq!(result.frame_boundaries_written, 2);
-    assert_eq!(remaining_frames, Some(0));
+    assert!(!result.ends_at_frame_boundary);
     assert_eq!(
         String::from_utf8(out).expect("raw output should be utf8"),
-        "EV_KEY BTN_TOUCH 1\nEV_ABS ABS_X 640\nEV_ABS ABS_MT_SLOT 1\nEV_SYN SYN_REPORT 0 0\n\nEV_KEY BTN_TOUCH 0\nEV_SYN SYN_DROPPED 0 0\n\n"
+        "EV_KEY BTN_TOUCH 1\nEV_ABS ABS_X 640\nEV_ABS ABS_MT_SLOT 1\nEV_SYN SYN_REPORT 0 0\n\nEV_KEY BTN_TOUCH 0\nEV_SYN SYN_DROPPED 0 0\n\nEV_ABS ABS_Y 320\n"
     );
 }

@@ -92,6 +92,35 @@ fn claimed_edge_touch_does_not_emit_initial_down_to_passthrough() {
 }
 
 #[test]
+fn edge_touch_that_leaves_tap_slop_and_returns_emits_no_gesture() {
+    let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
+
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(21),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left edge contact is valid");
+
+    engine
+        .process_frame(&[Event::slot(0), Event::x(60)])
+        .expect("movement beyond tap slop remains claimed");
+    engine
+        .process_frame(&[Event::slot(0), Event::x(20)])
+        .expect("return to the starting point remains claimed");
+
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("cancelled gesture releases cleanly");
+
+    assert!(up.gestures.is_empty());
+    assert!(up.slider_steps.is_empty());
+    assert!(up.passthrough.is_empty());
+}
+
+#[test]
 fn buttonpad_press_promotes_claimed_contact_and_cancels_edge_gesture() {
     let mut engine = Engine::new(test_caps(), EdgeWidths::all(0.10));
     engine.set_buttonpad(true);
@@ -290,6 +319,50 @@ fn slider_edge_touch_emits_steps_during_motion_without_release_swipe() {
 }
 
 #[test]
+fn slider_that_emits_steps_and_returns_to_start_does_not_emit_tap() {
+    let mut engine = Engine::with_sliders(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        vec![SliderSpec {
+            zone: Zone::Left,
+            axis: SliderAxis::Vertical,
+            step: 0.09,
+        }],
+    );
+
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(23),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left slider contact is valid");
+
+    let forward = engine
+        .process_frame(&[Event::slot(0), Event::y(510)])
+        .expect("forward slider motion emits steps");
+    assert_eq!(forward.slider_steps.len(), 3);
+
+    let returned = engine
+        .process_frame(&[Event::slot(0), Event::y(300)])
+        .expect("return slider motion emits reverse steps");
+    assert!(!returned.slider_steps.is_empty());
+    assert!(returned
+        .slider_steps
+        .iter()
+        .all(|step| step.direction == SliderDirection::Up));
+
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("returned slider contact releases cleanly");
+
+    assert!(up.gestures.is_empty());
+    assert!(up.slider_steps.is_empty());
+    assert!(up.passthrough.is_empty());
+}
+
+#[test]
 fn buttonpad_press_keeps_emitted_slider_steps_but_cancels_future_steps_and_gesture() {
     let mut engine = Engine::with_sliders(
         test_caps(),
@@ -366,6 +439,41 @@ fn slider_edge_touch_still_emits_tap_on_release() {
     assert_eq!(up.gestures.len(), 1);
     assert_eq!(up.gestures[0].zone, Zone::Left);
     assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
+}
+
+#[test]
+fn slider_step_inside_tap_slop_consumes_release_gesture() {
+    let mut engine = Engine::with_sliders(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        vec![SliderSpec {
+            zone: Zone::Left,
+            axis: SliderAxis::Vertical,
+            step: 0.01,
+        }],
+    );
+
+    engine
+        .process_frame(&[
+            Event::slot(0),
+            Event::tracking_id(24),
+            Event::x(20),
+            Event::y(300),
+        ])
+        .expect("left slider contact is valid");
+
+    let moved = engine
+        .process_frame(&[Event::slot(0), Event::y(310)])
+        .expect("movement inside tap slop emits a configured slider step");
+    assert_eq!(moved.slider_steps.len(), 1);
+
+    let up = engine
+        .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
+        .expect("consumed slider contact releases cleanly");
+
+    assert!(up.gestures.is_empty());
+    assert!(up.slider_steps.is_empty());
+    assert!(up.passthrough.is_empty());
 }
 
 #[test]

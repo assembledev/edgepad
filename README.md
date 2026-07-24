@@ -24,7 +24,7 @@ The touchpad is split into four edge zones: `left`, `right`, `top`, and `bottom`
 
 - A **gesture** runs one action when the finger lifts. It can match either a directional swipe or a
   tap.
-- A **tap** is a gesture with no meaningful movement.
+- A **tap** is a gesture whose contact never leaves the configured movement tolerance.
 - A **slider** runs repeated steps while the finger moves, which is useful for volume or brightness.
 - An **action** is the command that edgepad starts for a gesture or slider step.
 
@@ -124,7 +124,7 @@ Example config:
 ```toml
 device = "auto"
 edge_width = 0.10
-tap_min_duration_ms = 80
+tap_min_duration_ms = 40
 swipe_min_distance = 0.02
 
 [[sliders]]
@@ -184,15 +184,18 @@ device = "auto"
 edge_width = 0.10
 ```
 
-`tap_min_duration_ms` ignores very short edge taps. It defaults to `80`; set it to `0` to disable the guard.
+`tap_min_duration_ms` ignores very short edge taps. It defaults to `40`; set it to `0` to disable the guard.
 
 ```toml
-tap_min_duration_ms = 80
+tap_min_duration_ms = 40
 ```
 
 `swipe_min_distance` is the minimum normalized touchpad travel that turns an edge contact into a
 directional gesture. It defaults to `0.02`, or 2% of the corresponding touchpad axis. Smaller
 movement remains a tap, so the same physical gesture behaves consistently across coordinate ranges.
+Once a contact reaches this distance it no longer qualifies as a tap, even if it returns to its
+starting point. A slider contact that emits any steps is also consumed by the slider and does not
+emit an additional tap when released.
 
 ```toml
 swipe_min_distance = 0.02
@@ -305,14 +308,22 @@ edgepad devices --all
 Capture recognizer-level events from a real touchpad:
 
 ```bash
-edgepad dump --device /dev/input/eventX --out bug.ev --frames 300
+edgepad dump --device auto --out bug.ev --frames 300
 edgepad replay bug.ev
 ```
+
+The frame count is a minimum capture budget. If it is reached while a finger is down, dump asks you
+to release all contacts and records their release frames before exiting.
+
+Stop `edgepad.service` before capture: the running daemon holds the physical touchpad with
+`EVIOCGRAB`, so another reader receives no events. `dump` warns after three seconds without input
+but never stops the service automatically. If input arrives later, it confirms that capture has
+started and records it normally.
 
 Capture raw evdev events for passthrough/output debugging:
 
 ```bash
-edgepad dump --raw --device /dev/input/eventX --out bug.raw.ev --frames 300
+edgepad dump --raw --device auto --out bug.raw.ev --frames 300
 edgepad replay-raw bug.raw.ev
 ```
 
@@ -331,7 +342,9 @@ through edgepad's temporary virtual touchpad until the frame limit is reached.
 edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
 ```
 
-Replace `/dev/input/eventX` with the touchpad node reported by `edgepad devices`. If the OS denies access to the event node or `/dev/uinput`, run `edgepad doctor` and use the access model it reports for your system.
+If auto-detection finds multiple touchpads, use the event node reported by `edgepad devices`. If the
+OS denies access to the event node or `/dev/uinput`, run `edgepad doctor` and use the access model it
+reports for your system.
 
 ## Commands
 

@@ -1,10 +1,17 @@
 use std::fs;
 use std::io;
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use evdev::{AbsoluteAxisCode, Device, PropType};
+use evdev::raw_stream::RawDevice;
+use evdev::{AbsoluteAxisCode, Device, KeyCode, PropType};
 
+use crate::core::Capabilities;
+use crate::raw::ABS_MT_TRACKING_ID;
 use crate::uinput::DEFAULT_VIRTUAL_TOUCHPAD_NAME;
+
+nix::ioctl_read_buf!(eviocgmtslots, b'E', 0x0a, u8);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AxisInfo {
@@ -110,6 +117,75 @@ pub fn discover_device_report(input_root: &Path) -> io::Result<DiscoveryReport> 
     })
 }
 
+pub fn wait_for_raw_device_events(device: &RawDevice, timeout: Duration) -> io::Result<bool> {
+    wait_for_fd_readable(device.as_raw_fd(), timeout)
+}
+
+pub fn physical_touch_is_down(
+    device: &RawDevice,
+    capabilities: Option<Capabilities>,
+) -> io::Result<bool> {
+    let key_state = device.get_key_state()?;
+    let btn_touch_down = key_state.contains(KeyCode::BTN_TOUCH);
+    let Some(capabilities) = capabilities else {
+        return Ok(btn_touch_down);
+    };
+    let tracking_ids = mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)?;
+    Ok(touch_snapshot_is_down(btn_touch_down, &tracking_ids))
+}
+
+pub fn mt_slot_values(
+    device: &RawDevice,
+    capabilities: Capabilities,
+    axis_code: u16,
+) -> io::Result<Vec<i32>> {
+    let slot_count = (capabilities.slot_max - capabilities.slot_min + 1) as usize;
+    let mut request = vec![0_i32; slot_count + 1];
+    request[0] = axis_code as i32;
+    let request_bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            request.as_mut_ptr().cast::<u8>(),
+            request.len() * std::mem::size_of::<i32>(),
+        )
+    };
+    unsafe { eviocgmtslots(device.as_raw_fd(), request_bytes) }.map_err(io::Error::from)?;
+    Ok(request[1..].to_vec())
+}
+
+fn touch_snapshot_is_down(btn_touch_down: bool, mt_tracking_ids: &[i32]) -> bool {
+    btn_touch_down || mt_tracking_ids.iter().any(|tracking_id| *tracking_id >= 0)
+}
+
+fn wait_for_fd_readable(fd: RawFd, timeout: Duration) -> io::Result<bool> {
+    let mut poll_fd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let timeout_ms = poll_timeout_ms(timeout);
+
+    loop {
+        let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
+        if result >= 0 {
+            return Ok(result > 0);
+        }
+
+        let err = io::Error::last_os_error();
+        if err.kind() != io::ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+fn poll_timeout_ms(timeout: Duration) -> i32 {
+    let millis = timeout.as_millis();
+    if millis == 0 {
+        0
+    } else {
+        millis.min(i32::MAX as u128) as i32
+    }
+}
+
 pub fn touchpad_candidates(summaries: &[DeviceSummary]) -> Vec<&DeviceSummary> {
     summaries
         .iter()
@@ -203,5 +279,41 @@ fn format_axis(axis: Option<AxisInfo>) -> String {
     match axis {
         Some(axis) => format!("{}..={}", axis.min, axis.max),
         None => "n/a".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    use super::*;
+
+    #[test]
+    fn wait_for_fd_readable_reports_timeout_and_ready_data() {
+        let (reader, mut writer) = UnixStream::pair().expect("socket pair should be created");
+
+        assert!(!wait_for_fd_readable(reader.as_raw_fd(), Duration::ZERO)
+            .expect("empty socket should be polled"));
+
+        writer
+            .write_all(b"x")
+            .expect("socket should accept test data");
+
+        assert!(
+            wait_for_fd_readable(reader.as_raw_fd(), Duration::from_millis(100))
+                .expect("readable socket should be polled")
+        );
+    }
+
+    #[test]
+    fn touch_snapshot_treats_active_mt_tracking_id_as_touch_down() {
+        assert!(touch_snapshot_is_down(false, &[42, -1, -1]));
+    }
+
+    #[test]
+    fn touch_snapshot_treats_all_released_slots_as_idle() {
+        assert!(!touch_snapshot_is_down(false, &[-1, -1, -1]));
     }
 }

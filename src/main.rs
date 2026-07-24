@@ -15,11 +15,14 @@ use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, GestureDirection, SliderDirection,
     SliderSpec, Zone,
 };
-use edgepad::device::{discover_device_report, format_device_line, touchpad_candidates};
+use edgepad::device::{
+    discover_device_report, format_device_line, physical_touch_is_down, touchpad_candidates,
+    wait_for_raw_device_events,
+};
 use edgepad::doctor::{run_doctor, DoctorCheck, DoctorConfig, DoctorReport, DoctorSection};
 use edgepad::dump::{
-    capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
-    write_raw_events_with_limit, WriteEventsResult,
+    capabilities_from_raw_device, write_capture_header, write_fixture_events_with_budget,
+    write_raw_events_with_budget, DumpCaptureDecision, DumpFrameBudget, WriteEventsResult,
 };
 use edgepad::proxy::{
     run_proxy, run_proxy_with_gesture_handler_and_ready, ProxyMode, ProxyRunConfig, ProxyRunLimit,
@@ -33,7 +36,7 @@ use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use edgepad::status::{run_status, StatusConfig, StatusReport};
 use evdev::raw_stream::RawDevice;
 
-const USAGE: &str = "usage: edgepad replay <fixture.ev> [--config <file> | --built-in-defaults] | edgepad replay-raw <raw.ev> [--config <file> | --built-in-defaults] | edgepad devices [--root <input-root>] [--all] | edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw] | edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
+const USAGE: &str = "usage: edgepad replay <fixture.ev> [--config <file> | --built-in-defaults] | edgepad replay-raw <raw.ev> [--config <file> | --built-in-defaults] | edgepad devices [--input-root <input-root>] [--all] | edgepad status [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--service <unit>] | edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>] | edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw] | edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F] | edgepad daemon [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const HELP: &str = "\
 Usage:
   edgepad <command> [options]
@@ -78,26 +81,30 @@ Options:
                              [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]
       --built-in-defaults    Use the built-in recognizer profile instead of a config
 ";
-const DEVICES_USAGE: &str = "usage: edgepad devices [--root <input-root>] [--all]";
+const DEVICES_USAGE: &str = "usage: edgepad devices [--input-root <input-root>] [--all]";
 const DEVICES_HELP: &str = "\
 Usage:
-  edgepad devices [--root <input-root>] [--all]
+  edgepad devices [--input-root <input-root>] [--all]
 
 Options:
-      --root <input-root>  Input device directory [default: /dev/input]
-      --all                Show all readable event devices, not only touchpad candidates
+      --input-root <input-root>  Input device directory [default: /dev/input]
+      --root <input-root>        Alias for --input-root
+      --all                      Show all readable event devices, not only touchpad candidates
 ";
-const DUMP_USAGE: &str =
-    "usage: edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]";
+const DUMP_USAGE: &str = "usage: edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]";
 const DUMP_HELP: &str = "\
 Usage:
-  edgepad dump --device <event-node> --out <file.ev> [--frames N] [--raw]
+  edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]
+
+The physical device must not be grabbed by another process.
+Stop edgepad.service before capturing when the daemon owns the touchpad.
 
 Options:
-      --device <event-node>  Physical touchpad event node to read
-      --out <file.ev>        Output fixture path
-      --frames N             Stop after N frame boundaries
-      --raw                  Write raw evdev events instead of replay fixture events
+      --device auto|<event-node>  Physical touchpad selection
+      --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
+      --out <file.ev>             Output fixture path
+      --frames N                  Capture at least N frame boundaries, then stop when idle
+      --raw                       Write raw evdev events instead of replay fixture events
 ";
 const PROXY_USAGE: &str = "usage: edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
 const PROXY_HELP: &str = "\
@@ -153,6 +160,7 @@ Options:
       --service <unit>            systemd user unit to inspect [default: edgepad.service]
 ";
 const DAEMON_IDLE_DRAIN_TIMEOUT: Duration = Duration::from_millis(1000);
+const DUMP_FIRST_EVENT_WARNING_TIMEOUT: Duration = Duration::from_secs(3);
 const DAEMON_SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DAEMON_STARTUP_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const DAEMON_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(500);
@@ -235,7 +243,8 @@ fn run() -> Result<i32, String> {
                 return Ok(0);
             }
             let args = parse_dump_args(args.into_iter())?;
-            dump(&args.device, &args.out, args.frames, args.raw).map(|()| 0)
+            let device_path = args.device.resolve(&args.input_root)?;
+            dump(&device_path, &args.out, args.frames, args.raw).map(|()| 0)
         }
         Some("proxy") => {
             let args = args.collect::<Vec<_>>();
@@ -273,7 +282,8 @@ struct DeviceArgs {
 }
 
 struct DumpArgs {
-    device: PathBuf,
+    device: DeviceConfig,
+    input_root: PathBuf,
     out: PathBuf,
     frames: Option<usize>,
     raw: bool,
@@ -371,7 +381,7 @@ fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceAr
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--root" => {
+            "--input-root" | "--root" => {
                 root = args.next().ok_or_else(|| DEVICES_USAGE.to_string())?.into();
             }
             "--all" => show_all = true,
@@ -445,13 +455,20 @@ fn parse_status_args(mut args: impl Iterator<Item = String>) -> Result<StatusCon
 
 fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, String> {
     let mut device = None;
+    let mut input_root = PathBuf::from("/dev/input");
     let mut out = None;
     let mut frames = None;
     let mut raw = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--device" => device = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
+            "--device" => {
+                let raw_value = args.next().ok_or_else(|| DUMP_USAGE.to_string())?;
+                device = Some(DeviceConfig::parse(&raw_value)?);
+            }
+            "--input-root" => {
+                input_root = args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into();
+            }
             "--out" => out = Some(args.next().ok_or_else(|| DUMP_USAGE.to_string())?.into()),
             "--frames" => {
                 let raw_value = args.next().ok_or_else(|| DUMP_USAGE.to_string())?;
@@ -465,6 +482,7 @@ fn parse_dump_args(mut args: impl Iterator<Item = String>) -> Result<DumpArgs, S
 
     Ok(DumpArgs {
         device: device.ok_or_else(|| DUMP_USAGE.to_string())?,
+        input_root,
         out: out.ok_or_else(|| DUMP_USAGE.to_string())?,
         frames,
         raw,
@@ -863,10 +881,10 @@ impl DumpFormat {
 fn dump(
     device_path: &Path,
     out_path: &Path,
-    mut remaining_frames: Option<usize>,
+    requested_frames: Option<usize>,
     raw: bool,
 ) -> Result<(), String> {
-    let requested_frames = remaining_frames;
+    let mut frame_budget = DumpFrameBudget::new(requested_frames);
     let format = if raw {
         DumpFormat::Raw
     } else {
@@ -882,32 +900,76 @@ fn dump(
         .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
     let mut total = WriteEventsResult::default();
 
-    loop {
-        let events = device.fetch_events().map_err(|err| {
+    eprintln!("edgepad dump: device={}", device_path.display());
+    eprintln!("edgepad dump: waiting for input events");
+    let mut no_events_warning_emitted =
+        !wait_for_raw_device_events(&device, DUMP_FIRST_EVENT_WARNING_TIMEOUT).map_err(|err| {
             format!(
-                "failed to read events from {}: {err}",
+                "failed to wait for events from {}: {err}",
                 device_path.display()
             )
         })?;
+    if no_events_warning_emitted {
+        eprintln!("{}", dump_no_events_warning(device_path));
+    }
+
+    loop {
+        let mut events = device
+            .fetch_events()
+            .map_err(|err| {
+                format!(
+                    "failed to read events from {}: {err}",
+                    device_path.display()
+                )
+            })?
+            .peekable();
+        if no_events_warning_emitted && events.peek().is_some() {
+            eprintln!("edgepad dump: input events received; capture started");
+            no_events_warning_emitted = false;
+        }
         let result = if raw {
-            write_raw_events_with_limit(&mut writer, events, &mut remaining_frames)
+            write_raw_events_with_budget(&mut writer, events, &mut frame_budget)
         } else {
-            write_fixture_events_with_limit(&mut writer, events, &mut remaining_frames)
+            write_fixture_events_with_budget(&mut writer, events, &mut frame_budget)
         }
         .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+        let can_finish_after_batch =
+            result.frame_boundaries_written > 0 && result.ends_at_frame_boundary;
         total.add(result);
-        if total.reached_limit {
-            print_dump_summary(
-                device_path,
-                out_path,
-                capabilities,
-                requested_frames,
-                total,
-                format,
-            );
-            return Ok(());
+        if frame_budget.is_reached() && can_finish_after_batch {
+            let touch_down = physical_touch_is_down(&device, capabilities).map_err(|err| {
+                format!(
+                    "failed to read current touch state from {}: {err}",
+                    device_path.display()
+                )
+            })?;
+            match frame_budget.decide_after_batch(touch_down) {
+                DumpCaptureDecision::Continue => {}
+                DumpCaptureDecision::DrainStarted => {
+                    eprintln!("edgepad dump: frame budget reached; release all contacts to finish");
+                }
+                DumpCaptureDecision::Finish => {
+                    print_dump_summary(
+                        device_path,
+                        out_path,
+                        capabilities,
+                        requested_frames,
+                        total,
+                        format,
+                    );
+                    return Ok(());
+                }
+            }
         }
     }
+}
+
+fn dump_no_events_warning(device_path: &Path) -> String {
+    format!(
+        "edgepad dump: no events received from {} after {}s; device may be grabbed; continuing to wait (stop edgepad.service before capturing)",
+        device_path.display(),
+        DUMP_FIRST_EVENT_WARNING_TIMEOUT.as_secs()
+    )
 }
 
 fn print_dump_summary(
@@ -936,6 +998,12 @@ fn print_dump_summary(
     }
     if let Some(requested_frames) = requested_frames {
         println!("requested_frame_boundaries: {requested_frames}");
+        println!(
+            "additional_frame_boundaries_after_budget: {}",
+            stats
+                .frame_boundaries_written
+                .saturating_sub(requested_frames)
+        );
     }
     println!(
         "written_frame_boundaries: {}",
@@ -1513,15 +1581,13 @@ fn print_replay_diagnosis(
             "diagnosis: no contact starts found; capture likely began after a finger was already down or no new touch started"
         );
         println!(
-            "diagnosis_hint: start dump before touching the pad, or use the gesture-release-then-center-finger flow for frame-limited captures"
+            "diagnosis_hint: start dump before touching the pad; frame-limited dump waits for active contacts to be released"
         );
     } else if stats.tracking_starts > stats.tracking_ends {
         println!(
-            "diagnosis: capture ended with active contact(s); frame budget likely stopped mid-contact"
+            "diagnosis: capture ended with active contact(s); input is incomplete or truncated"
         );
-        println!(
-            "diagnosis_hint: for edge gesture captures, perform the gesture, release it, then place a finger in the center until --frames finishes"
-        );
+        println!("diagnosis_hint: capture again and release all contacts before stopping");
     } else if stats.tracking_starts == 0 && stats.total_events == 0 {
         println!("diagnosis: no replay-relevant touch events found");
     } else if passthrough_events == 0 && gestures == 0 && slider_steps == 0 {
@@ -1576,6 +1642,14 @@ mod tests {
         assert_eq!(
             dump_next_command(DumpFormat::Replay, Path::new("bug.ev")),
             "edgepad replay bug.ev"
+        );
+    }
+
+    #[test]
+    fn dump_no_events_warning_explains_likely_grab() {
+        assert_eq!(
+            dump_no_events_warning(Path::new("/dev/input/event10")),
+            "edgepad dump: no events received from /dev/input/event10 after 3s; device may be grabbed; continuing to wait (stop edgepad.service before capturing)"
         );
     }
 

@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -13,6 +12,7 @@ use crate::core::{
     Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureDirection, ResyncContact,
     SliderDirection, SliderSpec, SliderStep, Zone,
 };
+use crate::device::{mt_slot_values, physical_touch_is_down, wait_for_raw_device_events};
 use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
     extract_core_events, is_pointer_button_code, route_raw_frame, route_resync_contacts, RawEvent,
@@ -23,9 +23,7 @@ use crate::raw::{
 use crate::uinput::{
     build_virtual_touchpad, UinputEventWriter, UinputRawOutputSink, VirtualTouchpadSpec,
 };
-use evdev::{raw_stream::RawDevice, KeyCode, PropType};
-
-nix::ioctl_read_buf!(eviocgmtslots, b'E', 0x0a, u8);
+use evdev::{raw_stream::RawDevice, PropType};
 
 pub use crate::config::DEFAULT_EDGE_WIDTH;
 
@@ -398,7 +396,9 @@ fn ensure_physical_touchpad_idle_at_start(
     device: &RawDevice,
     capabilities: Capabilities,
 ) -> Result<(), String> {
-    if !physical_touch_is_down(device, capabilities)? {
+    if !physical_touch_is_down(device, Some(capabilities))
+        .map_err(|err| format!("failed to read current touch state before live proxy: {err}"))?
+    {
         return Ok(());
     }
 
@@ -408,52 +408,16 @@ fn ensure_physical_touchpad_idle_at_start(
     ))
 }
 
-fn physical_touch_is_down(device: &RawDevice, capabilities: Capabilities) -> Result<bool, String> {
-    let key_state = device.get_key_state().map_err(|err| {
-        format!("failed to read current touch key state before live proxy: {err}")
-    })?;
-    let tracking_ids = mt_tracking_ids(device, capabilities)?;
-    Ok(physical_touch_snapshot_is_down(
-        key_state.contains(KeyCode::BTN_TOUCH),
-        &tracking_ids,
-    ))
-}
-
-fn physical_touch_snapshot_is_down(btn_touch_down: bool, mt_tracking_ids: &[i32]) -> bool {
-    btn_touch_down || mt_tracking_ids.iter().any(|tracking_id| *tracking_id >= 0)
-}
-
-fn mt_tracking_ids(device: &RawDevice, capabilities: Capabilities) -> Result<Vec<i32>, String> {
-    mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)
-}
-
-fn mt_slot_values(
-    device: &RawDevice,
-    capabilities: Capabilities,
-    axis_code: u16,
-) -> Result<Vec<i32>, String> {
-    let slot_count = (capabilities.slot_max - capabilities.slot_min + 1) as usize;
-    let mut request = vec![0_i32; slot_count + 1];
-    request[0] = axis_code as i32;
-    let request_bytes = unsafe {
-        std::slice::from_raw_parts_mut(
-            request.as_mut_ptr().cast::<u8>(),
-            request.len() * std::mem::size_of::<i32>(),
-        )
-    };
-    unsafe { eviocgmtslots(device.as_raw_fd(), request_bytes) }.map_err(|err| {
-        format!("failed to read current multitouch slot axis {axis_code:#x}: {err}")
-    })?;
-    Ok(request[1..].to_vec())
-}
-
 fn read_resync_contacts(
     device: &RawDevice,
     capabilities: Capabilities,
 ) -> Result<Vec<ResyncContact>, String> {
-    let tracking_ids = mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)?;
-    let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)?;
-    let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)?;
+    let tracking_ids = mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)
+        .map_err(|err| format!("failed to read current multitouch tracking IDs: {err}"))?;
+    let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)
+        .map_err(|err| format!("failed to read current multitouch X positions: {err}"))?;
+    let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)
+        .map_err(|err| format!("failed to read current multitouch Y positions: {err}"))?;
     Ok(resync_contacts_from_slot_values(
         capabilities,
         &tracking_ids,
@@ -672,23 +636,9 @@ fn fetch_proxy_events(
     timeout: Option<Duration>,
 ) -> Result<Option<Vec<ProxyInputEvent>>, String> {
     if let Some(timeout) = timeout {
-        let timeout_ms = poll_timeout_ms(timeout);
-        let mut poll_fd = libc::pollfd {
-            fd: device.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        let ready = loop {
-            let result = unsafe { libc::poll(&mut poll_fd, 1, timeout_ms) };
-            if result >= 0 {
-                break result;
-            }
-            let err = std::io::Error::last_os_error();
-            if err.kind() != std::io::ErrorKind::Interrupted {
-                return Err(format!("failed to wait for proxy events: {err}"));
-            }
-        };
-        if ready == 0 {
+        let ready = wait_for_raw_device_events(device, timeout)
+            .map_err(|err| format!("failed to wait for proxy events: {err}"))?;
+        if !ready {
             return Ok(None);
         }
     }
@@ -708,15 +658,6 @@ fn fetch_proxy_events(
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(Some(events))
-}
-
-fn poll_timeout_ms(timeout: Duration) -> i32 {
-    let millis = timeout.as_millis();
-    if millis == 0 {
-        0
-    } else {
-        millis.min(i32::MAX as u128) as i32
-    }
 }
 
 fn process_proxy_raw_frame<S, H>(
@@ -1599,16 +1540,6 @@ mod tests {
             }),
             Err("proxy frame limit must be a positive integer".to_string())
         );
-    }
-
-    #[test]
-    fn physical_touch_snapshot_treats_active_mt_tracking_id_as_touch_down() {
-        assert!(physical_touch_snapshot_is_down(false, &[42, -1, -1]));
-    }
-
-    #[test]
-    fn physical_touch_snapshot_treats_all_released_slots_as_idle() {
-        assert!(!physical_touch_snapshot_is_down(false, &[-1, -1, -1]));
     }
 
     #[test]

@@ -229,32 +229,76 @@ pub fn write_fixture_event(mut writer: impl Write, event: InputEvent) -> io::Res
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WriteEventsResult {
-    pub reached_limit: bool,
     pub events_written: usize,
     pub frame_boundaries_written: usize,
+    pub ends_at_frame_boundary: bool,
 }
 
 impl WriteEventsResult {
     pub fn add(&mut self, other: Self) {
-        self.reached_limit |= other.reached_limit;
         self.events_written += other.events_written;
         self.frame_boundaries_written += other.frame_boundaries_written;
+        if other.events_written > 0 {
+            self.ends_at_frame_boundary = other.ends_at_frame_boundary;
+        }
     }
 }
 
 pub type WriteFixtureEventsResult = WriteEventsResult;
 
-pub fn write_fixture_events_with_limit(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DumpCaptureDecision {
+    Continue,
+    DrainStarted,
+    Finish,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DumpFrameBudget {
+    remaining: Option<usize>,
+    draining: bool,
+}
+
+impl DumpFrameBudget {
+    pub fn new(frame_boundaries: Option<usize>) -> Self {
+        Self {
+            remaining: frame_boundaries,
+            draining: false,
+        }
+    }
+
+    pub fn is_reached(self) -> bool {
+        matches!(self.remaining, Some(0))
+    }
+
+    pub fn observe_frame_boundary(&mut self) {
+        if let Some(remaining) = self.remaining.as_mut() {
+            *remaining = remaining.saturating_sub(1);
+        }
+    }
+
+    pub fn decide_after_batch(&mut self, touch_down: bool) -> DumpCaptureDecision {
+        if !self.is_reached() {
+            return DumpCaptureDecision::Continue;
+        }
+        if !touch_down {
+            return DumpCaptureDecision::Finish;
+        }
+        if self.draining {
+            DumpCaptureDecision::Continue
+        } else {
+            self.draining = true;
+            DumpCaptureDecision::DrainStarted
+        }
+    }
+}
+
+pub fn write_fixture_events_with_budget(
     mut writer: impl Write,
     events: impl IntoIterator<Item = InputEvent>,
-    remaining_frames: &mut Option<usize>,
+    frame_budget: &mut DumpFrameBudget,
 ) -> io::Result<WriteEventsResult> {
     let mut result = WriteEventsResult::default();
-
-    if matches!(remaining_frames, Some(0)) {
-        result.reached_limit = true;
-        return Ok(result);
-    }
 
     for event in events {
         let Some(line) = fixture_line_for_event(event)? else {
@@ -263,49 +307,34 @@ pub fn write_fixture_events_with_limit(
         let is_sync_boundary = is_sync_boundary(&line);
         write_event_line(&mut writer, &line)?;
         result.events_written += 1;
+        result.ends_at_frame_boundary = is_sync_boundary;
 
         if is_sync_boundary {
             result.frame_boundaries_written += 1;
-            if let Some(remaining) = remaining_frames.as_mut() {
-                *remaining = remaining.saturating_sub(1);
-                if *remaining == 0 {
-                    result.reached_limit = true;
-                    return Ok(result);
-                }
-            }
+            frame_budget.observe_frame_boundary();
         }
     }
 
     Ok(result)
 }
 
-pub fn write_raw_events_with_limit(
+pub fn write_raw_events_with_budget(
     mut writer: impl Write,
     events: impl IntoIterator<Item = InputEvent>,
-    remaining_frames: &mut Option<usize>,
+    frame_budget: &mut DumpFrameBudget,
 ) -> io::Result<WriteEventsResult> {
     let mut result = WriteEventsResult::default();
-
-    if matches!(remaining_frames, Some(0)) {
-        result.reached_limit = true;
-        return Ok(result);
-    }
 
     for event in events {
         let line = raw_line_for_event(event)?;
         let is_sync_boundary = is_sync_boundary(&line);
         write_event_line(&mut writer, &line)?;
         result.events_written += 1;
+        result.ends_at_frame_boundary = is_sync_boundary;
 
         if is_sync_boundary {
             result.frame_boundaries_written += 1;
-            if let Some(remaining) = remaining_frames.as_mut() {
-                *remaining = remaining.saturating_sub(1);
-                if *remaining == 0 {
-                    result.reached_limit = true;
-                    return Ok(result);
-                }
-            }
+            frame_budget.observe_frame_boundary();
         }
     }
 

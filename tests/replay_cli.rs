@@ -238,7 +238,7 @@ SYN_REPORT 0
 }
 
 #[test]
-fn replay_cli_explains_frame_budget_stopping_mid_contact_without_bad_lift_hint() {
+fn replay_cli_explains_capture_ending_mid_contact() {
     let path = unique_temp_path("edgepad-replay-active-at-end.ev");
     fs::write(
         &path,
@@ -271,15 +271,13 @@ SYN_REPORT 0
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("diagnosis: capture ended with active contact(s); frame budget likely stopped mid-contact"),
+        stdout.contains(
+            "diagnosis: capture ended with active contact(s); input is incomplete or truncated"
+        ),
         "stdout was: {stdout}"
     );
     assert!(
-        stdout.contains("diagnosis_hint: for edge gesture captures, perform the gesture, release it, then place a finger in the center until --frames finishes"),
-        "stdout was: {stdout}"
-    );
-    assert!(
-        !stdout.contains("lift fingers before capture stops"),
+        stdout.contains("diagnosis_hint: capture again and release all contacts before stopping"),
         "stdout was: {stdout}"
     );
 }

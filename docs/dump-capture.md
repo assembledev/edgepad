@@ -16,6 +16,25 @@ edgepad devices --all
 
 Reading `/dev/input/event*` may require `sudo`, the `input` group, or seat/logind ACLs.
 
+## Running daemon
+
+The live edgepad daemon holds the physical touchpad with `EVIOCGRAB`, so a separate `edgepad dump`
+process cannot receive physical events while `edgepad.service` is running. Stop the service before
+capturing and start it again afterward:
+
+```bash
+(
+  systemctl --user stop edgepad.service
+  trap 'systemctl --user start edgepad.service' EXIT
+  edgepad dump --device auto --out bug.ev --frames 300
+)
+```
+
+`dump` never stops the service or probes the device with `EVIOCGRAB`. It prints the selected device
+and waits normally; if no input arrives within three seconds, it warns that the device may be
+grabbed and continues waiting. If input arrives later, it confirms that capture has started and
+writes the events normally.
+
 ## Recognition profile
 
 `edgepad replay`, `edgepad replay-raw`, and `edgepad proxy` use the default user config unless
@@ -31,18 +50,19 @@ Dump files include the kernel timestamp on every frame boundary, so replay appli
 Replay-format capture keeps the Type-B multitouch events used by the recognizer:
 
 ```bash
-edgepad dump --device /dev/input/event5 --out bug.ev --frames 300
+edgepad dump --device auto --out bug.ev --frames 300
 edgepad replay bug.ev
 ```
 
 The output uses the same text fixture format as the replay tests. A useful bug capture can be copied into `tests/fixtures/` and promoted into a regression test.
+If auto-detection finds multiple touchpads, use the event node reported by `edgepad devices`.
 
 ## Raw capture
 
 Raw capture keeps the evdev event shape needed for passthrough and virtual touchpad output:
 
 ```bash
-edgepad dump --raw --device /dev/input/event5 --out bug.raw.ev --frames 300
+edgepad dump --raw --device auto --out bug.raw.ev --frames 300
 edgepad replay-raw bug.raw.ev
 ```
 
@@ -67,7 +87,9 @@ Unknown event types and codes are kept with numeric fallback instead of being si
 
 ## Frame limits
 
-With `--frames N`, capture stops after N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`) and prints a summary:
+With `--frames N`, capture records at least N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`).
+If the budget is reached while a contact is active, dump asks you to release all contacts and keeps
+recording through the release frame before it prints the summary:
 
 - output path;
 - device path;
@@ -81,9 +103,10 @@ For frame-limited edge gesture captures, a useful flow is:
 1. start capture;
 2. perform the edge or mixed gesture;
 3. release the gesture finger;
-4. place a finger in the center until the frame budget finishes.
+4. if dump is still below its frame budget, move a finger in the center to produce more frames;
+5. when dump reports that the frame budget was reached, release all contacts.
 
-That captures the gesture release while keeping the event stream active. Without `--frames`, stop capture manually with Ctrl+C after reproducing the gesture.
+Without `--frames`, stop capture manually with Ctrl+C after reproducing the gesture.
 
 ## Capability metadata
 

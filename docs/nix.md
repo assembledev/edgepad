@@ -76,7 +76,7 @@ Import the Home Manager module in your home configuration:
     enable = true;
     device = "auto";
     edgeWidth = 0.10;
-    tapMinDurationMs = 80;
+    tapMinDurationMs = 40;
     swipeMinDistance = 0.02;
 
     gestures = [
@@ -201,9 +201,13 @@ seat ACL:
 
 ```bash
 sudo ./result/bin/edgepad devices
-sudo ./result/bin/edgepad dump --device /dev/input/eventX --out bug.ev --frames 300
+sudo ./result/bin/edgepad dump --device auto --out bug.ev --frames 300
 ./result/bin/edgepad replay bug.ev
 ```
+
+Stop `edgepad.service` before running `dump`; the daemon's `EVIOCGRAB` prevents a separate process
+from receiving physical events. `dump` warns when no events arrive but does not stop or restart the
+service.
 
 Dry-run proxy mode reads and routes events without grabbing the touchpad:
 
