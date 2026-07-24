@@ -312,6 +312,9 @@ edgepad dump --device auto --out bug.ev --frames 300
 edgepad replay bug.ev
 ```
 
+The frame count is a minimum capture budget. If it is reached while a finger is down, dump asks you
+to release all contacts and records their release frames before exiting.
+
 Stop `edgepad.service` before capture: the running daemon holds the physical touchpad with
 `EVIOCGRAB`, so another reader receives no events. `dump` warns after three seconds without input
 but never stops the service automatically. If input arrives later, it confirms that capture has

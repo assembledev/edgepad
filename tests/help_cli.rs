@@ -135,4 +135,8 @@ fn dump_help_explains_running_daemon_limit() {
         stdout.contains("Stop edgepad.service before capturing"),
         "stdout was: {stdout}"
     );
+    assert!(
+        stdout.contains("Capture at least N frame boundaries, then stop when idle"),
+        "stdout was: {stdout}"
+    );
 }

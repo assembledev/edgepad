@@ -16,12 +16,13 @@ use edgepad::core::{
     SliderSpec, Zone,
 };
 use edgepad::device::{
-    discover_device_report, format_device_line, touchpad_candidates, wait_for_raw_device_events,
+    discover_device_report, format_device_line, physical_touch_is_down, touchpad_candidates,
+    wait_for_raw_device_events,
 };
 use edgepad::doctor::{run_doctor, DoctorCheck, DoctorConfig, DoctorReport, DoctorSection};
 use edgepad::dump::{
-    capabilities_from_raw_device, write_capture_header, write_fixture_events_with_limit,
-    write_raw_events_with_limit, WriteEventsResult,
+    capabilities_from_raw_device, write_capture_header, write_fixture_events_with_budget,
+    write_raw_events_with_budget, DumpCaptureDecision, DumpFrameBudget, WriteEventsResult,
 };
 use edgepad::proxy::{
     run_proxy, run_proxy_with_gesture_handler_and_ready, ProxyMode, ProxyRunConfig, ProxyRunLimit,
@@ -102,7 +103,7 @@ Options:
       --device auto|<event-node>  Physical touchpad selection
       --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
       --out <file.ev>             Output fixture path
-      --frames N                  Stop after N frame boundaries
+      --frames N                  Capture at least N frame boundaries, then stop when idle
       --raw                       Write raw evdev events instead of replay fixture events
 ";
 const PROXY_USAGE: &str = "usage: edgepad proxy --frames N (--dry-run | --uinput --grab) [--config <file> | --built-in-defaults] [--device auto|<event-node>] [--input-root <input-root>] [--edge-width F]";
@@ -880,10 +881,10 @@ impl DumpFormat {
 fn dump(
     device_path: &Path,
     out_path: &Path,
-    mut remaining_frames: Option<usize>,
+    requested_frames: Option<usize>,
     raw: bool,
 ) -> Result<(), String> {
-    let requested_frames = remaining_frames;
+    let mut frame_budget = DumpFrameBudget::new(requested_frames);
     let format = if raw {
         DumpFormat::Raw
     } else {
@@ -927,22 +928,38 @@ fn dump(
             no_events_warning_emitted = false;
         }
         let result = if raw {
-            write_raw_events_with_limit(&mut writer, events, &mut remaining_frames)
+            write_raw_events_with_budget(&mut writer, events, &mut frame_budget)
         } else {
-            write_fixture_events_with_limit(&mut writer, events, &mut remaining_frames)
+            write_fixture_events_with_budget(&mut writer, events, &mut frame_budget)
         }
         .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
+        let can_finish_after_batch =
+            result.frame_boundaries_written > 0 && result.ends_at_frame_boundary;
         total.add(result);
-        if total.reached_limit {
-            print_dump_summary(
-                device_path,
-                out_path,
-                capabilities,
-                requested_frames,
-                total,
-                format,
-            );
-            return Ok(());
+        if frame_budget.is_reached() && can_finish_after_batch {
+            let touch_down = physical_touch_is_down(&device, capabilities).map_err(|err| {
+                format!(
+                    "failed to read current touch state from {}: {err}",
+                    device_path.display()
+                )
+            })?;
+            match frame_budget.decide_after_batch(touch_down) {
+                DumpCaptureDecision::Continue => {}
+                DumpCaptureDecision::DrainStarted => {
+                    eprintln!("edgepad dump: frame budget reached; release all contacts to finish");
+                }
+                DumpCaptureDecision::Finish => {
+                    print_dump_summary(
+                        device_path,
+                        out_path,
+                        capabilities,
+                        requested_frames,
+                        total,
+                        format,
+                    );
+                    return Ok(());
+                }
+            }
         }
     }
 }
@@ -981,6 +998,12 @@ fn print_dump_summary(
     }
     if let Some(requested_frames) = requested_frames {
         println!("requested_frame_boundaries: {requested_frames}");
+        println!(
+            "additional_frame_boundaries_after_budget: {}",
+            stats
+                .frame_boundaries_written
+                .saturating_sub(requested_frames)
+        );
     }
     println!(
         "written_frame_boundaries: {}",
@@ -1558,15 +1581,13 @@ fn print_replay_diagnosis(
             "diagnosis: no contact starts found; capture likely began after a finger was already down or no new touch started"
         );
         println!(
-            "diagnosis_hint: start dump before touching the pad, or use the gesture-release-then-center-finger flow for frame-limited captures"
+            "diagnosis_hint: start dump before touching the pad; frame-limited dump waits for active contacts to be released"
         );
     } else if stats.tracking_starts > stats.tracking_ends {
         println!(
-            "diagnosis: capture ended with active contact(s); frame budget likely stopped mid-contact"
+            "diagnosis: capture ended with active contact(s); input is incomplete or truncated"
         );
-        println!(
-            "diagnosis_hint: for edge gesture captures, perform the gesture, release it, then place a finger in the center until --frames finishes"
-        );
+        println!("diagnosis_hint: capture again and release all contacts before stopping");
     } else if stats.tracking_starts == 0 && stats.total_events == 0 {
         println!("diagnosis: no replay-relevant touch events found");
     } else if passthrough_events == 0 && gestures == 0 && slider_steps == 0 {

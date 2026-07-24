@@ -87,7 +87,9 @@ Unknown event types and codes are kept with numeric fallback instead of being si
 
 ## Frame limits
 
-With `--frames N`, capture stops after N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`) and prints a summary:
+With `--frames N`, capture records at least N frame boundaries (`SYN_REPORT` or `SYN_DROPPED`).
+If the budget is reached while a contact is active, dump asks you to release all contacts and keeps
+recording through the release frame before it prints the summary:
 
 - output path;
 - device path;
@@ -101,9 +103,10 @@ For frame-limited edge gesture captures, a useful flow is:
 1. start capture;
 2. perform the edge or mixed gesture;
 3. release the gesture finger;
-4. place a finger in the center until the frame budget finishes.
+4. if dump is still below its frame budget, move a finger in the center to produce more frames;
+5. when dump reports that the frame budget was reached, release all contacts.
 
-That captures the gesture release while keeping the event stream active. Without `--frames`, stop capture manually with Ctrl+C after reproducing the gesture.
+Without `--frames`, stop capture manually with Ctrl+C after reproducing the gesture.
 
 ## Capability metadata
 
