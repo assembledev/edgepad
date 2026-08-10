@@ -11,6 +11,7 @@ let
   toml = pkgs.formats.toml { };
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.edgepad;
   commandActionType = lib.types.nonEmptyListOf lib.types.str;
+  configPath = "${config.xdg.configHome}/edgepad/edgepad.toml";
 
   gestureType = lib.types.submodule {
     options = {
@@ -201,13 +202,22 @@ in
         Description = "edgepad touchpad edge gesture daemon";
         After = [ "graphical-session.target" ];
         PartOf = [ "graphical-session.target" ];
+        "X-Reload-Triggers" = [ configFile ];
       };
 
       Service = {
         Type = "notify";
         NotifyAccess = "main";
         TimeoutStartSec = "45s";
-        ExecStart = "${lib.getExe cfg.package} daemon --config ${configFile}";
+        ExecStart = lib.escapeShellArgs [
+          (lib.getExe cfg.package)
+          "daemon"
+          "--config"
+          configPath
+          "--device"
+          cfg.device
+        ];
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
         RestartSec = "1s";
       };

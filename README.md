@@ -12,6 +12,7 @@ The hard part is input correctness: Type-B multitouch slots, mixed edge/center c
 - Continuous edge sliders for stepwise controls such as volume and brightness.
 - Normal touchpad passthrough for unclaimed center contacts.
 - Long-running user-session daemon with TOML config.
+- Transactional config reload without releasing the touchpad grab.
 - Command actions as argv arrays, without shell re-splitting.
 - Automatic touchpad discovery when exactly one readable candidate is present.
 - Read-only device discovery and capture tools for debugging.
@@ -143,11 +144,15 @@ direction = "tap"
 action = ["notify-send", "edgepad", "play-pause"]
 ```
 
-Restart the user service after config changes:
+Reload the user service after config changes:
 
 ```bash
-systemctl --user restart edgepad.service
+systemctl --user reload edgepad.service
 ```
+
+The daemon validates the complete file and keeps the previous configuration if the reload fails.
+If a touch is active, it defers the swap until all fingers lift, so one contact is never interpreted
+using two configurations. Changing the configured input device still requires a service restart.
 
 Watch logs:
 

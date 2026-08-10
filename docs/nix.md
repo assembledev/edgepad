@@ -115,6 +115,11 @@ edgepad doctor
 systemctl --user status edgepad.service
 ```
 
+Changes to gesture, slider, edge-width, and recognition options are applied with a daemon reload
+when Home Manager activates the new generation. A reload waits for active contacts to lift and
+keeps the previous configuration if validation fails. Package or device-selection changes restart
+the service because they change the executable or physical device grab.
+
 The service is ready only after edgepad has created the virtual touchpad and grabbed the physical
 device. If pointer input behaves incorrectly, stop it immediately:
 
