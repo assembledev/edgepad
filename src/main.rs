@@ -389,7 +389,7 @@ impl DaemonConfigOverrides {
             config.device = device.clone();
         }
         if let Some(edge_width) = self.edge_width {
-            config.edge_width = edge_width;
+            config.override_edge_width(edge_width);
         }
     }
 }
@@ -1941,6 +1941,7 @@ mod tests {
             r#"
             device = "/dev/input/event9"
             edge_width = 0.30
+            right_edge_width = 0.35
 
             [[gestures]]
             zone = "right"
@@ -1966,6 +1967,7 @@ mod tests {
 
         assert_eq!(runtime.active_config().device, device_override);
         assert_eq!(runtime.active_config().edge_width, 0.15);
+        assert_eq!(runtime.active_config().edge_width_overrides.right, None);
         assert_eq!(runtime.active_config().gestures[0].zone, Zone::Right);
         assert_eq!(recognition.edge_widths.right, 0.15);
         assert_eq!(recognition.edge_widths.left, 0.0);

@@ -189,6 +189,14 @@ device = "auto"
 edge_width = 0.10
 ```
 
+Individual edges can optionally override that default. Omitted overrides continue to use
+`edge_width`:
+
+```toml
+left_edge_width = 0.08
+right_edge_width = 0.12
+```
+
 `tap_min_duration_ms` ignores very short edge taps. It defaults to `40`; set it to `0` to disable the guard.
 
 ```toml

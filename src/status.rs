@@ -508,7 +508,7 @@ fn property_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
 mod tests {
     use super::*;
     use crate::config::{
-        GestureActionConfig, GestureBindingConfig, DEFAULT_SWIPE_MIN_DISTANCE,
+        EdgeWidthOverrides, GestureActionConfig, GestureBindingConfig, DEFAULT_SWIPE_MIN_DISTANCE,
         DEFAULT_TAP_MIN_DURATION_MS,
     };
     use crate::core::GestureDirection;
@@ -518,6 +518,7 @@ mod tests {
         let config = EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: 0.20,
+            edge_width_overrides: EdgeWidthOverrides::default(),
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: vec![
@@ -550,6 +551,7 @@ mod tests {
         let config = EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: 0.10,
+            edge_width_overrides: EdgeWidthOverrides::default(),
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: vec![

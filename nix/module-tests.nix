@@ -94,6 +94,10 @@ let
           enable = true;
           device = "auto";
           edgeWidth = 0.1;
+          edgeWidths = {
+            left = 0.08;
+            top = 0.12;
+          };
           tapMinDurationMs = 90;
           swipeMinDistance = 0.03;
           gestures = [
@@ -162,6 +166,10 @@ let
       set -eu
       grep -F 'device = "auto"' ${homeConfigFile}
       grep -F 'edge_width = 0.1' ${homeConfigFile}
+      grep -F 'left_edge_width = 0.08' ${homeConfigFile}
+      grep -F 'top_edge_width = 0.12' ${homeConfigFile}
+      ! grep -F 'right_edge_width' ${homeConfigFile}
+      ! grep -F 'bottom_edge_width' ${homeConfigFile}
       grep -F 'tap_min_duration_ms = 90' ${homeConfigFile}
       grep -F 'swipe_min_distance = 0.03' ${homeConfigFile}
       grep -F '[[gestures]]' ${homeConfigFile}

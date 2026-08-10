@@ -76,6 +76,8 @@ Import the Home Manager module in your home configuration:
     enable = true;
     device = "auto";
     edgeWidth = 0.10;
+    # Optional; omitted edges continue to use edgeWidth.
+    edgeWidths.right = 0.12;
     tapMinDurationMs = 40;
     swipeMinDistance = 0.02;
 

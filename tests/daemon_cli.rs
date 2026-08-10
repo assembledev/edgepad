@@ -315,7 +315,8 @@ fn daemon_cli_sighup_reloads_config_while_waiting_for_device() {
         &config_path,
         r#"
 device = "auto"
-edge_width = 0.25
+edge_width = 0.10
+left_edge_width = 0.25
 
 [[gestures]]
 zone = "left"
