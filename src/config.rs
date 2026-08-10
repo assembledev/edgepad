@@ -23,10 +23,19 @@ pub use crate::core::{DEFAULT_SWIPE_MIN_DISTANCE, DEFAULT_TAP_MIN_DURATION_MS};
 pub struct EdgepadConfig {
     pub device: DeviceConfig,
     pub edge_width: f32,
+    pub edge_width_overrides: EdgeWidthOverrides,
     pub tap_min_duration_ms: u64,
     pub swipe_min_distance: f32,
     pub gestures: Vec<GestureBindingConfig>,
     pub sliders: Vec<SliderBindingConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EdgeWidthOverrides {
+    pub left: Option<f32>,
+    pub right: Option<f32>,
+    pub top: Option<f32>,
+    pub bottom: Option<f32>,
 }
 
 impl Default for EdgepadConfig {
@@ -34,6 +43,7 @@ impl Default for EdgepadConfig {
         Self {
             device: DeviceConfig::Auto,
             edge_width: DEFAULT_EDGE_WIDTH,
+            edge_width_overrides: EdgeWidthOverrides::default(),
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
@@ -57,6 +67,12 @@ impl EdgepadConfig {
         if let Some(edge_width) = raw.edge_width {
             config.edge_width = validate_edge_width(edge_width, "edge_width")?;
         }
+        config.edge_width_overrides = EdgeWidthOverrides {
+            left: validate_optional_edge_width(raw.left_edge_width, "left_edge_width")?,
+            right: validate_optional_edge_width(raw.right_edge_width, "right_edge_width")?,
+            top: validate_optional_edge_width(raw.top_edge_width, "top_edge_width")?,
+            bottom: validate_optional_edge_width(raw.bottom_edge_width, "bottom_edge_width")?,
+        };
         if let Some(tap_min_duration_ms) = raw.tap_min_duration_ms {
             config.tap_min_duration_ms =
                 validate_tap_min_duration_ms(tap_min_duration_ms, "tap_min_duration_ms")?;
@@ -96,19 +112,34 @@ impl EdgepadConfig {
     }
 
     pub fn active_edge_widths(&self) -> EdgeWidths {
+        let configured = self.configured_edge_widths();
         EdgeWidths {
-            left: self.zone_edge_width(Zone::Left),
-            right: self.zone_edge_width(Zone::Right),
-            top: self.zone_edge_width(Zone::Top),
-            bottom: self.zone_edge_width(Zone::Bottom),
+            left: self.active_zone_edge_width(Zone::Left, configured.left),
+            right: self.active_zone_edge_width(Zone::Right, configured.right),
+            top: self.active_zone_edge_width(Zone::Top, configured.top),
+            bottom: self.active_zone_edge_width(Zone::Bottom, configured.bottom),
         }
     }
 
-    fn zone_edge_width(&self, zone: Zone) -> f32 {
+    pub fn configured_edge_widths(&self) -> EdgeWidths {
+        EdgeWidths {
+            left: self.edge_width_overrides.left.unwrap_or(self.edge_width),
+            right: self.edge_width_overrides.right.unwrap_or(self.edge_width),
+            top: self.edge_width_overrides.top.unwrap_or(self.edge_width),
+            bottom: self.edge_width_overrides.bottom.unwrap_or(self.edge_width),
+        }
+    }
+
+    pub fn override_edge_width(&mut self, width: f32) {
+        self.edge_width = width;
+        self.edge_width_overrides = EdgeWidthOverrides::default();
+    }
+
+    fn active_zone_edge_width(&self, zone: Zone, configured_width: f32) -> f32 {
         if self.gestures.iter().any(|binding| binding.zone == zone)
             || self.sliders.iter().any(|binding| binding.zone == zone)
         {
-            self.edge_width
+            configured_width
         } else {
             0.0
         }
@@ -374,6 +405,12 @@ fn validate_edge_width(parsed: f32, name: &str) -> Result<f32, String> {
     Ok(parsed)
 }
 
+fn validate_optional_edge_width(value: Option<f32>, name: &str) -> Result<Option<f32>, String> {
+    value
+        .map(|width| validate_edge_width(width, name))
+        .transpose()
+}
+
 fn validate_slider_step(parsed: f32, name: &str) -> Result<f32, String> {
     if !(parsed > 0.0 && parsed <= 1.0) {
         return Err(format!("{name} must be > 0 and <= 1"));
@@ -532,6 +569,10 @@ fn slider_label(index: usize) -> String {
 struct RawEdgepadConfig {
     device: Option<String>,
     edge_width: Option<f32>,
+    left_edge_width: Option<f32>,
+    right_edge_width: Option<f32>,
+    top_edge_width: Option<f32>,
+    bottom_edge_width: Option<f32>,
     tap_min_duration_ms: Option<u64>,
     swipe_min_distance: Option<f32>,
     #[serde(default)]
@@ -659,6 +700,7 @@ mod tests {
             DeviceConfig::Path(PathBuf::from("/dev/input/event7"))
         );
         assert_eq!(config.edge_width, 0.20);
+        assert_eq!(config.edge_width_overrides, EdgeWidthOverrides::default());
         assert_eq!(config.tap_min_duration_ms, 90);
         assert_eq!(config.swipe_min_distance, 0.03);
         assert_eq!(
@@ -733,6 +775,92 @@ mod tests {
                 bottom: 0.0,
             }
         );
+    }
+
+    #[test]
+    fn edgepad_config_applies_optional_per_edge_widths_with_global_fallback() {
+        let config = EdgepadConfig::parse(
+            r#"
+            edge_width = 0.10
+            left_edge_width = 0.08
+            top_edge_width = 0.16
+
+            [[gestures]]
+            zone = "left"
+            direction = "down"
+            action = { log = true }
+
+            [[gestures]]
+            zone = "right"
+            direction = "down"
+            action = { log = true }
+
+            [[gestures]]
+            zone = "top"
+            direction = "right"
+            action = { log = true }
+            "#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(
+            config.edge_width_overrides,
+            EdgeWidthOverrides {
+                left: Some(0.08),
+                right: None,
+                top: Some(0.16),
+                bottom: None,
+            }
+        );
+        assert_eq!(
+            config.configured_edge_widths(),
+            EdgeWidths {
+                left: 0.08,
+                right: 0.10,
+                top: 0.16,
+                bottom: 0.10,
+            }
+        );
+        assert_eq!(
+            config.active_edge_widths(),
+            EdgeWidths {
+                left: 0.08,
+                right: 0.10,
+                top: 0.16,
+                bottom: 0.0,
+            }
+        );
+    }
+
+    #[test]
+    fn edgepad_config_rejects_invalid_per_edge_width() {
+        let err = EdgepadConfig::parse(
+            r#"
+            edge_width = 0.10
+            right_edge_width = 0.50
+            "#,
+        )
+        .expect_err("invalid per-edge width should fail");
+
+        assert_eq!(err, "right_edge_width must be > 0 and < 0.5");
+    }
+
+    #[test]
+    fn global_edge_width_override_clears_per_edge_widths() {
+        let mut config = EdgepadConfig::parse(
+            r#"
+            edge_width = 0.10
+            left_edge_width = 0.08
+            right_edge_width = 0.16
+            "#,
+        )
+        .expect("config should parse");
+
+        config.override_edge_width(0.20);
+
+        assert_eq!(config.edge_width, 0.20);
+        assert_eq!(config.edge_width_overrides, EdgeWidthOverrides::default());
+        assert_eq!(config.configured_edge_widths(), EdgeWidths::all(0.20));
     }
 
     #[test]

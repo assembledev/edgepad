@@ -46,6 +46,13 @@ struct ProxyLoopConfig {
     buttonpad: bool,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProxyRecognitionConfig {
+    pub edge_widths: EdgeWidths,
+    pub engine_options: EngineOptions,
+    pub slider_specs: Vec<SliderSpec>,
+}
+
 #[derive(Debug, Default)]
 struct PendingRawFrame {
     events: Vec<RawEvent>,
@@ -77,6 +84,10 @@ impl PendingRawFrame {
     fn discard(&mut self) {
         self.events.clear();
         self.timestamp = None;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.events.is_empty()
     }
 }
 
@@ -204,6 +215,7 @@ pub struct ProxyRuntimeStats {
     pub settle_output_events: usize,
     pub idle_drain_frame_boundaries: usize,
     pub idle_drain_timed_out: bool,
+    pub recognition_reloads: usize,
     pub gestures: Vec<Gesture>,
     pub gesture_counts: BTreeMap<GestureCountKey, usize>,
     pub slider_steps: Vec<SliderStep>,
@@ -227,6 +239,10 @@ pub trait GestureHandler {
     fn handle_gesture(&mut self, gesture: Gesture);
 
     fn handle_slider_step(&mut self, _step: SliderStep) {}
+
+    fn take_recognition_config_reload(&mut self) -> Option<ProxyRecognitionConfig> {
+        None
+    }
 }
 
 #[derive(Debug, Default)]
@@ -521,7 +537,7 @@ where
     let mut engine = Engine::with_options(
         config.capabilities,
         config.edge_widths,
-        config.slider_specs,
+        config.slider_specs.clone(),
         config.engine_options,
     );
     engine.set_buttonpad(config.buttonpad);
@@ -546,6 +562,14 @@ where
             if stopper.observe_idle_poll(touch_state.is_touch_down()) {
                 finish_proxy_output(&mut composer, sink, &mut stats)?;
                 return Ok(stats);
+            }
+            if pending.is_empty() && !resync_pending {
+                stats.recognition_reloads += apply_pending_recognition_reload(
+                    &mut engine,
+                    &config,
+                    touch_state.is_touch_down(),
+                    handler,
+                ) as usize;
             }
             if stopper.is_draining() && drain_deadline.is_none() {
                 drain_deadline = stopper
@@ -594,6 +618,12 @@ where
                         finish_proxy_output(&mut composer, sink, &mut stats)?;
                         return Ok(stats);
                     }
+                    stats.recognition_reloads += apply_pending_recognition_reload(
+                        &mut engine,
+                        &config,
+                        touch_state.is_touch_down(),
+                        handler,
+                    ) as usize;
                     stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                     continue;
                 }
@@ -618,6 +648,12 @@ where
                         finish_proxy_output(&mut composer, sink, &mut stats)?;
                         return Ok(stats);
                     }
+                    stats.recognition_reloads += apply_pending_recognition_reload(
+                        &mut engine,
+                        &config,
+                        touch_state.is_touch_down(),
+                        handler,
+                    ) as usize;
                     if stopper.is_draining() && drain_deadline.is_none() {
                         drain_deadline = stopper
                             .drain_timeout()
@@ -629,6 +665,35 @@ where
             }
         }
     }
+}
+
+fn apply_pending_recognition_reload<H>(
+    engine: &mut Engine,
+    config: &ProxyLoopConfig,
+    physical_touch_down: bool,
+    handler: &mut H,
+) -> bool
+where
+    H: GestureHandler,
+{
+    if physical_touch_down {
+        return false;
+    }
+
+    let Some(reloaded) = handler.take_recognition_config_reload() else {
+        return false;
+    };
+    let pressed_physical_buttons = engine.pressed_physical_buttons();
+    let mut replacement = Engine::with_options(
+        config.capabilities,
+        reloaded.edge_widths,
+        reloaded.slider_specs,
+        reloaded.engine_options,
+    );
+    replacement.set_buttonpad(config.buttonpad);
+    replacement.restore_pressed_physical_buttons(&pressed_physical_buttons);
+    *engine = replacement;
+    true
 }
 
 fn fetch_proxy_events(
@@ -1110,6 +1175,66 @@ mod tests {
             x: AxisRange { min: 0, max: 1000 },
             y: AxisRange { min: 0, max: 700 },
         }
+    }
+
+    #[derive(Debug, Default)]
+    struct ReloadingGestureHandler {
+        pending: Option<ProxyRecognitionConfig>,
+        reload_polls: usize,
+    }
+
+    impl GestureHandler for ReloadingGestureHandler {
+        fn handle_gesture(&mut self, _gesture: Gesture) {}
+
+        fn take_recognition_config_reload(&mut self) -> Option<ProxyRecognitionConfig> {
+            self.reload_polls += 1;
+            self.pending.take()
+        }
+    }
+
+    #[test]
+    fn recognition_reload_waits_for_idle_and_preserves_button_state() {
+        let capabilities = test_capabilities();
+        let config = ProxyLoopConfig {
+            capabilities,
+            edge_widths: EdgeWidths::all(0.10),
+            engine_options: EngineOptions::default(),
+            slider_specs: Vec::new(),
+            buttonpad: true,
+        };
+        let mut engine = Engine::new(capabilities, config.edge_widths);
+        engine.set_buttonpad(true);
+        engine.update_physical_button(BTN_LEFT, true);
+        let mut handler = ReloadingGestureHandler {
+            pending: Some(ProxyRecognitionConfig {
+                edge_widths: EdgeWidths::all(0.20),
+                engine_options: EngineOptions {
+                    tap_min_duration: Duration::from_millis(120),
+                    swipe_min_distance: 0.05,
+                },
+                slider_specs: Vec::new(),
+            }),
+            reload_polls: 0,
+        };
+
+        assert!(!apply_pending_recognition_reload(
+            &mut engine,
+            &config,
+            true,
+            &mut handler
+        ));
+        assert_eq!(handler.reload_polls, 0);
+        assert!(handler.pending.is_some());
+
+        assert!(apply_pending_recognition_reload(
+            &mut engine,
+            &config,
+            false,
+            &mut handler
+        ));
+        assert_eq!(handler.reload_polls, 1);
+        assert!(handler.pending.is_none());
+        assert_eq!(engine.pressed_physical_buttons(), vec![BTN_LEFT]);
     }
 
     #[test]

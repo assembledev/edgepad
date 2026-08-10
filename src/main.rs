@@ -3,7 +3,10 @@ use std::fs::{self, File};
 use std::io::LineWriter;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,8 +28,9 @@ use edgepad::dump::{
     write_raw_events_with_budget, DumpCaptureDecision, DumpFrameBudget, WriteEventsResult,
 };
 use edgepad::proxy::{
-    run_proxy, run_proxy_with_gesture_handler_and_ready, ProxyMode, ProxyRunConfig, ProxyRunLimit,
-    ProxyRunSummary, StopAfterFrameLimit, StopToken, DEFAULT_EDGE_WIDTH,
+    run_proxy, run_proxy_with_gesture_handler_and_ready, GestureHandler, ProxyMode,
+    ProxyRecognitionConfig, ProxyRunConfig, ProxyRunLimit, ProxyRunSummary, StopAfterFrameLimit,
+    StopToken, DEFAULT_EDGE_WIDTH,
 };
 use edgepad::raw::{
     parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawOutputComposer, RawOutputSink,
@@ -133,6 +137,9 @@ Options:
       --device auto|<event-node>  Touchpad device selection [default: auto]
       --input-root <input-root>   Input device directory for auto-detect [default: /dev/input]
       --edge-width F              Edge zone width as a fraction of the touchpad axis
+
+Signals:
+      SIGHUP                      Reload config after active contacts lift
 ";
 const DOCTOR_USAGE: &str = "usage: edgepad doctor [--config <file>] [--device auto|<event-node>] [--input-root <input-root>] [--uinput <path>] [--service <unit>]";
 const DOCTOR_HELP: &str = "\
@@ -168,6 +175,7 @@ const DAEMON_ACTION_QUEUE_CAPACITY: usize = 32;
 const DAEMON_STARTUP_RETRY_ENV: &str = "EDGEPAD_DAEMON_STARTUP_RETRY_MS";
 
 static DAEMON_STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
+static DAEMON_RELOAD_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 fn main() {
     match run() {
@@ -369,10 +377,47 @@ impl RecognitionProfile {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct DaemonConfigOverrides {
+    device: Option<DeviceConfig>,
+    edge_width: Option<f32>,
+}
+
+impl DaemonConfigOverrides {
+    fn apply(&self, config: &mut EdgepadConfig) {
+        if let Some(device) = &self.device {
+            config.device = device.clone();
+        }
+        if let Some(edge_width) = self.edge_width {
+            config.override_edge_width(edge_width);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReloadToken {
+    requested: Arc<AtomicBool>,
+}
+
+impl ReloadToken {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn request(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+    }
+
+    fn take_requested(&self) -> bool {
+        self.requested.swap(false, Ordering::SeqCst)
+    }
+}
+
 struct DaemonArgs {
     config: EdgepadConfig,
     config_path: PathBuf,
     input_root: PathBuf,
+    overrides: DaemonConfigOverrides,
 }
 
 fn parse_devices_args(mut args: impl Iterator<Item = String>) -> Result<DeviceArgs, String> {
@@ -624,19 +669,19 @@ fn parse_daemon_args(mut args: impl Iterator<Item = String>) -> Result<DaemonArg
         Some(path) => path,
         None => default_edgepad_config_path()?,
     };
+    let overrides = DaemonConfigOverrides {
+        device: device_override,
+        edge_width: edge_width_override,
+    };
     let mut config = load_daemon_config(&config_path)?;
-    if let Some(device) = device_override {
-        config.device = device;
-    }
-    if let Some(edge_width) = edge_width_override {
-        config.edge_width = edge_width;
-    }
+    overrides.apply(&mut config);
     validate_daemon_config(&config, &config_path)?;
 
     Ok(DaemonArgs {
         config,
         config_path,
         input_root,
+        overrides,
     })
 }
 
@@ -1051,26 +1096,129 @@ fn proxy(args: &ProxyArgs) -> Result<(), String> {
     Ok(())
 }
 
+struct DaemonRuntimeHandler {
+    dispatcher: ActionDispatcher,
+    config_path: PathBuf,
+    overrides: DaemonConfigOverrides,
+    active_config: EdgepadConfig,
+    reload: ReloadToken,
+}
+
+impl DaemonRuntimeHandler {
+    fn new(args: &DaemonArgs, reload: ReloadToken) -> Result<Self, String> {
+        Ok(Self {
+            dispatcher: ActionDispatcher::new_with_sliders(
+                args.config.gestures.clone(),
+                args.config.sliders.clone(),
+                DAEMON_ACTION_QUEUE_CAPACITY,
+            )?,
+            config_path: args.config_path.clone(),
+            overrides: args.overrides.clone(),
+            active_config: args.config.clone(),
+            reload,
+        })
+    }
+
+    fn active_config(&self) -> &EdgepadConfig {
+        &self.active_config
+    }
+
+    fn apply_pending_reload(&mut self) -> Option<ProxyRecognitionConfig> {
+        if !self.reload.take_requested() {
+            return None;
+        }
+
+        let candidate = self.load_reload_candidate();
+        let candidate = match candidate {
+            Ok(candidate) => candidate,
+            Err(err) => {
+                eprintln!("edgepad daemon: reload rejected: {err}; keeping previous configuration");
+                return None;
+            }
+        };
+
+        if candidate.device != self.active_config.device {
+            eprintln!(
+                "edgepad daemon: reload rejected: device changed from {} to {}; restart required; keeping previous configuration",
+                device_config_label(&self.active_config.device),
+                device_config_label(&candidate.device)
+            );
+            return None;
+        }
+        if candidate == self.active_config {
+            eprintln!("edgepad daemon: reload complete; configuration unchanged");
+            return None;
+        }
+
+        let recognition = ProxyRecognitionConfig {
+            edge_widths: candidate.active_edge_widths(),
+            engine_options: candidate.engine_options(),
+            slider_specs: candidate.slider_specs(),
+        };
+        self.dispatcher
+            .reconfigure(candidate.gestures.clone(), candidate.sliders.clone());
+        self.active_config = candidate;
+        eprintln!(
+            "edgepad daemon: reload complete; edge_widths={} gesture_bindings={} sliders={}",
+            edge_widths_label(recognition.edge_widths),
+            self.active_config.gestures.len(),
+            self.active_config.sliders.len()
+        );
+        Some(recognition)
+    }
+
+    fn load_reload_candidate(&self) -> Result<EdgepadConfig, String> {
+        let mut candidate = load_daemon_config(&self.config_path)?;
+        self.overrides.apply(&mut candidate);
+        validate_daemon_config(&candidate, &self.config_path)?;
+        Ok(candidate)
+    }
+
+    fn shutdown(self) -> ActionDispatcherStats {
+        self.dispatcher.shutdown()
+    }
+}
+
+impl GestureHandler for DaemonRuntimeHandler {
+    fn handle_gesture(&mut self, gesture: edgepad::core::Gesture) {
+        self.dispatcher.dispatch_gesture(gesture);
+    }
+
+    fn handle_slider_step(&mut self, step: edgepad::core::SliderStep) {
+        self.dispatcher.dispatch_slider_step(step);
+    }
+
+    fn take_recognition_config_reload(&mut self) -> Option<ProxyRecognitionConfig> {
+        self.apply_pending_reload()
+    }
+}
+
+fn device_config_label(device: &DeviceConfig) -> String {
+    match device {
+        DeviceConfig::Auto => "auto".to_string(),
+        DeviceConfig::Path(path) => path.display().to_string(),
+    }
+}
+
 fn daemon(args: &DaemonArgs) -> Result<(), String> {
     let startup_retry_timeout = daemon_startup_retry_timeout()?;
     let stop = StopToken::new();
-    install_daemon_signal_handlers(stop.clone())?;
-    let mut action_dispatcher = ActionDispatcher::new_with_sliders(
-        args.config.gestures.clone(),
-        args.config.sliders.clone(),
-        DAEMON_ACTION_QUEUE_CAPACITY,
-    )?;
+    let reload = ReloadToken::new();
+    install_daemon_signal_handlers(stop.clone(), reload.clone())?;
+    let mut runtime = DaemonRuntimeHandler::new(args, reload)?;
     eprintln!("edgepad daemon: config={}", args.config_path.display());
-    eprintln!("edgepad daemon: press Ctrl+C to stop");
+    eprintln!("edgepad daemon: press Ctrl+C to stop; send SIGHUP to reload");
 
-    let run_result = run_daemon_proxy_with_startup_retry(
-        &args.config,
+    let mut run_result = run_daemon_proxy_with_startup_retry(
         &args.input_root,
         stop,
-        &mut action_dispatcher,
+        &mut runtime,
         startup_retry_timeout,
     );
-    let action_stats = action_dispatcher.shutdown();
+    if let Ok(Some(summary)) = &mut run_result {
+        summary.edge_widths = runtime.active_config().active_edge_widths();
+    }
+    let action_stats = runtime.shutdown();
     if let Some(summary) = run_result? {
         print_proxy_summary(&summary);
     }
@@ -1096,10 +1244,9 @@ fn parse_daemon_startup_retry_timeout_ms(raw: &str) -> Result<Duration, String> 
 }
 
 fn run_daemon_proxy_with_startup_retry(
-    config: &EdgepadConfig,
     input_root: &Path,
     stop: StopToken,
-    action_dispatcher: &mut ActionDispatcher,
+    runtime: &mut DaemonRuntimeHandler,
     startup_retry_timeout: Duration,
 ) -> Result<Option<ProxyRunSummary>, String> {
     let started_at = Instant::now();
@@ -1111,6 +1258,9 @@ fn run_daemon_proxy_with_startup_retry(
             eprintln!("edgepad daemon: stopped before startup completed");
             return Ok(None);
         }
+
+        let _ = runtime.apply_pending_reload();
+        let config = runtime.active_config().clone();
 
         let run_result = config.device.resolve(input_root).and_then(|device_path| {
             let edge_widths = config.active_edge_widths();
@@ -1137,7 +1287,7 @@ fn run_daemon_proxy_with_startup_retry(
                     slider_specs: config.slider_specs(),
                     mode: ProxyMode::UinputGrab,
                 },
-                action_dispatcher,
+                runtime,
                 &mut |ready_device| {
                     if edgepad::notify::notify_ready(ready_device)? {
                         eprintln!(
@@ -1206,17 +1356,22 @@ fn should_retry_daemon_startup_error(err: &str) -> bool {
         || err.starts_with("failed to grab device ")
 }
 
-fn install_daemon_signal_handlers(stop: StopToken) -> Result<(), String> {
+fn install_daemon_signal_handlers(stop: StopToken, reload: ReloadToken) -> Result<(), String> {
     DAEMON_STOP_REQUESTED.store(false, Ordering::SeqCst);
+    DAEMON_RELOAD_REQUESTED.store(false, Ordering::SeqCst);
     register_daemon_signal_handler(libc::SIGINT)?;
     register_daemon_signal_handler(libc::SIGTERM)?;
+    register_daemon_signal_handler(libc::SIGHUP)?;
     thread::Builder::new()
         .name("edgepad-daemon-signal".to_string())
         .spawn(move || {
             while !stop.is_stopped() {
-                if DAEMON_STOP_REQUESTED.load(Ordering::SeqCst) {
+                if DAEMON_STOP_REQUESTED.swap(false, Ordering::SeqCst) {
                     stop.stop();
                     return;
+                }
+                if DAEMON_RELOAD_REQUESTED.swap(false, Ordering::SeqCst) {
+                    reload.request();
                 }
                 thread::sleep(DAEMON_SIGNAL_POLL_INTERVAL);
             }
@@ -1246,8 +1401,12 @@ fn register_daemon_signal_handler(signal: libc::c_int) -> Result<(), String> {
     Ok(())
 }
 
-extern "C" fn handle_daemon_signal(_signal: libc::c_int) {
-    DAEMON_STOP_REQUESTED.store(true, Ordering::SeqCst);
+extern "C" fn handle_daemon_signal(signal: libc::c_int) {
+    if signal == libc::SIGHUP {
+        DAEMON_RELOAD_REQUESTED.store(true, Ordering::SeqCst);
+    } else {
+        DAEMON_STOP_REQUESTED.store(true, Ordering::SeqCst);
+    }
 }
 
 fn print_action_summary(stats: &ActionDispatcherStats) {
@@ -1310,6 +1469,7 @@ fn print_proxy_summary(summary: &ProxyRunSummary) {
         stats.idle_drain_frame_boundaries
     );
     println!("idle_drain_timed_out: {}", stats.idle_drain_timed_out);
+    println!("recognition_reloads: {}", stats.recognition_reloads);
     println!("gestures: {}", stats.gestures.len());
     if !stats.gesture_counts.is_empty() {
         println!("gesture_counts:");
@@ -1627,7 +1787,20 @@ fn slider_direction_name(direction: SliderDirection) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicU64;
+
     use super::*;
+
+    static TEST_PATH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_test_config_path(label: &str) -> PathBuf {
+        let sequence = TEST_PATH_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+        std::env::temp_dir().join(format!("{label}-{}-{sequence}.toml", std::process::id()))
+    }
+
+    fn parse_test_daemon_config(input: &str) -> EdgepadConfig {
+        EdgepadConfig::parse(input).expect("test daemon config should parse")
+    }
 
     #[test]
     fn dump_next_command_points_raw_dumps_to_replay_raw() {
@@ -1741,5 +1914,138 @@ mod tests {
         assert!(!should_retry_daemon_startup_error(
             "touchpad is already touched on /dev/input/event7; release all fingers and retry live proxy"
         ));
+    }
+
+    #[test]
+    fn daemon_reload_applies_valid_config_and_preserves_cli_overrides() {
+        let config_path = unique_test_config_path("edgepad-reload-valid");
+        let device_override = DeviceConfig::Path(PathBuf::from("/dev/input/event7"));
+        let overrides = DaemonConfigOverrides {
+            device: Some(device_override.clone()),
+            edge_width: Some(0.15),
+        };
+        let mut initial = parse_test_daemon_config(
+            r#"
+            device = "/dev/input/event1"
+            edge_width = 0.10
+
+            [[gestures]]
+            zone = "left"
+            direction = "right"
+            action = { log = true }
+            "#,
+        );
+        overrides.apply(&mut initial);
+        fs::write(
+            &config_path,
+            r#"
+            device = "/dev/input/event9"
+            edge_width = 0.30
+            right_edge_width = 0.35
+
+            [[gestures]]
+            zone = "right"
+            direction = "down"
+            action = { log = true }
+            "#,
+        )
+        .expect("reload config should be written");
+        let args = DaemonArgs {
+            config: initial,
+            config_path: config_path.clone(),
+            input_root: PathBuf::from("/dev/input"),
+            overrides,
+        };
+        let reload = ReloadToken::new();
+        let mut runtime =
+            DaemonRuntimeHandler::new(&args, reload.clone()).expect("runtime should start");
+
+        reload.request();
+        let recognition = runtime
+            .apply_pending_reload()
+            .expect("valid reload should apply");
+
+        assert_eq!(runtime.active_config().device, device_override);
+        assert_eq!(runtime.active_config().edge_width, 0.15);
+        assert_eq!(runtime.active_config().edge_width_overrides.right, None);
+        assert_eq!(runtime.active_config().gestures[0].zone, Zone::Right);
+        assert_eq!(recognition.edge_widths.right, 0.15);
+        assert_eq!(recognition.edge_widths.left, 0.0);
+        runtime.shutdown();
+        fs::remove_file(config_path).expect("test config should be removed");
+    }
+
+    #[test]
+    fn daemon_reload_rejects_invalid_config_without_changing_active_config() {
+        let config_path = unique_test_config_path("edgepad-reload-invalid");
+        let initial = parse_test_daemon_config(
+            r#"
+            [[gestures]]
+            zone = "left"
+            direction = "right"
+            action = { log = true }
+            "#,
+        );
+        fs::write(&config_path, "this is not toml = [")
+            .expect("invalid reload config should be written");
+        let args = DaemonArgs {
+            config: initial.clone(),
+            config_path: config_path.clone(),
+            input_root: PathBuf::from("/dev/input"),
+            overrides: DaemonConfigOverrides::default(),
+        };
+        let reload = ReloadToken::new();
+        let mut runtime =
+            DaemonRuntimeHandler::new(&args, reload.clone()).expect("runtime should start");
+
+        reload.request();
+
+        assert!(runtime.apply_pending_reload().is_none());
+        assert_eq!(runtime.active_config(), &initial);
+        runtime.shutdown();
+        fs::remove_file(config_path).expect("test config should be removed");
+    }
+
+    #[test]
+    fn daemon_reload_rejects_device_change_as_restart_only() {
+        let config_path = unique_test_config_path("edgepad-reload-device");
+        let initial = parse_test_daemon_config(
+            r#"
+            device = "auto"
+
+            [[gestures]]
+            zone = "left"
+            direction = "right"
+            action = { log = true }
+            "#,
+        );
+        fs::write(
+            &config_path,
+            r#"
+            device = "/dev/input/event9"
+
+            [[gestures]]
+            zone = "right"
+            direction = "down"
+            action = { log = true }
+            "#,
+        )
+        .expect("reload config should be written");
+        let args = DaemonArgs {
+            config: initial.clone(),
+            config_path: config_path.clone(),
+            input_root: PathBuf::from("/dev/input"),
+            overrides: DaemonConfigOverrides::default(),
+        };
+        let reload = ReloadToken::new();
+        let mut runtime =
+            DaemonRuntimeHandler::new(&args, reload.clone()).expect("runtime should start");
+
+        reload.request();
+
+        assert!(runtime.apply_pending_reload().is_none());
+        assert_eq!(runtime.active_config(), &initial);
+        runtime.shutdown();
+        fs::remove_file(config_path).expect("test config should be removed");
     }
 }

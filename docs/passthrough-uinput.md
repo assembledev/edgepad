@@ -76,6 +76,7 @@ desktop.
 ```toml
 device = "auto"
 edge_width = 0.10
+# Optional: left_edge_width = 0.08
 tap_min_duration_ms = 40
 swipe_min_distance = 0.02
 

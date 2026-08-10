@@ -79,6 +79,7 @@ fn release_user_service_runs_installed_user_binary_with_config() {
     assert!(service.contains("Type=notify"));
     assert!(service.contains("NotifyAccess=main"));
     assert!(service.contains("TimeoutStartSec=45s"));
+    assert!(service.contains("ExecReload=kill -HUP $MAINPID"));
 }
 
 #[test]

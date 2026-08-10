@@ -381,6 +381,10 @@ pub mod core {
             }
         }
 
+        pub(crate) fn pressed_physical_buttons(&self) -> Vec<u16> {
+            self.pressed_physical_buttons.iter().copied().collect()
+        }
+
         pub fn process_frame(&mut self, frame: &[Event]) -> Result<FrameOutput, SlotError> {
             self.process_frame_with_time(frame, None)
         }

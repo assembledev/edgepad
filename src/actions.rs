@@ -294,6 +294,15 @@ impl ActionDispatcher {
         self.stats.snapshot()
     }
 
+    pub fn reconfigure(
+        &mut self,
+        bindings: Vec<GestureBindingConfig>,
+        sliders: Vec<SliderBindingConfig>,
+    ) {
+        self.bindings = bindings;
+        self.sliders = sliders;
+    }
+
     pub fn shutdown(mut self) -> ActionDispatcherStats {
         self.shutdown.request();
         self.sender.take();
@@ -698,6 +707,41 @@ mod tests {
         assert_eq!(stats.matched_gestures, 1);
         assert_eq!(stats.log_actions, 1);
         assert_eq!(stats.queued_commands, 0);
+    }
+
+    #[test]
+    fn reconfigure_replaces_gesture_and_slider_lookups_without_restarting_worker() {
+        let (sender, receiver) = mpsc::channel();
+        let mut dispatcher = ActionDispatcher::with_runner(
+            vec![binding(
+                Zone::Left,
+                GestureDirection::Right,
+                GestureActionConfig::Log,
+            )],
+            4,
+            RecordingRunner {
+                sender,
+                status: ActionCommandStatus::success(),
+            },
+        )
+        .expect("dispatcher should start");
+
+        dispatcher.dispatch_gesture(gesture(Zone::Right, GestureDirection::Down));
+        dispatcher.reconfigure(
+            vec![binding(
+                Zone::Right,
+                GestureDirection::Down,
+                GestureActionConfig::Log,
+            )],
+            Vec::new(),
+        );
+        dispatcher.dispatch_gesture(gesture(Zone::Right, GestureDirection::Down));
+        let stats = dispatcher.shutdown();
+
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(stats.unmatched_gestures, 1);
+        assert_eq!(stats.matched_gestures, 1);
+        assert_eq!(stats.log_actions, 1);
     }
 
     #[test]

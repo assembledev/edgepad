@@ -241,7 +241,7 @@ fn check_config(config: &DoctorConfig, report: &mut DoctorReport) -> Option<Edge
                 DoctorSection::Config,
                 "file",
                 format!(
-                    "device {}, edge width {}, tap min {}ms, swipe min {}, {}, {}",
+                    "device {}, default edge width {}, tap min {}ms, swipe min {}, {}, {}",
                     device_config_value_label(&edgepad_config.device),
                     percent_label(edgepad_config.edge_width),
                     edgepad_config.tap_min_duration_ms,
@@ -1207,7 +1207,7 @@ fn slider_direction_name(direction: SliderDirection) -> &'static str {
 mod tests {
     use super::*;
     use crate::config::{
-        GestureActionConfig, GestureBindingConfig, DEFAULT_SWIPE_MIN_DISTANCE,
+        EdgeWidthOverrides, GestureActionConfig, GestureBindingConfig, DEFAULT_SWIPE_MIN_DISTANCE,
         DEFAULT_TAP_MIN_DURATION_MS,
     };
 
@@ -1256,6 +1256,10 @@ mod tests {
         let config = EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: 0.20,
+            edge_width_overrides: EdgeWidthOverrides {
+                right: Some(0.14),
+                ..EdgeWidthOverrides::default()
+            },
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: vec![
@@ -1275,7 +1279,7 @@ mod tests {
 
         assert_eq!(
             active_zones_detail(&config),
-            "claiming right, top; passthrough left, bottom; widths: left off, right 20.0%, top 20.0%, bottom off"
+            "claiming right, top; passthrough left, bottom; widths: left off, right 14.0%, top 20.0%, bottom off"
         );
     }
 
@@ -1285,6 +1289,7 @@ mod tests {
         let config = EdgepadConfig {
             device: DeviceConfig::Path(PathBuf::from("/dev/input/event7")),
             edge_width: 0.10,
+            edge_width_overrides: EdgeWidthOverrides::default(),
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
@@ -1307,6 +1312,7 @@ mod tests {
         let config = EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: 0.10,
+            edge_width_overrides: EdgeWidthOverrides::default(),
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
@@ -1333,6 +1339,7 @@ mod tests {
         let config = EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: 0.10,
+            edge_width_overrides: EdgeWidthOverrides::default(),
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: vec![GestureBindingConfig {

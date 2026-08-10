@@ -1,5 +1,7 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 fn edgepad() -> Command {
     Command::new(env!("CARGO_BIN_EXE_edgepad"))
@@ -288,6 +290,63 @@ action = ["notify-send", "edgepad", "left-right"]
     );
 
     std::fs::remove_file(config_path).expect("config should be removed");
+}
+
+#[test]
+fn daemon_cli_sighup_reloads_config_while_waiting_for_device() {
+    let config_path = unique_temp_path("edgepad-daemon-reload-config");
+    let root = unique_temp_dir("edgepad-daemon-reload-input-root");
+    write_daemon_config(&config_path, "auto");
+    std::fs::create_dir_all(&root).expect("temp root should be created");
+    let child = edgepad()
+        .env("EDGEPAD_DAEMON_STARTUP_RETRY_MS", "5000")
+        .arg("daemon")
+        .arg("--config")
+        .arg(&config_path)
+        .arg("--input-root")
+        .arg(&root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("edgepad daemon should start");
+
+    thread::sleep(Duration::from_millis(150));
+    std::fs::write(
+        &config_path,
+        r#"
+device = "auto"
+edge_width = 0.10
+left_edge_width = 0.25
+
+[[gestures]]
+zone = "left"
+direction = "right"
+action = { log = true }
+"#,
+    )
+    .expect("reload config should be written");
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGHUP) },
+        0
+    );
+    thread::sleep(Duration::from_millis(650));
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+
+    let output = child
+        .wait_with_output()
+        .expect("edgepad daemon should stop cleanly");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr was: {stderr}");
+    assert!(
+        stderr.contains("reload complete; edge_widths=left=0.250"),
+        "stderr was: {stderr}"
+    );
+
+    std::fs::remove_file(config_path).expect("config should be removed");
+    std::fs::remove_dir_all(root).expect("temp root should be removed");
 }
 
 fn unique_temp_path(prefix: &str) -> PathBuf {

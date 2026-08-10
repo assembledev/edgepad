@@ -80,6 +80,10 @@ let
             type = lib.types.attrsOf lib.types.attrs;
             default = { };
           };
+          xdg.configHome = lib.mkOption {
+            type = lib.types.str;
+            default = "/home/alice/.config";
+          };
           systemd.user.services = lib.mkOption {
             type = lib.types.attrsOf lib.types.attrs;
             default = { };
@@ -90,6 +94,10 @@ let
           enable = true;
           device = "auto";
           edgeWidth = 0.1;
+          edgeWidths = {
+            left = 0.08;
+            top = 0.12;
+          };
           tapMinDurationMs = 90;
           swipeMinDistance = 0.03;
           gestures = [
@@ -134,6 +142,7 @@ let
 
   homeConfigFile = homeEval.config.xdg.configFile."edgepad/edgepad.toml".source;
   homeService = homeEval.config.systemd.user.services.edgepad;
+  homeExecStart = builtins.unsafeDiscardStringContext homeService.Service.ExecStart;
   uaccessUdevRulesPackage = lib.head nixosUaccessEval.config.services.udev.packages;
   groupUdevRulesPackage = lib.head nixosGroupEval.config.services.udev.packages;
 
@@ -144,9 +153,12 @@ let
     assert lib.hasAttr "input" nixosGroupEval.config.users.groups;
     assert lib.elem "input" nixosGroupEval.config.users.users.alice.extraGroups;
     assert lib.length nixosGroupEval.config.services.udev.packages == 1;
-    assert lib.hasInfix "daemon --config" (
-      builtins.unsafeDiscardStringContext homeService.Service.ExecStart
+    assert lib.hasInfix "daemon --config /home/alice/.config/edgepad/edgepad.toml --device auto"
+      homeExecStart;
+    assert lib.hasInfix "kill -HUP $MAINPID" (
+      builtins.unsafeDiscardStringContext homeService.Service.ExecReload
     );
+    assert homeService.Unit."X-Reload-Triggers" == [ homeConfigFile ];
     assert homeService.Service.Type == "notify";
     assert homeService.Service.NotifyAccess == "main";
     assert homeService.Service.TimeoutStartSec == "45s";
@@ -154,6 +166,10 @@ let
       set -eu
       grep -F 'device = "auto"' ${homeConfigFile}
       grep -F 'edge_width = 0.1' ${homeConfigFile}
+      grep -F 'left_edge_width = 0.08' ${homeConfigFile}
+      grep -F 'top_edge_width = 0.12' ${homeConfigFile}
+      ! grep -F 'right_edge_width' ${homeConfigFile}
+      ! grep -F 'bottom_edge_width' ${homeConfigFile}
       grep -F 'tap_min_duration_ms = 90' ${homeConfigFile}
       grep -F 'swipe_min_distance = 0.03' ${homeConfigFile}
       grep -F '[[gestures]]' ${homeConfigFile}

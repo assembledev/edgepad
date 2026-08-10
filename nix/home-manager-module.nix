@@ -11,6 +11,22 @@ let
   toml = pkgs.formats.toml { };
   defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.edgepad;
   commandActionType = lib.types.nonEmptyListOf lib.types.str;
+  configPath = "${config.xdg.configHome}/edgepad/edgepad.toml";
+
+  edgeWidthOverrideOption =
+    edge:
+    lib.mkOption {
+      type = lib.types.nullOr lib.types.float;
+      default = null;
+      example = 0.08;
+      apply =
+        value:
+        if value == null || (value > 0.0 && value < 0.5) then
+          value
+        else
+          throw "services.edgepad.edgeWidths.${edge} must be null or > 0 and < 0.5";
+      description = "Optional fractional width override for the ${edge} edge.";
+    };
 
   gestureType = lib.types.submodule {
     options = {
@@ -101,16 +117,24 @@ let
     // lib.optionalAttrs (slider.left != null) { inherit (slider) left; }
     // lib.optionalAttrs (slider.right != null) { inherit (slider) right; };
 
-  configFile = toml.generate "edgepad.toml" {
-    device = cfg.device;
-    edge_width = cfg.edgeWidth;
-    tap_min_duration_ms = cfg.tapMinDurationMs;
-    swipe_min_distance = cfg.swipeMinDistance;
-    gestures = map (gesture: {
-      inherit (gesture) zone direction action;
-    }) cfg.gestures;
-    sliders = map sliderToToml cfg.sliders;
-  };
+  configFile = toml.generate "edgepad.toml" (
+    {
+      device = cfg.device;
+      edge_width = cfg.edgeWidth;
+      tap_min_duration_ms = cfg.tapMinDurationMs;
+      swipe_min_distance = cfg.swipeMinDistance;
+      gestures = map (gesture: {
+        inherit (gesture) zone direction action;
+      }) cfg.gestures;
+      sliders = map sliderToToml cfg.sliders;
+    }
+    // lib.filterAttrs (_: value: value != null) {
+      left_edge_width = cfg.edgeWidths.left;
+      right_edge_width = cfg.edgeWidths.right;
+      top_edge_width = cfg.edgeWidths.top;
+      bottom_edge_width = cfg.edgeWidths.bottom;
+    }
+  );
 in
 {
   options.services.edgepad = {
@@ -139,7 +163,20 @@ in
           value
         else
           throw "services.edgepad.edgeWidth must be > 0 and < 0.5";
-      description = "Fractional edge width used by every edge zone.";
+      description = "Default fractional width used by edges without a per-edge override.";
+    };
+
+    edgeWidths = lib.mkOption {
+      type = lib.types.submodule {
+        options = {
+          left = edgeWidthOverrideOption "left";
+          right = edgeWidthOverrideOption "right";
+          top = edgeWidthOverrideOption "top";
+          bottom = edgeWidthOverrideOption "bottom";
+        };
+      };
+      default = { };
+      description = "Optional per-edge width overrides; unset edges use services.edgepad.edgeWidth.";
     };
 
     tapMinDurationMs = lib.mkOption {
@@ -201,13 +238,22 @@ in
         Description = "edgepad touchpad edge gesture daemon";
         After = [ "graphical-session.target" ];
         PartOf = [ "graphical-session.target" ];
+        "X-Reload-Triggers" = [ configFile ];
       };
 
       Service = {
         Type = "notify";
         NotifyAccess = "main";
         TimeoutStartSec = "45s";
-        ExecStart = "${lib.getExe cfg.package} daemon --config ${configFile}";
+        ExecStart = lib.escapeShellArgs [
+          (lib.getExe cfg.package)
+          "daemon"
+          "--config"
+          configPath
+          "--device"
+          cfg.device
+        ];
+        ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
         RestartSec = "1s";
       };
