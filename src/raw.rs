@@ -844,6 +844,10 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
         .filter(|event| event.kind == EV_KEY && is_pointer_button_code(event.code))
         .collect::<Vec<_>>();
     let mut promoted_contacts = Vec::new();
+    let mut canceled_tap_gestures = Vec::new();
+    if physical_buttons.iter().any(|event| event.value != 0) {
+        canceled_tap_gestures = engine.interrupt_tap_sequence();
+    }
     for event in physical_buttons.iter().filter(|event| event.value != 0) {
         promoted_contacts.extend(engine.update_physical_button(event.code, true));
     }
@@ -859,13 +863,25 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
     promoted_contacts.extend(output.passthrough.iter().copied());
     let passthrough = raw_passthrough_events_for_core_passthrough(frame, &promoted_contacts);
 
+    canceled_tap_gestures.extend(output.gestures);
     Ok(RoutedRawFrame {
         passthrough,
         physical_buttons,
-        gestures: output.gestures,
+        gestures: canceled_tap_gestures,
         slider_steps: output.slider_steps,
         resync_required: output.resync_required,
     })
+}
+
+pub fn route_recognition_deadline(engine: &mut Engine, timestamp: Duration) -> RoutedRawFrame {
+    let output = engine.advance_time(timestamp);
+    RoutedRawFrame {
+        passthrough: Vec::new(),
+        physical_buttons: Vec::new(),
+        gestures: output.gestures,
+        slider_steps: Vec::new(),
+        resync_required: false,
+    }
 }
 
 pub fn route_resync_contacts(

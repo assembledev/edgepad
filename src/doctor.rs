@@ -1191,6 +1191,7 @@ fn direction_name(direction: GestureDirection) -> &'static str {
         GestureDirection::Left => "left",
         GestureDirection::Right => "right",
         GestureDirection::Tap => "tap",
+        GestureDirection::DoubleTap => "double-tap",
     }
 }
 
@@ -1275,6 +1276,7 @@ mod tests {
                 },
             ],
             sliders: Vec::new(),
+            ..EdgepadConfig::default()
         };
 
         assert_eq!(
@@ -1294,6 +1296,7 @@ mod tests {
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
             sliders: Vec::new(),
+            ..EdgepadConfig::default()
         };
 
         let device = check_config_device(Some(&config), None, &mut report);
@@ -1317,6 +1320,7 @@ mod tests {
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
             sliders: Vec::new(),
+            ..EdgepadConfig::default()
         };
 
         let device = check_config_device(
@@ -1350,6 +1354,7 @@ mod tests {
                 },
             }],
             sliders: Vec::new(),
+            ..EdgepadConfig::default()
         };
 
         check_action_executables(&config, &mut report);

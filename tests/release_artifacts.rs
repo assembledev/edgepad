@@ -7,7 +7,7 @@ fn release_example_config_parses_and_uses_axis_appropriate_gestures() {
         .expect("release example config should parse");
 
     assert_eq!(config.device, DeviceConfig::Auto);
-    assert_eq!(config.gestures.len(), 7);
+    assert_eq!(config.gestures.len(), 8);
     assert_eq!(config.sliders.len(), 2);
 
     for slider in &config.sliders {
@@ -32,7 +32,10 @@ fn release_example_config_parses_and_uses_axis_appropriate_gestures() {
                 assert!(
                     matches!(
                         binding.direction,
-                        GestureDirection::Left | GestureDirection::Right | GestureDirection::Tap
+                        GestureDirection::Left
+                            | GestureDirection::Right
+                            | GestureDirection::Tap
+                            | GestureDirection::DoubleTap
                     ),
                     "top examples should use horizontal or tap gestures: {binding:?}"
                 );

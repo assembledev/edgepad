@@ -6,19 +6,19 @@ use std::sync::{
 };
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-#[cfg(test)]
-use crate::core::SliderAxis;
 use crate::core::{
     Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureDirection, ResyncContact,
-    SliderDirection, SliderSpec, SliderStep, Zone,
+    SliderDirection, SliderSpec, SliderStep, SlotPosition, Zone,
 };
+#[cfg(test)]
+use crate::core::{Event, SliderAxis, ZoneSet};
 use crate::device::{mt_slot_values, physical_touch_is_down, wait_for_raw_device_events};
 use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
-    extract_core_events, is_pointer_button_code, route_raw_frame, route_resync_contacts, RawEvent,
-    RawFrame, RawOutputComposer, RawOutputSink, RecordingRawOutputSink, ABS_MT_POSITION_X,
-    ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN,
-    SYN_DROPPED, SYN_REPORT,
+    extract_core_events, is_pointer_button_code, route_raw_frame, route_recognition_deadline,
+    route_resync_contacts, RawEvent, RawFrame, RawOutputComposer, RawOutputSink,
+    RecordingRawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID,
+    BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED, SYN_REPORT,
 };
 use crate::uinput::{
     build_virtual_touchpad, UinputEventWriter, UinputRawOutputSink, VirtualTouchpadSpec,
@@ -43,6 +43,7 @@ struct ProxyLoopConfig {
     edge_widths: EdgeWidths,
     engine_options: EngineOptions,
     slider_specs: Vec<SliderSpec>,
+    initial_slot_positions: Vec<SlotPosition>,
     buttonpad: bool,
 }
 
@@ -88,6 +89,47 @@ impl PendingRawFrame {
 
     fn is_empty(&self) -> bool {
         self.events.is_empty()
+    }
+}
+
+#[derive(Debug, Default)]
+struct RecognitionDeadline {
+    input_timestamp: Option<Duration>,
+    wall_deadline: Option<Instant>,
+}
+
+impl RecognitionDeadline {
+    fn sync(&mut self, engine: &Engine, input_now: Option<Duration>, wall_now: Instant) {
+        let Some(input_deadline) = engine.next_deadline() else {
+            self.input_timestamp = None;
+            self.wall_deadline = None;
+            return;
+        };
+        let Some(input_now) = input_now else {
+            return;
+        };
+
+        // Kernel event timestamps and Instant use different epochs. Only their
+        // elapsed durations are comparable, so anchor each engine deadline to
+        // the wall clock at the frame that scheduled it.
+        self.input_timestamp = Some(input_deadline);
+        self.wall_deadline = Some(wall_now + input_deadline.saturating_sub(input_now));
+    }
+
+    fn poll_timeout(&self, wall_now: Instant) -> Option<Duration> {
+        self.wall_deadline
+            .map(|deadline| deadline.saturating_duration_since(wall_now))
+    }
+
+    fn take_due(&mut self, wall_now: Instant) -> Option<Duration> {
+        if self
+            .wall_deadline
+            .is_some_and(|deadline| deadline <= wall_now)
+        {
+            self.wall_deadline = None;
+            return self.input_timestamp.take();
+        }
+        None
     }
 }
 
@@ -300,6 +342,7 @@ where
 {
     let (mut device, capabilities) = open_proxy_device(&config.device_path)?;
     let buttonpad = device.properties().contains(PropType::BUTTONPAD);
+    let initial_slot_positions = read_slot_positions(&device, capabilities)?;
     let mut sink = RecordingRawOutputSink::default();
     let stats = run_proxy_loop(
         &mut device,
@@ -308,6 +351,7 @@ where
             edge_widths: config.edge_widths,
             engine_options: config.engine_options,
             slider_specs: config.slider_specs.clone(),
+            initial_slot_positions,
             buttonpad,
         },
         &config.limit,
@@ -350,6 +394,21 @@ where
             config.device_path.display()
         )
     })?;
+    let initial_slot_positions = match read_slot_positions(&device, capabilities) {
+        Ok(positions) => positions,
+        Err(err) => {
+            let ungrab_result = device.ungrab().map_err(|ungrab_err| {
+                format!(
+                    "failed to ungrab device {} after slot-state read failure: {ungrab_err}",
+                    config.device_path.display()
+                )
+            });
+            return match ungrab_result {
+                Ok(()) => Err(err),
+                Err(ungrab_err) => Err(append_additional_error(err, ungrab_err)),
+            };
+        }
+    };
     if let Err(ready_err) = on_ready(&config.device_path) {
         let ungrab_result = device.ungrab().map_err(|err| {
             format!(
@@ -369,6 +428,7 @@ where
             edge_widths: config.edge_widths,
             engine_options: config.engine_options,
             slider_specs: config.slider_specs.clone(),
+            initial_slot_positions,
             buttonpad,
         },
         &config.limit,
@@ -424,22 +484,48 @@ fn ensure_physical_touchpad_idle_at_start(
     ))
 }
 
-fn read_resync_contacts(
+fn read_resync_slot_snapshot(
     device: &RawDevice,
     capabilities: Capabilities,
-) -> Result<Vec<ResyncContact>, String> {
+) -> Result<(Vec<ResyncContact>, Vec<SlotPosition>), String> {
     let tracking_ids = mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)
         .map_err(|err| format!("failed to read current multitouch tracking IDs: {err}"))?;
     let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)
         .map_err(|err| format!("failed to read current multitouch X positions: {err}"))?;
     let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)
         .map_err(|err| format!("failed to read current multitouch Y positions: {err}"))?;
-    Ok(resync_contacts_from_slot_values(
-        capabilities,
-        &tracking_ids,
-        &x_values,
-        &y_values,
-    ))
+    let contacts =
+        resync_contacts_from_slot_values(capabilities, &tracking_ids, &x_values, &y_values);
+    let positions = slot_positions_from_values(capabilities, x_values, y_values);
+    Ok((contacts, positions))
+}
+
+fn read_slot_positions(
+    device: &RawDevice,
+    capabilities: Capabilities,
+) -> Result<Vec<SlotPosition>, String> {
+    let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)
+        .map_err(|err| format!("failed to read current multitouch X positions: {err}"))?;
+    let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)
+        .map_err(|err| format!("failed to read current multitouch Y positions: {err}"))?;
+    Ok(slot_positions_from_values(capabilities, x_values, y_values))
+}
+
+fn slot_positions_from_values(
+    capabilities: Capabilities,
+    x_values: Vec<i32>,
+    y_values: Vec<i32>,
+) -> Vec<SlotPosition> {
+    x_values
+        .into_iter()
+        .zip(y_values)
+        .enumerate()
+        .map(|(index, (x, y))| SlotPosition {
+            slot: capabilities.slot_min + index as i32,
+            x,
+            y,
+        })
+        .collect()
 }
 
 fn read_pressed_physical_buttons(device: &RawDevice) -> Result<Vec<u16>, String> {
@@ -540,6 +626,9 @@ where
         config.slider_specs.clone(),
         config.engine_options,
     );
+    engine
+        .seed_slot_positions(&config.initial_slot_positions)
+        .map_err(|err| format!("failed to seed multitouch slot positions: {err:?}"))?;
     engine.set_buttonpad(config.buttonpad);
     let mut composer = RawOutputComposer::new(config.capabilities);
     let mut stats = ProxyRuntimeStats::default();
@@ -548,34 +637,55 @@ where
     let mut drain_deadline: Option<Instant> = None;
     let mut pending = PendingRawFrame::default();
     let mut resync_pending = false;
+    let mut recognition_deadline = RecognitionDeadline::default();
 
     loop {
-        let timeout = drain_deadline
+        let mut timeout = drain_deadline
             .map(|deadline| deadline.saturating_duration_since(Instant::now()))
             .or_else(|| stopper.poll_timeout());
+        if let Some(recognition_timeout) = recognition_deadline.poll_timeout(Instant::now()) {
+            timeout = Some(
+                timeout
+                    .map(|current| current.min(recognition_timeout))
+                    .unwrap_or(recognition_timeout),
+            );
+        }
         let Some(events) = fetch_proxy_events(device, timeout)? else {
-            if drain_deadline.is_some() {
+            if let Some(input_deadline) = recognition_deadline.take_due(Instant::now()) {
+                process_proxy_recognition_deadline(
+                    input_deadline,
+                    &mut engine,
+                    &mut composer,
+                    sink,
+                    &mut stats,
+                    handler,
+                )?;
+                recognition_deadline.sync(&engine, Some(input_deadline), Instant::now());
+            }
+            if drain_deadline.is_some_and(|deadline| deadline <= Instant::now()) {
                 stats.idle_drain_timed_out = true;
                 finish_proxy_output(&mut composer, sink, &mut stats)?;
                 return Ok(stats);
             }
-            if stopper.observe_idle_poll(touch_state.is_touch_down()) {
+            if stopper
+                .observe_idle_poll(touch_state.is_touch_down() || !engine.is_recognition_idle())
+            {
                 finish_proxy_output(&mut composer, sink, &mut stats)?;
                 return Ok(stats);
             }
             if pending.is_empty() && !resync_pending {
                 stats.recognition_reloads += apply_pending_recognition_reload(
                     &mut engine,
-                    &config,
                     touch_state.is_touch_down(),
                     handler,
                 ) as usize;
             }
-            if stopper.is_draining() && drain_deadline.is_none() {
-                drain_deadline = stopper
-                    .drain_timeout()
-                    .map(|timeout| Instant::now() + timeout);
-            }
+            drain_deadline = sync_physical_drain_deadline(
+                drain_deadline,
+                &stopper,
+                touch_state.is_touch_down(),
+                Instant::now(),
+            );
             continue;
         };
 
@@ -595,12 +705,14 @@ where
                         &mut stats,
                         handler,
                     )?;
+                    recognition_deadline.sync(&engine, dropped.timestamp, Instant::now());
                     touch_state.mark_desynchronized();
                     stats.input_frame_boundaries += 1;
                     continue;
                 }
                 ResyncStreamAction::CompleteResync => {
-                    let contacts = read_resync_contacts(device, config.capabilities)?;
+                    let (contacts, slot_positions) =
+                        read_resync_slot_snapshot(device, config.capabilities)?;
                     let pressed_physical_buttons = read_pressed_physical_buttons(device)?;
                     process_proxy_resync_contacts(
                         &contacts,
@@ -611,19 +723,30 @@ where
                         &mut stats,
                         handler,
                     )?;
+                    engine.seed_slot_positions(&slot_positions).map_err(|err| {
+                        format!("failed to restore multitouch slot positions: {err:?}")
+                    })?;
+                    recognition_deadline.sync(&engine, event.timestamp, Instant::now());
                     touch_state.restore_contacts(&contacts);
                     stats.input_frame_boundaries += 1;
-                    if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
+                    if stopper.observe_frame_boundary(
+                        touch_state.is_touch_down() || !engine.is_recognition_idle(),
+                    ) {
                         stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                         finish_proxy_output(&mut composer, sink, &mut stats)?;
                         return Ok(stats);
                     }
                     stats.recognition_reloads += apply_pending_recognition_reload(
                         &mut engine,
-                        &config,
                         touch_state.is_touch_down(),
                         handler,
                     ) as usize;
+                    drain_deadline = sync_physical_drain_deadline(
+                        drain_deadline,
+                        &stopper,
+                        touch_state.is_touch_down(),
+                        Instant::now(),
+                    );
                     stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                     continue;
                 }
@@ -641,24 +764,27 @@ where
                             &mut stats,
                             handler,
                         )?;
+                        recognition_deadline.sync(&engine, frame.timestamp, Instant::now());
                     }
                     stats.input_frame_boundaries += 1;
-                    if stopper.observe_frame_boundary(touch_state.is_touch_down()) {
+                    if stopper.observe_frame_boundary(
+                        touch_state.is_touch_down() || !engine.is_recognition_idle(),
+                    ) {
                         stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                         finish_proxy_output(&mut composer, sink, &mut stats)?;
                         return Ok(stats);
                     }
                     stats.recognition_reloads += apply_pending_recognition_reload(
                         &mut engine,
-                        &config,
                         touch_state.is_touch_down(),
                         handler,
                     ) as usize;
-                    if stopper.is_draining() && drain_deadline.is_none() {
-                        drain_deadline = stopper
-                            .drain_timeout()
-                            .map(|timeout| Instant::now() + timeout);
-                    }
+                    drain_deadline = sync_physical_drain_deadline(
+                        drain_deadline,
+                        &stopper,
+                        touch_state.is_touch_down(),
+                        Instant::now(),
+                    );
                     stats.idle_drain_frame_boundaries = stopper.extra_frame_boundaries();
                 }
                 _ => pending.push(event),
@@ -667,33 +793,60 @@ where
     }
 }
 
+fn sync_physical_drain_deadline(
+    current: Option<Instant>,
+    stopper: &ProxyLoopStopper<'_>,
+    physical_touch_down: bool,
+    now: Instant,
+) -> Option<Instant> {
+    // This timeout is a safety valve for a contact that never reaches an idle
+    // boundary. Pending tap arbitration is already bounded by the recognizer's
+    // own deadline and must not be cut short by the physical-contact guard.
+    if !stopper.is_draining() || !physical_touch_down {
+        return None;
+    }
+
+    current.or_else(|| stopper.drain_timeout().map(|timeout| now + timeout))
+}
+
 fn apply_pending_recognition_reload<H>(
     engine: &mut Engine,
-    config: &ProxyLoopConfig,
     physical_touch_down: bool,
     handler: &mut H,
 ) -> bool
 where
     H: GestureHandler,
 {
-    if physical_touch_down {
+    if physical_touch_down || !engine.is_recognition_idle() {
         return false;
     }
 
     let Some(reloaded) = handler.take_recognition_config_reload() else {
         return false;
     };
-    let pressed_physical_buttons = engine.pressed_physical_buttons();
-    let mut replacement = Engine::with_options(
-        config.capabilities,
+    engine.reconfigure_recognition(
         reloaded.edge_widths,
         reloaded.slider_specs,
         reloaded.engine_options,
     );
-    replacement.set_buttonpad(config.buttonpad);
-    replacement.restore_pressed_physical_buttons(&pressed_physical_buttons);
-    *engine = replacement;
     true
+}
+
+fn process_proxy_recognition_deadline<S, H>(
+    input_deadline: Duration,
+    engine: &mut Engine,
+    composer: &mut RawOutputComposer,
+    sink: &mut S,
+    stats: &mut ProxyRuntimeStats,
+    handler: &mut H,
+) -> Result<(), String>
+where
+    S: RawOutputSink,
+    S::Error: std::fmt::Debug,
+    H: GestureHandler,
+{
+    let routed = route_recognition_deadline(engine, input_deadline);
+    process_proxy_routed_frame(0, composer, sink, stats, routed, handler)
 }
 
 fn fetch_proxy_events(
@@ -976,7 +1129,7 @@ impl<'a> ProxyLoopStopper<'a> {
         }
     }
 
-    fn observe_frame_boundary(&mut self, physical_touch_down: bool) -> bool {
+    fn observe_frame_boundary(&mut self, recognition_busy: bool) -> bool {
         self.observed_frame_boundaries += 1;
         match self.limit {
             ProxyRunLimit::Frames {
@@ -985,18 +1138,21 @@ impl<'a> ProxyLoopStopper<'a> {
             } => self.observe_frame_limit_boundary(
                 *frame_boundaries,
                 *stop_after_limit,
-                physical_touch_down,
+                recognition_busy,
             ),
             ProxyRunLimit::UntilStopped { stop, .. } => {
-                self.observe_stop_token_boundary(stop, physical_touch_down)
+                self.observe_stop_token_boundary(stop, recognition_busy)
             }
         }
     }
 
-    fn observe_idle_poll(&mut self, physical_touch_down: bool) -> bool {
+    fn observe_idle_poll(&mut self, recognition_busy: bool) -> bool {
+        if self.draining && !recognition_busy {
+            return true;
+        }
         match self.limit {
             ProxyRunLimit::UntilStopped { stop, .. } if stop.is_stopped() => {
-                self.observe_requested_stop(physical_touch_down)
+                self.observe_requested_stop(recognition_busy)
             }
             _ => false,
         }
@@ -1034,7 +1190,7 @@ impl<'a> ProxyLoopStopper<'a> {
         &mut self,
         frame_boundaries: usize,
         stop_after_limit: StopAfterFrameLimit,
-        physical_touch_down: bool,
+        recognition_busy: bool,
     ) -> bool {
         if self.observed_frame_boundaries < frame_boundaries {
             return false;
@@ -1043,7 +1199,7 @@ impl<'a> ProxyLoopStopper<'a> {
         if self.observed_frame_boundaries == frame_boundaries {
             return match stop_after_limit {
                 StopAfterFrameLimit::Immediately => true,
-                StopAfterFrameLimit::WhenIdle if !physical_touch_down => true,
+                StopAfterFrameLimit::WhenIdle if !recognition_busy => true,
                 StopAfterFrameLimit::WhenIdle => {
                     self.draining = true;
                     false
@@ -1055,28 +1211,28 @@ impl<'a> ProxyLoopStopper<'a> {
         match stop_after_limit {
             StopAfterFrameLimit::Immediately => true,
             StopAfterFrameLimit::WhenIdle => {
-                self.draining = physical_touch_down;
-                !physical_touch_down
+                self.draining = recognition_busy;
+                !recognition_busy
             }
         }
     }
 
-    fn observe_stop_token_boundary(&mut self, stop: &StopToken, physical_touch_down: bool) -> bool {
+    fn observe_stop_token_boundary(&mut self, stop: &StopToken, recognition_busy: bool) -> bool {
         if self.draining {
             self.extra_frame_boundaries += 1;
-            self.draining = physical_touch_down;
-            return !physical_touch_down;
+            self.draining = recognition_busy;
+            return !recognition_busy;
         }
 
         if stop.is_stopped() {
-            return self.observe_requested_stop(physical_touch_down);
+            return self.observe_requested_stop(recognition_busy);
         }
 
         false
     }
 
-    fn observe_requested_stop(&mut self, physical_touch_down: bool) -> bool {
-        if physical_touch_down {
+    fn observe_requested_stop(&mut self, recognition_busy: bool) -> bool {
+        if recognition_busy {
             self.draining = true;
             false
         } else {
@@ -1200,9 +1356,17 @@ mod tests {
             edge_widths: EdgeWidths::all(0.10),
             engine_options: EngineOptions::default(),
             slider_specs: Vec::new(),
+            initial_slot_positions: Vec::new(),
             buttonpad: true,
         };
         let mut engine = Engine::new(capabilities, config.edge_widths);
+        engine
+            .seed_slot_positions(&[SlotPosition {
+                slot: 0,
+                x: 20,
+                y: 300,
+            }])
+            .expect("slot state should seed");
         engine.set_buttonpad(true);
         engine.update_physical_button(BTN_LEFT, true);
         let mut handler = ReloadingGestureHandler {
@@ -1211,6 +1375,7 @@ mod tests {
                 engine_options: EngineOptions {
                     tap_min_duration: Duration::from_millis(120),
                     swipe_min_distance: 0.05,
+                    ..EngineOptions::default()
                 },
                 slider_specs: Vec::new(),
             }),
@@ -1219,7 +1384,6 @@ mod tests {
 
         assert!(!apply_pending_recognition_reload(
             &mut engine,
-            &config,
             true,
             &mut handler
         ));
@@ -1228,13 +1392,212 @@ mod tests {
 
         assert!(apply_pending_recognition_reload(
             &mut engine,
-            &config,
             false,
             &mut handler
         ));
         assert_eq!(handler.reload_polls, 1);
         assert!(handler.pending.is_none());
         assert_eq!(engine.pressed_physical_buttons(), vec![BTN_LEFT]);
+
+        engine.update_physical_button(BTN_LEFT, false);
+        engine
+            .process_frame_at(
+                &[Event::slot(0), Event::tracking_id(9)],
+                Duration::from_millis(1000),
+            )
+            .expect("reload should preserve retained Type-B axes");
+        let released = engine
+            .process_frame_at(
+                &[Event::slot(0), Event::tracking_id(-1)],
+                Duration::from_millis(1130),
+            )
+            .expect("retained-position contact should release");
+        assert_eq!(released.gestures[0].zone, Zone::Left);
+        assert_eq!(released.gestures[0].direction, GestureDirection::Tap);
+    }
+
+    #[test]
+    fn recognition_deadline_wakes_and_releases_pending_single_tap_without_input() {
+        let capabilities = test_capabilities();
+        let options = EngineOptions {
+            double_tap_zones: ZoneSet::from_zones([Zone::Left]),
+            single_tap_zones: ZoneSet::from_zones([Zone::Left]),
+            ..EngineOptions::default()
+        };
+        let mut engine =
+            Engine::with_options(capabilities, EdgeWidths::all(0.10), Vec::new(), options);
+        engine
+            .process_frame_at(
+                &[
+                    Event::slot(0),
+                    Event::tracking_id(1),
+                    Event::x(20),
+                    Event::y(300),
+                ],
+                Duration::from_millis(1000),
+            )
+            .expect("tap should start");
+        let released = engine
+            .process_frame_at(
+                &[Event::slot(0), Event::tracking_id(-1)],
+                Duration::from_millis(1060),
+            )
+            .expect("tap should release");
+        assert!(released.gestures.is_empty());
+
+        let wall_start = Instant::now();
+        let mut timer = RecognitionDeadline::default();
+        timer.sync(&engine, Some(Duration::from_millis(1060)), wall_start);
+        assert_eq!(
+            timer.poll_timeout(wall_start),
+            Some(Duration::from_millis(300))
+        );
+        assert!(timer
+            .take_due(wall_start + Duration::from_millis(299))
+            .is_none());
+        let input_deadline = timer
+            .take_due(wall_start + Duration::from_millis(300))
+            .expect("timer should wake at the engine deadline");
+        let routed = route_recognition_deadline(&mut engine, input_deadline);
+        assert_eq!(routed.gestures.len(), 1);
+        assert_eq!(routed.gestures[0].direction, GestureDirection::Tap);
+    }
+
+    #[test]
+    fn bounded_proxy_can_finish_on_recognition_deadline_without_an_extra_input_frame() {
+        let capabilities = test_capabilities();
+        let mut engine = Engine::with_options(
+            capabilities,
+            EdgeWidths::all(0.10),
+            Vec::new(),
+            EngineOptions {
+                double_tap_timeout: Duration::from_millis(1500),
+                double_tap_zones: ZoneSet::from_zones([Zone::Left]),
+                single_tap_zones: ZoneSet::from_zones([Zone::Left]),
+                ..EngineOptions::default()
+            },
+        );
+        engine
+            .process_frame_at(
+                &[
+                    Event::slot(0),
+                    Event::tracking_id(1),
+                    Event::x(20),
+                    Event::y(300),
+                ],
+                Duration::from_millis(1000),
+            )
+            .expect("tap should start");
+        engine
+            .process_frame_at(
+                &[Event::slot(0), Event::tracking_id(-1)],
+                Duration::from_millis(1060),
+            )
+            .expect("tap should become pending");
+
+        let limit = ProxyRunLimit::Frames {
+            frame_boundaries: 1,
+            stop_after_limit: StopAfterFrameLimit::WhenIdle,
+        };
+        let mut stopper = ProxyLoopStopper::new(&limit);
+        let wall_start = Instant::now();
+        let mut timer = RecognitionDeadline::default();
+        timer.sync(&engine, Some(Duration::from_millis(1060)), wall_start);
+
+        assert!(!stopper.observe_frame_boundary(true));
+        assert!(stopper.is_draining());
+        assert!(sync_physical_drain_deadline(None, &stopper, false, wall_start).is_none());
+        assert_eq!(
+            timer.poll_timeout(wall_start),
+            Some(Duration::from_millis(1500))
+        );
+
+        let input_deadline = timer
+            .take_due(wall_start + Duration::from_millis(1500))
+            .expect("recognition deadline should remain armed beyond the safety drain interval");
+        let routed = route_recognition_deadline(&mut engine, input_deadline);
+        assert_eq!(routed.gestures.len(), 1);
+        assert_eq!(routed.gestures[0].direction, GestureDirection::Tap);
+        assert!(stopper.observe_idle_poll(false));
+    }
+
+    #[test]
+    fn physical_contact_drain_still_has_a_bounded_safety_deadline() {
+        let limit = ProxyRunLimit::Frames {
+            frame_boundaries: 1,
+            stop_after_limit: StopAfterFrameLimit::WhenIdle,
+        };
+        let mut stopper = ProxyLoopStopper::new(&limit);
+        let now = Instant::now();
+
+        assert!(!stopper.observe_frame_boundary(true));
+        assert_eq!(
+            sync_physical_drain_deadline(None, &stopper, true, now),
+            Some(now + UINPUT_IDLE_DRAIN_TIMEOUT)
+        );
+    }
+
+    #[test]
+    fn recognition_reload_waits_for_pending_tap_deadline() {
+        let capabilities = test_capabilities();
+        let config = ProxyLoopConfig {
+            capabilities,
+            edge_widths: EdgeWidths::all(0.10),
+            engine_options: EngineOptions::default(),
+            slider_specs: Vec::new(),
+            initial_slot_positions: Vec::new(),
+            buttonpad: false,
+        };
+        let mut engine = Engine::with_options(
+            capabilities,
+            config.edge_widths,
+            Vec::new(),
+            EngineOptions {
+                double_tap_zones: ZoneSet::from_zones([Zone::Left]),
+                single_tap_zones: ZoneSet::from_zones([Zone::Left]),
+                ..EngineOptions::default()
+            },
+        );
+        engine
+            .process_frame_at(
+                &[
+                    Event::slot(0),
+                    Event::tracking_id(1),
+                    Event::x(20),
+                    Event::y(300),
+                ],
+                Duration::from_millis(1000),
+            )
+            .expect("tap should start");
+        engine
+            .process_frame_at(
+                &[Event::slot(0), Event::tracking_id(-1)],
+                Duration::from_millis(1060),
+            )
+            .expect("tap should release");
+        let mut handler = ReloadingGestureHandler {
+            pending: Some(ProxyRecognitionConfig {
+                edge_widths: EdgeWidths::all(0.20),
+                engine_options: EngineOptions::default(),
+                slider_specs: Vec::new(),
+            }),
+            reload_polls: 0,
+        };
+
+        assert!(!apply_pending_recognition_reload(
+            &mut engine,
+            false,
+            &mut handler
+        ));
+        assert_eq!(handler.reload_polls, 0);
+
+        engine.advance_time(Duration::from_millis(1360));
+        assert!(apply_pending_recognition_reload(
+            &mut engine,
+            false,
+            &mut handler
+        ));
+        assert_eq!(handler.reload_polls, 1);
     }
 
     #[test]

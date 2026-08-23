@@ -33,8 +33,8 @@ use edgepad::proxy::{
     StopToken, DEFAULT_EDGE_WIDTH,
 };
 use edgepad::raw::{
-    parse_raw_dump_file, route_raw_frame, write_raw_output_frame, RawOutputComposer, RawOutputSink,
-    RecordingRawOutputSink,
+    parse_raw_dump_file, route_raw_frame, route_recognition_deadline, write_raw_output_frame,
+    RawOutputComposer, RawOutputSink, RecordingRawOutputSink,
 };
 use edgepad::replay::{parse_replay_file, replay_stats, run_frames};
 use edgepad::status::{run_status, StatusConfig, StatusReport};
@@ -1536,9 +1536,12 @@ fn edge_widths_label(widths: EdgeWidths) -> String {
 fn print_recognition_profile(profile: &RecognitionProfile) {
     println!("profile: {}", profile.source_label());
     println!(
-        "profile_settings: edge_widths={} tap_min_duration_ms={} swipe_min_distance={:.3} sliders={}",
+        "profile_settings: edge_widths={} tap_min_duration_ms={} tap_max_duration_ms={} double_tap_timeout_ms={} double_tap_max_distance={:.3} swipe_min_distance={:.3} sliders={}",
         edge_widths_label(profile.edge_widths),
         profile.engine_options.tap_min_duration.as_millis(),
+        profile.engine_options.tap_max_duration.as_millis(),
+        profile.engine_options.double_tap_timeout.as_millis(),
+        profile.engine_options.double_tap_max_distance,
         profile.engine_options.swipe_min_distance,
         profile.slider_specs.len()
     );
@@ -1674,6 +1677,11 @@ fn replay_raw(args: &ReplayArgs) -> Result<(), String> {
             .map_err(|err| format!("raw output write failed: {err:?}"))?;
     }
 
+    if let Some(deadline) = engine.next_deadline() {
+        let routed = route_recognition_deadline(&mut engine, deadline);
+        gestures.extend(routed.gestures);
+    }
+
     let finish_frame = composer
         .finish()
         .map_err(|err| format!("raw output finish failed: {err:?}"))?;
@@ -1773,6 +1781,7 @@ fn direction_name(direction: GestureDirection) -> &'static str {
         GestureDirection::Left => "left",
         GestureDirection::Right => "right",
         GestureDirection::Tap => "tap",
+        GestureDirection::DoubleTap => "double-tap",
     }
 }
 

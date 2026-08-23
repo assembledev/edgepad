@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::core::{
     EdgeWidths, EngineOptions, Gesture, GestureDirection, SliderAxis, SliderDirection, SliderSpec,
-    Zone,
+    Zone, ZoneSet,
 };
 use crate::device::{
     discover_device_report, format_device_line, touchpad_candidates, DiscoveryReport,
@@ -17,7 +17,10 @@ use crate::device::{
 
 pub const DEFAULT_EDGE_WIDTH: f32 = 0.10;
 pub const DEFAULT_SLIDER_STEP: f32 = 0.04;
-pub use crate::core::{DEFAULT_SWIPE_MIN_DISTANCE, DEFAULT_TAP_MIN_DURATION_MS};
+pub use crate::core::{
+    DEFAULT_DOUBLE_TAP_MAX_DISTANCE, DEFAULT_DOUBLE_TAP_TIMEOUT_MS, DEFAULT_SWIPE_MIN_DISTANCE,
+    DEFAULT_TAP_MAX_DURATION_MS, DEFAULT_TAP_MIN_DURATION_MS,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgepadConfig {
@@ -25,6 +28,9 @@ pub struct EdgepadConfig {
     pub edge_width: f32,
     pub edge_width_overrides: EdgeWidthOverrides,
     pub tap_min_duration_ms: u64,
+    pub tap_max_duration_ms: u64,
+    pub double_tap_timeout_ms: u64,
+    pub double_tap_max_distance: f32,
     pub swipe_min_distance: f32,
     pub gestures: Vec<GestureBindingConfig>,
     pub sliders: Vec<SliderBindingConfig>,
@@ -45,6 +51,9 @@ impl Default for EdgepadConfig {
             edge_width: DEFAULT_EDGE_WIDTH,
             edge_width_overrides: EdgeWidthOverrides::default(),
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
+            tap_max_duration_ms: DEFAULT_TAP_MAX_DURATION_MS,
+            double_tap_timeout_ms: DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
+            double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
             swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
             gestures: Vec::new(),
             sliders: Vec::new(),
@@ -76,6 +85,23 @@ impl EdgepadConfig {
         if let Some(tap_min_duration_ms) = raw.tap_min_duration_ms {
             config.tap_min_duration_ms =
                 validate_tap_min_duration_ms(tap_min_duration_ms, "tap_min_duration_ms")?;
+        }
+        if let Some(tap_max_duration_ms) = raw.tap_max_duration_ms {
+            config.tap_max_duration_ms =
+                validate_tap_max_duration_ms(tap_max_duration_ms, "tap_max_duration_ms")?;
+        }
+        if config.tap_min_duration_ms >= config.tap_max_duration_ms {
+            return Err("tap_min_duration_ms must be < tap_max_duration_ms".to_string());
+        }
+        if let Some(double_tap_timeout_ms) = raw.double_tap_timeout_ms {
+            config.double_tap_timeout_ms =
+                validate_double_tap_timeout_ms(double_tap_timeout_ms, "double_tap_timeout_ms")?;
+        }
+        if let Some(double_tap_max_distance) = raw.double_tap_max_distance {
+            config.double_tap_max_distance = validate_double_tap_max_distance(
+                double_tap_max_distance,
+                "double_tap_max_distance",
+            )?;
         }
         if let Some(swipe_min_distance) = raw.swipe_min_distance {
             config.swipe_min_distance =
@@ -159,13 +185,25 @@ impl EdgepadConfig {
     pub fn engine_options(&self) -> EngineOptions {
         EngineOptions {
             tap_min_duration: Duration::from_millis(self.tap_min_duration_ms),
+            tap_max_duration: Duration::from_millis(self.tap_max_duration_ms),
             swipe_min_distance: self.swipe_min_distance,
+            double_tap_timeout: Duration::from_millis(self.double_tap_timeout_ms),
+            double_tap_max_distance: self.double_tap_max_distance,
+            double_tap_zones: ZoneSet::from_zones(self.gestures.iter().filter_map(|binding| {
+                (binding.direction == GestureDirection::DoubleTap).then_some(binding.zone)
+            })),
+            single_tap_zones: ZoneSet::from_zones(self.gestures.iter().filter_map(|binding| {
+                (binding.direction == GestureDirection::Tap).then_some(binding.zone)
+            })),
         }
     }
 
     fn validate_slider_gesture_conflicts(&self) -> Result<(), String> {
         for (index, gesture) in self.gestures.iter().enumerate() {
-            if gesture.direction == GestureDirection::Tap {
+            if matches!(
+                gesture.direction,
+                GestureDirection::Tap | GestureDirection::DoubleTap
+            ) {
                 continue;
             }
             if self
@@ -174,7 +212,7 @@ impl EdgepadConfig {
                 .any(|slider| slider.zone == gesture.zone)
             {
                 return Err(format!(
-                    "{}.direction={} conflicts with slider {}; slider zones only allow tap gestures",
+                    "{}.direction={} conflicts with slider {}; slider zones only allow tap or double-tap gestures",
                     gesture_label(index),
                     direction_name(gesture.direction),
                     zone_name(gesture.zone)
@@ -323,7 +361,7 @@ impl GestureBindingConfig {
             .ok_or_else(|| format!("{}.zone must be one of: left, right, top, bottom", label))?;
         let direction = parse_direction(&raw.direction).ok_or_else(|| {
             format!(
-                "{}.direction must be one of: up, down, left, right, tap",
+                "{}.direction must be one of: up, down, left, right, tap, double-tap",
                 label
             )
         })?;
@@ -425,6 +463,27 @@ fn validate_tap_min_duration_ms(parsed: u64, name: &str) -> Result<u64, String> 
     Ok(parsed)
 }
 
+fn validate_tap_max_duration_ms(parsed: u64, name: &str) -> Result<u64, String> {
+    if parsed == 0 || parsed > 10000 {
+        return Err(format!("{name} must be > 0 and <= 10000"));
+    }
+    Ok(parsed)
+}
+
+fn validate_double_tap_timeout_ms(parsed: u64, name: &str) -> Result<u64, String> {
+    if parsed == 0 || parsed > 10000 {
+        return Err(format!("{name} must be > 0 and <= 10000"));
+    }
+    Ok(parsed)
+}
+
+fn validate_double_tap_max_distance(parsed: f32, name: &str) -> Result<f32, String> {
+    if !parsed.is_finite() || parsed <= 0.0 || parsed > 1.0 {
+        return Err(format!("{name} must be > 0 and <= 1"));
+    }
+    Ok(parsed)
+}
+
 fn validate_swipe_min_distance(parsed: f32, name: &str) -> Result<f32, String> {
     if !(parsed > 0.0 && parsed <= 1.0) {
         return Err(format!("{name} must be > 0 and <= 1"));
@@ -496,6 +555,7 @@ fn parse_direction(raw: &str) -> Option<GestureDirection> {
         "left" => Some(GestureDirection::Left),
         "right" => Some(GestureDirection::Right),
         "tap" => Some(GestureDirection::Tap),
+        "double-tap" => Some(GestureDirection::DoubleTap),
         _ => None,
     }
 }
@@ -516,6 +576,7 @@ fn direction_name(direction: GestureDirection) -> &'static str {
         GestureDirection::Left => "left",
         GestureDirection::Right => "right",
         GestureDirection::Tap => "tap",
+        GestureDirection::DoubleTap => "double-tap",
     }
 }
 
@@ -574,6 +635,9 @@ struct RawEdgepadConfig {
     top_edge_width: Option<f32>,
     bottom_edge_width: Option<f32>,
     tap_min_duration_ms: Option<u64>,
+    tap_max_duration_ms: Option<u64>,
+    double_tap_timeout_ms: Option<u64>,
+    double_tap_max_distance: Option<f32>,
     swipe_min_distance: Option<f32>,
     #[serde(default)]
     gestures: Vec<RawGestureBindingConfig>,
@@ -732,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn edgepad_config_defaults_tap_min_duration() {
+    fn edgepad_config_defaults_tap_sequence_thresholds() {
         let config = EdgepadConfig::parse(
             r#"
             [[gestures]]
@@ -744,7 +808,62 @@ mod tests {
         .expect("config should parse");
 
         assert_eq!(config.tap_min_duration_ms, DEFAULT_TAP_MIN_DURATION_MS);
+        assert_eq!(config.tap_max_duration_ms, DEFAULT_TAP_MAX_DURATION_MS);
+        assert_eq!(config.double_tap_timeout_ms, DEFAULT_DOUBLE_TAP_TIMEOUT_MS);
+        assert_eq!(
+            config.double_tap_max_distance,
+            DEFAULT_DOUBLE_TAP_MAX_DISTANCE
+        );
         assert_eq!(config.swipe_min_distance, DEFAULT_SWIPE_MIN_DISTANCE);
+    }
+
+    #[test]
+    fn edgepad_config_parses_double_tap_binding_and_sequence_thresholds() {
+        let config = EdgepadConfig::parse(
+            r#"
+            tap_min_duration_ms = 30
+            tap_max_duration_ms = 220
+            double_tap_timeout_ms = 360
+            double_tap_max_distance = 0.05
+
+            [[gestures]]
+            zone = "top"
+            direction = "tap"
+            action = ["playerctl", "play-pause"]
+
+            [[gestures]]
+            zone = "top"
+            direction = "double-tap"
+            action = ["playerctl", "stop"]
+            "#,
+        )
+        .expect("double-tap config should parse");
+
+        let options = config.engine_options();
+        assert_eq!(options.tap_min_duration, Duration::from_millis(30));
+        assert_eq!(options.tap_max_duration, Duration::from_millis(220));
+        assert_eq!(options.double_tap_timeout, Duration::from_millis(360));
+        assert_eq!(options.double_tap_max_distance, 0.05);
+        assert!(options.double_tap_zones.contains(Zone::Top));
+        assert!(options.single_tap_zones.contains(Zone::Top));
+        assert_eq!(config.gestures[1].direction, GestureDirection::DoubleTap);
+    }
+
+    #[test]
+    fn invalid_gesture_direction_lists_double_tap_as_an_allowed_value() {
+        let result = EdgepadConfig::parse(
+            r#"
+            [[gestures]]
+            zone = "top"
+            direction = "doubletap"
+            action = { log = true }
+            "#,
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("gestures[0].direction must be one of: up, down, left, right, tap, double-tap")
+        );
     }
 
     #[test]
@@ -947,6 +1066,36 @@ mod tests {
     }
 
     #[test]
+    fn edgepad_config_rejects_empty_tap_duration_range() {
+        let result = EdgepadConfig::parse(
+            r#"
+            tap_min_duration_ms = 180
+            tap_max_duration_ms = 180
+            "#,
+        );
+
+        assert_eq!(
+            result.as_ref().err().map(String::as_str),
+            Some("tap_min_duration_ms must be < tap_max_duration_ms")
+        );
+    }
+
+    #[test]
+    fn edgepad_config_rejects_invalid_double_tap_thresholds() {
+        let timeout = EdgepadConfig::parse("double_tap_timeout_ms = 0");
+        assert_eq!(
+            timeout.as_ref().err().map(String::as_str),
+            Some("double_tap_timeout_ms must be > 0 and <= 10000")
+        );
+
+        let distance = EdgepadConfig::parse("double_tap_max_distance = 0.0");
+        assert_eq!(
+            distance.as_ref().err().map(String::as_str),
+            Some("double_tap_max_distance must be > 0 and <= 1")
+        );
+    }
+
+    #[test]
     fn edgepad_config_rejects_invalid_swipe_min_distance() {
         let result = EdgepadConfig::parse(
             r#"
@@ -1027,7 +1176,7 @@ mod tests {
 
         assert_eq!(
             result.as_ref().err().map(String::as_str),
-            Some("gestures[0].direction=up conflicts with slider left; slider zones only allow tap gestures")
+            Some("gestures[0].direction=up conflicts with slider left; slider zones only allow tap or double-tap gestures")
         );
     }
 
@@ -1047,6 +1196,27 @@ mod tests {
             "#,
         )
         .expect("tap and slider can share a zone");
+
+        assert_eq!(config.gestures.len(), 1);
+        assert_eq!(config.sliders.len(), 1);
+    }
+
+    #[test]
+    fn edgepad_config_allows_double_tap_gesture_on_slider_zone() {
+        let config = EdgepadConfig::parse(
+            r#"
+            [[gestures]]
+            zone = "left"
+            direction = "double-tap"
+            action = ["pamixer", "-t"]
+
+            [[sliders]]
+            zone = "left"
+            up = ["pamixer", "-d", "3"]
+            down = ["pamixer", "-i", "3"]
+            "#,
+        )
+        .expect("double-tap and slider can share a zone");
 
         assert_eq!(config.gestures.len(), 1);
         assert_eq!(config.sliders.len(), 1);

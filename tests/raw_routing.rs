@@ -1,10 +1,12 @@
 use std::time::Duration;
 
 use edgepad::core::{
-    AxisRange, Capabilities, EdgeWidths, Engine, GestureDirection, ResyncContact, Zone,
+    AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, GestureDirection, ResyncContact,
+    Zone, ZoneSet,
 };
 use edgepad::raw::{
-    route_raw_frame, route_resync_contacts, RawEvent, RawFrame, BTN_LEFT, BTN_TOUCH, EV_KEY,
+    route_raw_frame, route_recognition_deadline, route_resync_contacts, RawEvent, RawFrame,
+    BTN_LEFT, BTN_TOUCH, EV_KEY,
 };
 
 fn test_engine() -> Engine {
@@ -274,6 +276,79 @@ fn route_raw_frame_suppresses_short_timed_tap() {
 
     assert!(routed.passthrough.is_empty());
     assert!(routed.gestures.is_empty());
+}
+
+#[test]
+fn physical_click_interrupts_active_non_buttonpad_tap_sequence() {
+    let mut engine = Engine::with_options(
+        Capabilities {
+            slot_min: 0,
+            slot_max: 1,
+            x: AxisRange { min: 0, max: 1000 },
+            y: AxisRange { min: 0, max: 700 },
+        },
+        EdgeWidths::all(0.10),
+        Vec::new(),
+        EngineOptions {
+            double_tap_zones: ZoneSet::from_zones([Zone::Left]),
+            single_tap_zones: ZoneSet::from_zones([Zone::Left]),
+            ..EngineOptions::default()
+        },
+    );
+
+    let tap_down = |tracking_id, timestamp| {
+        RawFrame::new_at(
+            vec![
+                RawEvent::abs_mt_slot(0),
+                RawEvent::abs_mt_tracking_id(tracking_id),
+                RawEvent::abs_mt_position_x(20),
+                RawEvent::abs_mt_position_y(300),
+            ],
+            Duration::from_millis(timestamp),
+        )
+    };
+    let tap_up = |timestamp| {
+        RawFrame::new_at(
+            vec![RawEvent::abs_mt_slot(0), RawEvent::abs_mt_tracking_id(-1)],
+            Duration::from_millis(timestamp),
+        )
+    };
+
+    route_raw_frame(&mut engine, &tap_down(1, 1000)).expect("first tap should start");
+    let first_up =
+        route_raw_frame(&mut engine, &tap_up(1060)).expect("first tap should become pending");
+    assert!(first_up.gestures.is_empty());
+
+    route_raw_frame(&mut engine, &tap_down(2, 1140)).expect("second contact should start");
+    let click = route_raw_frame(
+        &mut engine,
+        &RawFrame::new_at(
+            vec![RawEvent::new(EV_KEY, BTN_LEFT, 1)],
+            Duration::from_millis(1160),
+        ),
+    )
+    .expect("separate physical button should route");
+    assert_eq!(click.gestures.len(), 1);
+    assert_eq!(click.gestures[0].tracking_id, 1);
+    assert_eq!(click.gestures[0].direction, GestureDirection::Tap);
+
+    let interrupted_up = route_raw_frame(&mut engine, &tap_up(1200))
+        .expect("interrupted contact should release as an independent tap");
+    assert_eq!(interrupted_up.gestures.len(), 1);
+    assert_eq!(interrupted_up.gestures[0].tracking_id, 2);
+    assert_eq!(interrupted_up.gestures[0].direction, GestureDirection::Tap);
+
+    route_raw_frame(&mut engine, &tap_down(3, 1280)).expect("fresh tap should start");
+    let third_up =
+        route_raw_frame(&mut engine, &tap_up(1340)).expect("fresh tap should become pending");
+    assert!(third_up.gestures.is_empty());
+    let deadline = engine
+        .next_deadline()
+        .expect("fresh tap should have a deadline");
+    let expired = route_recognition_deadline(&mut engine, deadline);
+    assert_eq!(expired.gestures.len(), 1);
+    assert_eq!(expired.gestures[0].tracking_id, 3);
+    assert_eq!(expired.gestures[0].direction, GestureDirection::Tap);
 }
 
 #[test]

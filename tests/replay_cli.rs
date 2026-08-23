@@ -457,6 +457,52 @@ action = { log = true }
 }
 
 #[test]
+fn replay_cli_recognizes_configured_double_tap_as_one_gesture() {
+    let config_path = unique_temp_path("edgepad-replay-double-tap-config");
+    write_config(
+        &config_path,
+        r#"
+device = "auto"
+
+[[gestures]]
+zone = "left"
+direction = "tap"
+action = { log = true }
+
+[[gestures]]
+zone = "left"
+direction = "double-tap"
+action = { log = true }
+"#,
+    );
+
+    let output = edgepad()
+        .arg("replay")
+        .arg(fixture("left-edge-double-tap.ev"))
+        .arg("--config")
+        .arg(&config_path)
+        .output()
+        .expect("replay should run");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stderr was: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("gestures: 1"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("gesture slot=0 tracking_id=301 zone=left direction=double-tap"),
+        "stdout was: {stdout}"
+    );
+    assert!(
+        !stdout.lines().any(|line| line.ends_with("direction=tap")),
+        "single tap leaked from double-tap sequence: {stdout}"
+    );
+}
+
+#[test]
 fn replay_cli_never_executes_configured_actions() {
     let config_path = unique_temp_path("edgepad-replay-action-config.toml");
     let action_marker = unique_temp_path("edgepad-replay-action-marker");

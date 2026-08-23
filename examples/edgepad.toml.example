@@ -9,6 +9,9 @@ edge_width = 0.10
 # top_edge_width = 0.10
 # bottom_edge_width = 0.10
 tap_min_duration_ms = 40
+tap_max_duration_ms = 180
+double_tap_timeout_ms = 300
+double_tap_max_distance = 0.04
 swipe_min_distance = 0.02
 
 [[sliders]]
@@ -47,6 +50,11 @@ action = ["notify-send", "edgepad", "media-next"]
 zone = "top"
 direction = "tap"
 action = ["notify-send", "edgepad", "media-play-pause"]
+
+[[gestures]]
+zone = "top"
+direction = "double-tap"
+action = ["notify-send", "edgepad", "media-stop"]
 
 [[gestures]]
 zone = "bottom"

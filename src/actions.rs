@@ -536,6 +536,7 @@ fn direction_name(direction: GestureDirection) -> &'static str {
         GestureDirection::Left => "left",
         GestureDirection::Right => "right",
         GestureDirection::Tap => "tap",
+        GestureDirection::DoubleTap => "double-tap",
     }
 }
 
@@ -681,6 +682,35 @@ mod tests {
         assert_eq!(stats.unmatched_gestures, 1);
         assert_eq!(stats.queued_commands, 0);
         assert_eq!(stats.started_commands, 0);
+    }
+
+    #[test]
+    fn double_tap_binding_dispatches_only_the_sequence_gesture() {
+        let (sender, receiver) = mpsc::channel();
+        let mut dispatcher = ActionDispatcher::with_runner(
+            vec![binding(
+                Zone::Top,
+                GestureDirection::DoubleTap,
+                GestureActionConfig::Command {
+                    argv: vec!["playerctl".to_string(), "stop".to_string()],
+                },
+            )],
+            4,
+            RecordingRunner {
+                sender,
+                status: ActionCommandStatus::success(),
+            },
+        )
+        .expect("dispatcher should start");
+
+        dispatcher.dispatch_gesture(gesture(Zone::Top, GestureDirection::DoubleTap));
+        let argv = receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("double-tap action should run");
+        let stats = dispatcher.shutdown();
+
+        assert_eq!(stats.matched_gestures, 1);
+        assert_eq!(argv, vec!["playerctl".to_string(), "stop".to_string()]);
     }
 
     #[test]
