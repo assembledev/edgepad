@@ -19,6 +19,9 @@ pub mod core {
     use std::time::Duration;
 
     pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 40;
+    pub const DEFAULT_TAP_MAX_DURATION_MS: u64 = 180;
+    pub const DEFAULT_DOUBLE_TAP_TIMEOUT_MS: u64 = 300;
+    pub const DEFAULT_DOUBLE_TAP_MAX_DISTANCE: f32 = 0.04;
     pub const DEFAULT_SWIPE_MIN_DISTANCE: f32 = 0.02;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +115,37 @@ pub mod core {
         Left,
         Right,
         Tap,
+        DoubleTap,
+    }
+
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct ZoneSet(u8);
+
+    impl ZoneSet {
+        pub const fn all() -> Self {
+            Self(0b1111)
+        }
+
+        pub fn from_zones(zones: impl IntoIterator<Item = Zone>) -> Self {
+            let mut set = Self::default();
+            for zone in zones {
+                set.0 |= zone_bit(zone);
+            }
+            set
+        }
+
+        pub const fn contains(self, zone: Zone) -> bool {
+            self.0 & zone_bit(zone) != 0
+        }
+    }
+
+    const fn zone_bit(zone: Zone) -> u8 {
+        match zone {
+            Zone::Left => 1 << 0,
+            Zone::Right => 1 << 1,
+            Zone::Top => 1 << 2,
+            Zone::Bottom => 1 << 3,
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -146,14 +180,24 @@ pub mod core {
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct EngineOptions {
         pub tap_min_duration: Duration,
+        pub tap_max_duration: Duration,
         pub swipe_min_distance: f32,
+        pub double_tap_timeout: Duration,
+        pub double_tap_max_distance: f32,
+        pub double_tap_zones: ZoneSet,
+        pub single_tap_zones: ZoneSet,
     }
 
     impl Default for EngineOptions {
         fn default() -> Self {
             Self {
                 tap_min_duration: Duration::from_millis(DEFAULT_TAP_MIN_DURATION_MS),
+                tap_max_duration: Duration::from_millis(DEFAULT_TAP_MAX_DURATION_MS),
                 swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
+                double_tap_timeout: Duration::from_millis(DEFAULT_DOUBLE_TAP_TIMEOUT_MS),
+                double_tap_max_distance: DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
+                double_tap_zones: ZoneSet::default(),
+                single_tap_zones: ZoneSet::all(),
             }
         }
     }
@@ -170,6 +214,13 @@ pub mod core {
     pub struct ResyncContact {
         pub slot: i32,
         pub tracking_id: i32,
+        pub x: i32,
+        pub y: i32,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct SlotPosition {
+        pub slot: i32,
         pub x: i32,
         pub y: i32,
     }
@@ -235,7 +286,12 @@ pub mod core {
         start_y: Option<i32>,
         current_x: Option<i32>,
         current_y: Option<i32>,
+        retained_x: Option<i32>,
+        retained_y: Option<i32>,
+        began_in_frame: bool,
         started_at: Option<Duration>,
+        tap_sequence_eligible: bool,
+        tap_sequence_match: bool,
         slider_anchor: Option<f32>,
         held_events: Vec<Event>,
     }
@@ -251,16 +307,48 @@ pub mod core {
                 start_y: None,
                 current_x: None,
                 current_y: None,
+                retained_x: None,
+                retained_y: None,
+                began_in_frame: false,
                 started_at: None,
+                tap_sequence_eligible: true,
+                tap_sequence_match: false,
                 slider_anchor: None,
                 held_events: Vec::new(),
             }
         }
     }
 
+    #[derive(Debug, Clone, Copy)]
+    struct PendingTap {
+        gesture: Gesture,
+        released_at: Duration,
+        x: i32,
+        y: i32,
+        emit_single: bool,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct ClassifiedContact {
+        gesture: Gesture,
+        sequence_match: bool,
+        sequence_eligible: bool,
+        x: Option<i32>,
+        y: Option<i32>,
+    }
+
     impl SlotState {
-        fn reset(&mut self) {
-            *self = Self::default();
+        fn finish_contact(&mut self) {
+            // Type-B slots retain axis state after TRACKING_ID -1. Linux may
+            // suppress an unchanged X or Y when the next contact begins, so
+            // keep those values while clearing all contact-owned state.
+            let retained_x = self.retained_x;
+            let retained_y = self.retained_y;
+            *self = Self {
+                retained_x,
+                retained_y,
+                ..Self::default()
+            };
         }
 
         fn observe_position(&mut self, capabilities: Capabilities, swipe_min_distance: f32) {
@@ -301,6 +389,7 @@ pub mod core {
         pressed_physical_buttons: BTreeSet<u16>,
         current_slot: i32,
         slots: Vec<SlotState>,
+        pending_tap: Option<PendingTap>,
     }
 
     impl Engine {
@@ -321,6 +410,7 @@ pub mod core {
                 buttonpad: false,
                 pressed_physical_buttons: BTreeSet::new(),
                 slots: vec![SlotState::default(); slot_count],
+                pending_tap: None,
             }
         }
 
@@ -329,14 +419,7 @@ pub mod core {
             edges: EdgeWidths,
             sliders: Vec<SliderSpec>,
         ) -> Self {
-            for slider in &sliders {
-                assert!(
-                    slider.step.is_finite() && slider.step > 0.0 && slider.step <= 1.0,
-                    "invalid slider step for {:?}: {}",
-                    slider.zone,
-                    slider.step
-                );
-            }
+            validate_slider_specs(&sliders);
             let mut engine = Self::new(caps, edges);
             engine.sliders = sliders;
             engine
@@ -348,9 +431,39 @@ pub mod core {
             sliders: Vec<SliderSpec>,
             options: EngineOptions,
         ) -> Self {
+            validate_engine_options(options);
             let mut engine = Self::with_sliders(caps, edges, sliders);
             engine.options = options;
             engine
+        }
+
+        pub(crate) fn reconfigure_recognition(
+            &mut self,
+            edges: EdgeWidths,
+            sliders: Vec<SliderSpec>,
+            options: EngineOptions,
+        ) {
+            assert!(
+                self.slots.iter().all(|slot| !slot.active) && self.pending_tap.is_none(),
+                "recognition reconfiguration requires an idle engine"
+            );
+            validate_slider_specs(&sliders);
+            validate_engine_options(options);
+            self.edges = edges;
+            self.sliders = sliders;
+            self.options = options;
+        }
+
+        pub(crate) fn seed_slot_positions(
+            &mut self,
+            positions: &[SlotPosition],
+        ) -> Result<(), SlotError> {
+            for position in positions {
+                let slot = self.slot_mut(position.slot)?;
+                slot.retained_x = Some(position.x);
+                slot.retained_y = Some(position.y);
+            }
+            Ok(())
         }
 
         pub fn set_buttonpad(&mut self, buttonpad: bool) {
@@ -381,6 +494,7 @@ pub mod core {
             }
         }
 
+        #[cfg(test)]
         pub(crate) fn pressed_physical_buttons(&self) -> Vec<u16> {
             self.pressed_physical_buttons.iter().copied().collect()
         }
@@ -395,6 +509,41 @@ pub mod core {
             timestamp: Duration,
         ) -> Result<FrameOutput, SlotError> {
             self.process_frame_with_time(frame, Some(timestamp))
+        }
+
+        pub fn next_deadline(&self) -> Option<Duration> {
+            let pending = self.pending_tap?;
+            if let Some(second_tap_deadline) = self.matching_contact_deadline() {
+                return Some(second_tap_deadline);
+            }
+            Some(
+                pending
+                    .released_at
+                    .saturating_add(self.options.double_tap_timeout),
+            )
+        }
+
+        pub fn advance_time(&mut self, timestamp: Duration) -> FrameOutput {
+            let mut output = FrameOutput::empty();
+            self.expire_pending_tap(timestamp, &mut output);
+            output
+        }
+
+        pub fn is_recognition_idle(&self) -> bool {
+            self.pending_tap.is_none()
+        }
+
+        pub fn interrupt_tap_sequence(&mut self) -> Vec<Gesture> {
+            // A physical interaction can arrive after a matching second
+            // contact is already down. Keep separate-button edge ownership
+            // intact, but do not let that contact seed another temporal pair.
+            for slot in self.slots.iter_mut().filter(|slot| slot.active) {
+                slot.tap_sequence_eligible = false;
+                slot.tap_sequence_match = false;
+            }
+            let mut output = FrameOutput::empty();
+            self.flush_pending_tap(&mut output);
+            output.gestures
         }
 
         pub fn restore_passthrough_contacts(
@@ -415,6 +564,8 @@ pub mod core {
                 slot.start_y = Some(contact.y);
                 slot.current_x = Some(contact.x);
                 slot.current_y = Some(contact.y);
+                slot.retained_x = Some(contact.x);
+                slot.retained_y = Some(contact.y);
 
                 output.passthrough.extend([
                     Event::slot(contact.slot),
@@ -433,6 +584,9 @@ pub mod core {
             timestamp: Option<Duration>,
         ) -> Result<FrameOutput, SlotError> {
             let mut output = FrameOutput::empty();
+            if let Some(timestamp) = timestamp {
+                self.expire_pending_tap(timestamp, &mut output);
+            }
 
             for event in frame.iter().copied() {
                 match event {
@@ -447,19 +601,33 @@ pub mod core {
                     }
                     Event::TrackingId(tracking_id) if tracking_id >= 0 => {
                         let slot = self.current_slot;
-                        let slot_state = self.slot_mut(slot)?;
-                        if slot_state.active {
+                        if self.slot(slot)?.active {
                             return Err(SlotError::SlotAlreadyActive {
                                 slot,
-                                active_tracking_id: slot_state.tracking_id.unwrap_or_default(),
+                                active_tracking_id: self
+                                    .slot(slot)?
+                                    .tracking_id
+                                    .unwrap_or_default(),
                                 new_tracking_id: tracking_id,
                             });
                         }
+                        let another_contact_active = self.slots.iter().any(|slot| slot.active);
+                        if another_contact_active {
+                            for active_slot in self.slots.iter_mut().filter(|slot| slot.active) {
+                                active_slot.tap_sequence_eligible = false;
+                                active_slot.tap_sequence_match = false;
+                            }
+                            self.flush_pending_tap(&mut output);
+                        }
+                        let slot_state = self.slot_mut(slot)?;
                         slot_state.active = true;
                         slot_state.tracking_id = Some(tracking_id);
                         slot_state.ownership = Ownership::Unknown;
                         slot_state.contact_phase = ContactPhase::TapCandidate;
+                        slot_state.began_in_frame = true;
                         slot_state.started_at = timestamp;
+                        slot_state.tap_sequence_eligible = !another_contact_active;
+                        slot_state.tap_sequence_match = false;
                         slot_state.held_events.push(event);
                     }
                     Event::TrackingId(-1) => {
@@ -471,32 +639,85 @@ pub mod core {
                     Event::X(x) => {
                         let capabilities = self.caps;
                         let swipe_min_distance = self.options.swipe_min_distance;
-                        let slot_state = self.slot_mut(self.current_slot)?;
-                        slot_state.current_x = Some(x);
-                        if slot_state.active && slot_state.start_x.is_none() {
-                            slot_state.start_x = Some(x);
+                        let sequence_invalidated = {
+                            let slot_state = self.slot_mut(self.current_slot)?;
+                            slot_state.retained_x = Some(x);
+                            slot_state.current_x = Some(x);
+                            if slot_state.active && slot_state.start_x.is_none() {
+                                slot_state.start_x = Some(x);
+                            }
+                            slot_state.observe_position(capabilities, swipe_min_distance);
+                            slot_state.tap_sequence_match
+                                && slot_state.contact_phase != ContactPhase::TapCandidate
+                        };
+                        if sequence_invalidated {
+                            self.flush_pending_tap(&mut output);
                         }
-                        slot_state.observe_position(capabilities, swipe_min_distance);
                         self.route_event_for_current_slot(event, &mut output)?;
                     }
                     Event::Y(y) => {
                         let capabilities = self.caps;
                         let swipe_min_distance = self.options.swipe_min_distance;
-                        let slot_state = self.slot_mut(self.current_slot)?;
-                        slot_state.current_y = Some(y);
-                        if slot_state.active && slot_state.start_y.is_none() {
-                            slot_state.start_y = Some(y);
+                        let sequence_invalidated = {
+                            let slot_state = self.slot_mut(self.current_slot)?;
+                            slot_state.retained_y = Some(y);
+                            slot_state.current_y = Some(y);
+                            if slot_state.active && slot_state.start_y.is_none() {
+                                slot_state.start_y = Some(y);
+                            }
+                            slot_state.observe_position(capabilities, swipe_min_distance);
+                            slot_state.tap_sequence_match
+                                && slot_state.contact_phase != ContactPhase::TapCandidate
+                        };
+                        if sequence_invalidated {
+                            self.flush_pending_tap(&mut output);
                         }
-                        slot_state.observe_position(capabilities, swipe_min_distance);
                         self.route_event_for_current_slot(event, &mut output)?;
                     }
                 }
 
-                self.decide_ownership_if_ready(&mut output)?;
-                self.emit_slider_steps_if_ready(&mut output)?;
+                if !self.slot(self.current_slot)?.began_in_frame {
+                    self.decide_ownership_if_ready(&mut output)?;
+                    self.emit_slider_steps_if_ready(&mut output)?;
+                }
             }
 
+            self.finalize_contacts_started_in_frame(&mut output)?;
+
             Ok(output)
+        }
+
+        fn finalize_contacts_started_in_frame(
+            &mut self,
+            output: &mut FrameOutput,
+        ) -> Result<(), SlotError> {
+            let previous_slot = self.current_slot;
+            for index in 0..self.slots.len() {
+                let slot_number = self.caps.slot_min + index as i32;
+                let should_finalize = {
+                    let slot = &mut self.slots[index];
+                    if !slot.active || !slot.began_in_frame {
+                        false
+                    } else {
+                        // Resolve any omitted axes only after the whole SYN
+                        // frame. Doing it at TRACKING_ID would briefly classify
+                        // a moved contact from the preceding contact's position.
+                        slot.current_x = slot.current_x.or(slot.retained_x);
+                        slot.current_y = slot.current_y.or(slot.retained_y);
+                        slot.start_x = slot.start_x.or(slot.current_x);
+                        slot.start_y = slot.start_y.or(slot.current_y);
+                        slot.began_in_frame = false;
+                        true
+                    }
+                };
+                if should_finalize {
+                    self.current_slot = slot_number;
+                    self.decide_ownership_if_ready(output)?;
+                    self.emit_slider_steps_if_ready(output)?;
+                }
+            }
+            self.current_slot = previous_slot;
+            Ok(())
         }
 
         fn release_current_slot(
@@ -511,29 +732,47 @@ pub mod core {
                     let releases_slider_zone = self.slider_for_zone(zone).is_some();
                     let options = self.options;
                     let capabilities = self.caps;
-                    let slot_state = self.slot_mut(slot)?;
-                    if let Some(gesture) =
+                    let classified = {
+                        let slot_state = self.slot(slot)?;
                         classify_gesture(capabilities, slot, zone, slot_state, options, timestamp)
-                    {
-                        if !releases_slider_zone || gesture.direction == GestureDirection::Tap {
-                            output.gestures.push(gesture);
-                        }
+                            .map(|gesture| ClassifiedContact {
+                                gesture,
+                                sequence_match: slot_state.tap_sequence_match,
+                                sequence_eligible: slot_state.tap_sequence_eligible,
+                                x: slot_state.current_x.or(slot_state.start_x),
+                                y: slot_state.current_y.or(slot_state.start_y),
+                            })
+                    };
+                    if self.slot(slot)?.active {
+                        self.slot_mut(slot)?.finish_contact();
                     }
-                    if slot_state.active {
-                        slot_state.reset();
+
+                    if let Some(classified) = classified {
+                        let allowed_for_slider = !releases_slider_zone
+                            || matches!(
+                                classified.gesture.direction,
+                                GestureDirection::Tap | GestureDirection::DoubleTap
+                            );
+                        if allowed_for_slider {
+                            self.handle_classified_gesture(classified, timestamp, output);
+                        } else {
+                            self.flush_pending_tap(output);
+                        }
+                    } else if self.pending_tap.is_some() {
+                        self.flush_pending_tap(output);
                     }
                 }
                 Ownership::Passthrough => {
                     self.push_passthrough_event_for_current_slot(event, output);
                     if self.slot(slot)?.active {
-                        self.slot_mut(slot)?.reset();
+                        self.slot_mut(slot)?.finish_contact();
                     }
                 }
                 Ownership::Unknown => {
                     let slot_state = self.slot_mut(slot)?;
                     slot_state.held_events.push(event);
                     if slot_state.active {
-                        slot_state.reset();
+                        slot_state.finish_contact();
                     }
                 }
             }
@@ -585,7 +824,7 @@ pub mod core {
                 self.zone_for_current_slot()?
             };
             let Some(zone) = zone else {
-                let held_events = {
+                let (held_events, became_passthrough) = {
                     let slot_state = self.slot_mut(slot)?;
                     if slot_state.active
                         && matches!(slot_state.ownership, Ownership::Unknown)
@@ -593,11 +832,14 @@ pub mod core {
                         && slot_state.start_y.is_some()
                     {
                         slot_state.ownership = Ownership::Passthrough;
-                        std::mem::take(&mut slot_state.held_events)
+                        (std::mem::take(&mut slot_state.held_events), true)
                     } else {
-                        Vec::new()
+                        (Vec::new(), false)
                     }
                 };
+                if became_passthrough {
+                    self.flush_pending_tap(output);
+                }
                 for event in held_events {
                     self.push_passthrough_event_for_slot(slot, event, output);
                 }
@@ -618,6 +860,11 @@ pub mod core {
                 }
             };
 
+            let sequence_match = self.current_contact_matches_pending_tap(slot, zone)?;
+            if self.pending_tap.is_some() && !sequence_match {
+                self.flush_pending_tap(output);
+            }
+
             let slot_state = self.slot_mut(slot)?;
             if slot_state.active
                 && matches!(slot_state.ownership, Ownership::Unknown)
@@ -626,6 +873,7 @@ pub mod core {
             {
                 slot_state.ownership = Ownership::Claimed(zone);
                 slot_state.slider_anchor = slider_anchor;
+                slot_state.tap_sequence_match = sequence_match;
                 slot_state.held_events.clear();
             }
             Ok(())
@@ -690,6 +938,12 @@ pub mod core {
                 slot_state.slider_anchor = Some(position);
                 return Ok(());
             };
+
+            if (position - anchor).abs() >= spec.step {
+                self.flush_pending_tap(output);
+            }
+
+            let slot_state = self.slot_mut(slot)?;
 
             while position - anchor >= spec.step {
                 push_slider_step(
@@ -765,10 +1019,131 @@ pub mod core {
 
         fn reset_for_resync(&mut self) {
             for slot in &mut self.slots {
-                slot.reset();
+                *slot = SlotState::default();
             }
             self.pressed_physical_buttons.clear();
             self.current_slot = self.caps.slot_min;
+            self.pending_tap = None;
+        }
+
+        fn handle_classified_gesture(
+            &mut self,
+            classified: ClassifiedContact,
+            released_at: Option<Duration>,
+            output: &mut FrameOutput,
+        ) {
+            let ClassifiedContact {
+                gesture,
+                sequence_match,
+                sequence_eligible,
+                x,
+                y,
+            } = classified;
+            if gesture.direction != GestureDirection::Tap {
+                self.flush_pending_tap(output);
+                output.gestures.push(gesture);
+                return;
+            }
+
+            if sequence_match && self.pending_tap.take().is_some() {
+                output.gestures.push(Gesture {
+                    direction: GestureDirection::DoubleTap,
+                    ..gesture
+                });
+                return;
+            }
+
+            if !sequence_eligible {
+                self.flush_pending_tap(output);
+                if self.options.single_tap_zones.contains(gesture.zone) {
+                    output.gestures.push(gesture);
+                }
+                return;
+            }
+
+            let can_start_sequence = self.options.double_tap_zones.contains(gesture.zone)
+                && released_at.is_some()
+                && x.is_some()
+                && y.is_some();
+            if !can_start_sequence {
+                output.gestures.push(gesture);
+                return;
+            }
+
+            self.flush_pending_tap(output);
+            self.pending_tap = Some(PendingTap {
+                gesture,
+                released_at: released_at.unwrap(),
+                x: x.unwrap(),
+                y: y.unwrap(),
+                emit_single: self.options.single_tap_zones.contains(gesture.zone),
+            });
+        }
+
+        fn current_contact_matches_pending_tap(
+            &self,
+            slot: i32,
+            zone: Zone,
+        ) -> Result<bool, SlotError> {
+            let Some(pending) = self.pending_tap else {
+                return Ok(false);
+            };
+            let state = self.slot(slot)?;
+            if !state.tap_sequence_eligible || pending.gesture.zone != zone {
+                return Ok(false);
+            }
+            let (Some(started_at), Some(x), Some(y)) =
+                (state.started_at, state.start_x, state.start_y)
+            else {
+                return Ok(false);
+            };
+            let Some(gap) = started_at.checked_sub(pending.released_at) else {
+                return Ok(false);
+            };
+            if gap >= self.options.double_tap_timeout {
+                return Ok(false);
+            }
+
+            let dx = self.caps.x.normalize_delta(pending.x, x);
+            let dy = self.caps.y.normalize_delta(pending.y, y);
+            let max_distance = self.options.double_tap_max_distance;
+            Ok(dx * dx + dy * dy <= max_distance * max_distance)
+        }
+
+        fn matching_contact_deadline(&self) -> Option<Duration> {
+            self.slots
+                .iter()
+                .find(|slot| slot.active && slot.tap_sequence_match)
+                .and_then(|slot| slot.started_at)
+                .map(|started_at| started_at.saturating_add(self.options.tap_max_duration))
+        }
+
+        fn expire_pending_tap(&mut self, timestamp: Duration, output: &mut FrameOutput) {
+            let Some(pending) = self.pending_tap else {
+                return;
+            };
+
+            let deadline = if let Some(second_tap_deadline) = self.matching_contact_deadline() {
+                second_tap_deadline
+            } else {
+                pending
+                    .released_at
+                    .saturating_add(self.options.double_tap_timeout)
+            };
+            if timestamp >= deadline {
+                self.flush_pending_tap(output);
+            }
+        }
+
+        fn flush_pending_tap(&mut self, output: &mut FrameOutput) {
+            for slot in &mut self.slots {
+                slot.tap_sequence_match = false;
+            }
+            if let Some(pending) = self.pending_tap.take() {
+                if pending.emit_single {
+                    output.gestures.push(pending.gesture);
+                }
+            }
         }
 
         fn slot_index(&self, slot: i32) -> Result<usize, SlotError> {
@@ -799,6 +1174,34 @@ pub mod core {
         output.slider_steps.push(step);
     }
 
+    fn validate_slider_specs(sliders: &[SliderSpec]) {
+        for slider in sliders {
+            assert!(
+                slider.step.is_finite() && slider.step > 0.0 && slider.step <= 1.0,
+                "invalid slider step for {:?}: {}",
+                slider.zone,
+                slider.step
+            );
+        }
+    }
+
+    fn validate_engine_options(options: EngineOptions) {
+        assert!(
+            options.tap_min_duration < options.tap_max_duration,
+            "tap minimum duration must be below maximum duration"
+        );
+        assert!(
+            !options.double_tap_timeout.is_zero(),
+            "double-tap timeout must be positive"
+        );
+        assert!(
+            options.double_tap_max_distance.is_finite()
+                && options.double_tap_max_distance > 0.0
+                && options.double_tap_max_distance <= 1.0,
+            "double-tap distance must be > 0 and <= 1"
+        );
+    }
+
     fn classify_gesture(
         capabilities: Capabilities,
         slot: i32,
@@ -823,6 +1226,7 @@ pub mod core {
                         state.started_at,
                         released_at,
                         options.tap_min_duration,
+                        options.tap_max_duration,
                     ) {
                         return None;
                     }
@@ -867,15 +1271,12 @@ pub mod core {
         started_at: Option<Duration>,
         released_at: Option<Duration>,
         min_duration: Duration,
+        max_duration: Duration,
     ) -> bool {
-        if min_duration.is_zero() {
-            return true;
-        }
-
         match (started_at, released_at) {
             (Some(started_at), Some(released_at)) => released_at
                 .checked_sub(started_at)
-                .is_some_and(|duration| duration >= min_duration),
+                .is_some_and(|duration| duration >= min_duration && duration < max_duration),
             _ => true,
         }
     }
@@ -1162,10 +1563,17 @@ pub mod replay {
         engine: &mut Engine,
         frames: &[ReplayFrame],
     ) -> Result<Vec<FrameOutput>, SlotError> {
-        frames
+        let mut outputs = frames
             .iter()
             .map(|frame| engine.process_frame_at(&frame.events, frame.timestamp))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(deadline) = engine.next_deadline() {
+            let deadline_output = engine.advance_time(deadline);
+            if !deadline_output.gestures.is_empty() {
+                outputs.push(deadline_output);
+            }
+        }
+        Ok(outputs)
     }
 
     fn parse_timestamp(

@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use edgepad::core::{
-    AxisRange, Capabilities, EdgeWidths, Engine, Event, FrameOutput, Gesture, GestureDirection,
-    SlotError, Zone,
+    AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, Event, FrameOutput, Gesture,
+    GestureDirection, SlotError, Zone, ZoneSet,
 };
 use edgepad::replay::{parse_frames, run_frames, ReplayError, ReplayFrame};
 
@@ -77,6 +77,30 @@ fn parsed_fixture_drives_engine_to_left_swipe_right_without_passthrough() {
     assert_eq!(gestures.len(), 1);
     assert_eq!(gestures[0].zone, Zone::Left);
     assert_eq!(gestures[0].direction, GestureDirection::Right);
+}
+
+#[test]
+fn double_tap_fixture_drives_sequence_recognizer_without_single_tap_leakage() {
+    let frames = parse_frames(include_str!("fixtures/left-edge-double-tap.ev"))
+        .expect("double-tap fixture should parse");
+    let mut engine = Engine::with_options(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        Vec::new(),
+        EngineOptions {
+            double_tap_zones: ZoneSet::from_zones([Zone::Left]),
+            single_tap_zones: ZoneSet::from_zones([Zone::Left]),
+            ..EngineOptions::default()
+        },
+    );
+
+    let outputs = run_frames(&mut engine, &frames).expect("fixture should run");
+    let gestures = collect_gestures(&outputs);
+
+    assert_eq!(gestures.len(), 1);
+    assert_eq!(gestures[0].zone, Zone::Left);
+    assert_eq!(gestures[0].direction, GestureDirection::DoubleTap);
+    assert_eq!(gestures[0].tracking_id, 301);
 }
 
 #[test]

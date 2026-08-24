@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use edgepad::core::{
     AxisRange, Capabilities, EdgeWidths, Engine, EngineOptions, Event, GestureDirection,
-    ResyncContact, SliderAxis, SliderDirection, SliderSpec, SlotError, Zone,
+    ResyncContact, SliderAxis, SliderDirection, SliderSpec, SlotError, Zone, ZoneSet,
 };
 use edgepad::raw::BTN_LEFT;
 
@@ -823,4 +823,286 @@ fn gesture_direction_compares_normalized_axis_travel() {
         .expect("contact should release");
 
     assert_eq!(released.gestures[0].direction, GestureDirection::Down);
+}
+
+fn double_tap_engine(single_tap_binding: bool) -> Engine {
+    Engine::with_options(
+        test_caps(),
+        EdgeWidths::all(0.10),
+        Vec::new(),
+        EngineOptions {
+            double_tap_zones: ZoneSet::from_zones([Zone::Left]),
+            single_tap_zones: if single_tap_binding {
+                ZoneSet::from_zones([Zone::Left])
+            } else {
+                ZoneSet::default()
+            },
+            ..EngineOptions::default()
+        },
+    )
+}
+
+fn timed_left_tap(
+    engine: &mut Engine,
+    tracking_id: i32,
+    x: i32,
+    y: i32,
+    started_at_ms: u64,
+    released_at_ms: u64,
+) -> (edgepad::core::FrameOutput, edgepad::core::FrameOutput) {
+    let down = engine
+        .process_frame_at(
+            &[
+                Event::slot(0),
+                Event::tracking_id(tracking_id),
+                Event::x(x),
+                Event::y(y),
+            ],
+            Duration::from_millis(started_at_ms),
+        )
+        .expect("tap down should be valid");
+    let up = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(released_at_ms),
+        )
+        .expect("tap release should be valid");
+    (down, up)
+}
+
+#[test]
+fn double_tap_emits_one_sequence_gesture_after_second_valid_tap() {
+    let mut engine = double_tap_engine(true);
+
+    let (_, first_up) = timed_left_tap(&mut engine, 100, 20, 300, 1000, 1060);
+    assert!(first_up.gestures.is_empty());
+    assert_eq!(engine.next_deadline(), Some(Duration::from_millis(1360)));
+
+    let (_, second_up) = timed_left_tap(&mut engine, 101, 25, 305, 1200, 1260);
+    assert_eq!(second_up.gestures.len(), 1);
+    assert_eq!(second_up.gestures[0].direction, GestureDirection::DoubleTap);
+    assert_eq!(second_up.gestures[0].tracking_id, 101);
+    assert!(engine.next_deadline().is_none());
+}
+
+#[test]
+fn double_tap_reuses_type_b_slot_coordinates_when_kernel_omits_unchanged_axes() {
+    let mut engine = double_tap_engine(true);
+    timed_left_tap(&mut engine, 102, 20, 300, 1000, 1060);
+
+    let second_down = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(103)],
+            Duration::from_millis(1200),
+        )
+        .expect("a Type-B slot may start without repeating unchanged axes");
+    assert!(second_down.gestures.is_empty());
+    assert!(second_down.passthrough.is_empty());
+
+    let second_up = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(1260),
+        )
+        .expect("retained-position contact should release cleanly");
+    assert_eq!(second_up.gestures.len(), 1);
+    assert_eq!(second_up.gestures[0].direction, GestureDirection::DoubleTap);
+    assert_eq!(second_up.gestures[0].tracking_id, 103);
+}
+
+#[test]
+fn new_frame_coordinates_override_retained_slot_position_before_ownership() {
+    let mut engine = double_tap_engine(true);
+    timed_left_tap(&mut engine, 104, 20, 300, 1000, 1060);
+
+    let center_down = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(105), Event::x(500)],
+            Duration::from_millis(1200),
+        )
+        .expect("new X with retained Y should resolve after the full frame");
+
+    assert_eq!(center_down.gestures.len(), 1);
+    assert_eq!(center_down.gestures[0].tracking_id, 104);
+    assert_eq!(center_down.gestures[0].direction, GestureDirection::Tap);
+    assert!(center_down.passthrough.contains(&Event::tracking_id(105)));
+    assert!(center_down.passthrough.contains(&Event::x(500)));
+}
+
+#[test]
+fn overlapping_contacts_cannot_form_a_temporal_double_tap() {
+    let mut engine = double_tap_engine(true);
+    engine
+        .process_frame_at(
+            &[
+                Event::slot(0),
+                Event::tracking_id(106),
+                Event::x(20),
+                Event::y(300),
+            ],
+            Duration::from_millis(1000),
+        )
+        .expect("first contact should start");
+    engine
+        .process_frame_at(
+            &[
+                Event::slot(1),
+                Event::tracking_id(107),
+                Event::x(22),
+                Event::y(302),
+            ],
+            Duration::from_millis(1020),
+        )
+        .expect("overlapping contact should start");
+
+    let first_up = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(1060),
+        )
+        .expect("first contact should release");
+    let second_up = engine
+        .process_frame_at(
+            &[Event::slot(1), Event::tracking_id(-1)],
+            Duration::from_millis(1080),
+        )
+        .expect("second contact should release");
+
+    assert_eq!(first_up.gestures.len(), 1);
+    assert_eq!(first_up.gestures[0].direction, GestureDirection::Tap);
+    assert_eq!(second_up.gestures.len(), 1);
+    assert_eq!(second_up.gestures[0].direction, GestureDirection::Tap);
+    assert!(engine.next_deadline().is_none());
+}
+
+#[test]
+fn single_tap_is_released_exactly_at_double_tap_deadline() {
+    let mut engine = double_tap_engine(true);
+    timed_left_tap(&mut engine, 110, 20, 300, 1000, 1060);
+
+    assert!(engine
+        .advance_time(Duration::from_millis(1359))
+        .gestures
+        .is_empty());
+    let expired = engine.advance_time(Duration::from_millis(1360));
+    assert_eq!(expired.gestures.len(), 1);
+    assert_eq!(expired.gestures[0].direction, GestureDirection::Tap);
+}
+
+#[test]
+fn double_tap_only_binding_drops_expired_single_tap_without_unmatched_action() {
+    let mut engine = double_tap_engine(false);
+    timed_left_tap(&mut engine, 120, 20, 300, 1000, 1060);
+
+    let expired = engine.advance_time(Duration::from_millis(1360));
+    assert!(expired.gestures.is_empty());
+    assert!(engine.next_deadline().is_none());
+}
+
+#[test]
+fn second_tap_just_inside_timeout_finishes_as_double_tap() {
+    let mut engine = double_tap_engine(true);
+    timed_left_tap(&mut engine, 130, 20, 300, 1000, 1060);
+
+    let (_, second_up) = timed_left_tap(&mut engine, 131, 20, 300, 1359, 1419);
+    assert_eq!(second_up.gestures.len(), 1);
+    assert_eq!(second_up.gestures[0].direction, GestureDirection::DoubleTap);
+}
+
+#[test]
+fn spatially_separate_taps_do_not_form_a_double_tap() {
+    let mut engine = double_tap_engine(true);
+    timed_left_tap(&mut engine, 140, 20, 200, 1000, 1060);
+
+    let (second_down, second_up) = timed_left_tap(&mut engine, 141, 20, 260, 1200, 1260);
+    assert_eq!(second_down.gestures.len(), 1);
+    assert_eq!(second_down.gestures[0].direction, GestureDirection::Tap);
+    assert!(second_up.gestures.is_empty());
+
+    let second_expired = engine.advance_time(Duration::from_millis(1560));
+    assert_eq!(second_expired.gestures.len(), 1);
+    assert_eq!(second_expired.gestures[0].tracking_id, 141);
+}
+
+#[test]
+fn movement_during_second_contact_releases_pending_single_immediately() {
+    let mut engine = double_tap_engine(true);
+    timed_left_tap(&mut engine, 150, 20, 300, 1000, 1060);
+    engine
+        .process_frame_at(
+            &[
+                Event::slot(0),
+                Event::tracking_id(151),
+                Event::x(20),
+                Event::y(300),
+            ],
+            Duration::from_millis(1200),
+        )
+        .expect("second contact should start");
+
+    let moved = engine
+        .process_frame_at(&[Event::slot(0), Event::x(80)], Duration::from_millis(1230))
+        .expect("second contact movement should be valid");
+    assert_eq!(moved.gestures.len(), 1);
+    assert_eq!(moved.gestures[0].direction, GestureDirection::Tap);
+    assert!(engine.next_deadline().is_none());
+
+    let released = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(1260),
+        )
+        .expect("moved contact should release");
+    assert_eq!(released.gestures[0].direction, GestureDirection::Right);
+}
+
+#[test]
+fn long_stationary_contact_is_not_a_tap() {
+    let mut engine = double_tap_engine(true);
+
+    let (_, released) = timed_left_tap(&mut engine, 160, 20, 300, 1000, 1181);
+    assert!(released.gestures.is_empty());
+    assert!(engine.next_deadline().is_none());
+}
+
+#[test]
+fn second_contact_held_past_tap_max_duration_cannot_complete_double_tap() {
+    let mut engine = double_tap_engine(true);
+    timed_left_tap(&mut engine, 170, 20, 300, 1000, 1060);
+    engine
+        .process_frame_at(
+            &[
+                Event::slot(0),
+                Event::tracking_id(171),
+                Event::x(20),
+                Event::y(300),
+            ],
+            Duration::from_millis(1200),
+        )
+        .expect("second contact should start");
+
+    let expired = engine.advance_time(Duration::from_millis(1380));
+    assert_eq!(expired.gestures.len(), 1);
+    assert_eq!(expired.gestures[0].tracking_id, 170);
+
+    let released = engine
+        .process_frame_at(
+            &[Event::slot(0), Event::tracking_id(-1)],
+            Duration::from_millis(1381),
+        )
+        .expect("long second contact should release");
+    assert!(released.gestures.is_empty());
+}
+
+#[test]
+fn syn_dropped_cancels_pending_tap_sequence() {
+    let mut engine = double_tap_engine(true);
+    timed_left_tap(&mut engine, 180, 20, 300, 1000, 1060);
+
+    let dropped = engine
+        .process_frame_at(&[Event::syn_dropped()], Duration::from_millis(1100))
+        .expect("SYN_DROPPED should reset sequence state");
+    assert!(dropped.resync_required);
+    assert!(dropped.gestures.is_empty());
+    assert!(engine.next_deadline().is_none());
 }

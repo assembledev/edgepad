@@ -9,6 +9,7 @@ The hard part is input correctness: Type-B multitouch slots, mixed edge/center c
 ## Features
 
 - Edge gestures on the left, right, top, and bottom touchpad zones.
+- Spatially and temporally constrained edge double taps, with correct single-tap deferral.
 - Continuous edge sliders for stepwise controls such as volume and brightness.
 - Normal touchpad passthrough for unclaimed center contacts.
 - Long-running user-session daemon with TOML config.
@@ -25,7 +26,8 @@ The touchpad is split into four edge zones: `left`, `right`, `top`, and `bottom`
 
 - A **gesture** runs one action when the finger lifts. It can match either a directional swipe or a
   tap.
-- A **tap** is a gesture whose contact never leaves the configured movement tolerance.
+- A **tap** is a short gesture whose contact never leaves the configured movement tolerance.
+- A **double tap** is two taps on the same edge target within the configured time and distance.
 - A **slider** runs repeated steps while the finger moves, which is useful for volume or brightness.
 - An **action** is the command that edgepad starts for a gesture or slider step.
 
@@ -126,6 +128,9 @@ Example config:
 device = "auto"
 edge_width = 0.10
 tap_min_duration_ms = 40
+tap_max_duration_ms = 180
+double_tap_timeout_ms = 300
+double_tap_max_distance = 0.04
 swipe_min_distance = 0.02
 
 [[sliders]]
@@ -142,6 +147,11 @@ down = ["notify-send", "edgepad", "brightness-down"]
 zone = "top"
 direction = "tap"
 action = ["notify-send", "edgepad", "play-pause"]
+
+[[gestures]]
+zone = "top"
+direction = "double-tap"
+action = ["notify-send", "edgepad", "stop"]
 ```
 
 Reload the user service after config changes:
@@ -151,8 +161,9 @@ systemctl --user reload edgepad.service
 ```
 
 The daemon validates the complete file and keeps the previous configuration if the reload fails.
-If a touch is active, it defers the swap until all fingers lift, so one contact is never interpreted
-using two configurations. Changing the configured input device still requires a service restart.
+If a touch or tap sequence is active, it defers the swap until recognition is idle, so one sequence
+is never interpreted using two configurations. Changing the configured input device still requires
+a service restart.
 
 Watch logs:
 
@@ -203,6 +214,27 @@ right_edge_width = 0.12
 tap_min_duration_ms = 40
 ```
 
+`tap_max_duration_ms` prevents a stationary hold from becoming a tap. A contact must lift before
+this limit, which defaults to `180` milliseconds.
+
+```toml
+tap_max_duration_ms = 180
+```
+
+Double-tap recognition uses both time and position. `double_tap_timeout_ms` is the maximum gap from
+the first tap's release to the second tap's contact start. `double_tap_max_distance` is the maximum
+normalized Euclidean distance from the first tap's release position to the second tap's start
+position. The defaults are `300` milliseconds and `0.04` (4% of the normalized touchpad axes).
+
+```toml
+double_tap_timeout_ms = 300
+double_tap_max_distance = 0.04
+```
+
+These settings matter only on an edge with a `double-tap` binding. If that edge also has a `tap`
+binding, edgepad waits until the double-tap deadline before running the single-tap action. Without a
+`double-tap` binding, ordinary taps stay immediate. See the full [recognition design](docs/double-tap.md).
+
 `swipe_min_distance` is the minimum normalized touchpad travel that turns an edge contact into a
 directional gesture. It defaults to `0.02`, or 2% of the corresponding touchpad axis. Smaller
 movement remains a tap, so the same physical gesture behaves consistently across coordinate ranges.
@@ -232,7 +264,7 @@ left, right, top, bottom
 Directions:
 
 ```text
-up, down, left, right, tap
+up, down, left, right, tap, double-tap
 ```
 
 Continuous controls use `[[sliders]]`. Side zones use vertical `up`/`down` steps; top and bottom zones use horizontal `left`/`right` steps. `step` is normalized touchpad travel and defaults to `0.04`.
@@ -245,7 +277,8 @@ up = ["pamixer", "-i", "3"]
 down = ["pamixer", "-d", "3"]
 ```
 
-Slider zones can share the same edge with `tap` gestures, but not with directional `[[gestures]]`.
+Slider zones can share the same edge with `tap` and `double-tap` gestures, but not with directional
+`[[gestures]]`.
 
 Actions are argv arrays. They are not run through a shell, so write shell logic explicitly when needed:
 
@@ -272,6 +305,11 @@ For live forwarding it:
 The output side does not blindly copy raw pointer-emulation events. `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` are synthesized from unclaimed passthrough contacts so an edge-owned finger does not leak into normal pointer movement. Physical touchpad buttons (`BTN_LEFT` and related pointer buttons) are passed through, and live mode preserves input properties such as `INPUT_PROP_BUTTONPAD` so libinput keeps clickpad behavior.
 
 On a buttonpad/clickpad, a physical button press takes priority over edge recognition. Active edge-owned contacts are promoted to normal passthrough contacts before the button event, and remain passthrough until they lift, so physical clicks and click-drag work even inside configured edge zones. This cancels the pending edge gesture; slider steps already emitted are not rolled back. Tap-to-click does not produce a physical button event, so an edge tap keeps the normal edge-gesture behavior. Touchpads with separate buttons keep independent edge and button handling.
+
+Double taps are recognized from Type-B contact lifecycles and kernel frame timestamps. The live loop
+arms a real deadline after the first tap, so a pending single-tap action is released on time even when
+the touchpad remains completely idle. Linux's `BTN_TOOL_DOUBLETAP` is deliberately not used: that
+event code reports two simultaneous fingers, not two taps in time.
 
 ## Permissions
 

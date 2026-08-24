@@ -534,6 +534,7 @@ mod tests {
                 },
             ],
             sliders: Vec::new(),
+            ..EdgepadConfig::default()
         };
 
         let line = zones_status_line(&config);
@@ -576,6 +577,7 @@ mod tests {
                 },
             ],
             sliders: Vec::new(),
+            ..EdgepadConfig::default()
         };
 
         let line = actions_status_line(&config);

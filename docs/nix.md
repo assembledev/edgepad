@@ -79,6 +79,9 @@ Import the Home Manager module in your home configuration:
     # Optional; omitted edges continue to use edgeWidth.
     edgeWidths.right = 0.12;
     tapMinDurationMs = 40;
+    tapMaxDurationMs = 180;
+    doubleTapTimeoutMs = 300;
+    doubleTapMaxDistance = 0.04;
     swipeMinDistance = 0.02;
 
     gestures = [
@@ -86,6 +89,11 @@ Import the Home Manager module in your home configuration:
         zone = "top";
         direction = "tap";
         action = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "play-pause" ];
+      }
+      {
+        zone = "top";
+        direction = "double-tap";
+        action = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "stop" ];
       }
     ];
 

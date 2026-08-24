@@ -43,7 +43,7 @@ sliders aligned with the daemon. Use `--built-in-defaults` only when intentional
 standalone recognizer profile. The commands print `profile: config ...` or
 `profile: built-in defaults`; replay never executes configured actions.
 Dump files include the kernel timestamp on every frame boundary, so replay applies
-`tap_min_duration_ms` exactly like the live proxy.
+the configured tap duration and double-tap timing thresholds exactly like the live proxy.
 
 ## Replay-format capture
 

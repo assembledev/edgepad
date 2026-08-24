@@ -78,6 +78,9 @@ device = "auto"
 edge_width = 0.10
 # Optional: left_edge_width = 0.08
 tap_min_duration_ms = 40
+tap_max_duration_ms = 180
+double_tap_timeout_ms = 300
+double_tap_max_distance = 0.04
 swipe_min_distance = 0.02
 
 [[gestures]]

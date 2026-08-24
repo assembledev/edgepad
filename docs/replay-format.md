@@ -11,7 +11,8 @@ width, swipe threshold, and sliders match the daemon. Select another config with
 For a hermetic fixture run that intentionally ignores user configuration, pass
 `--built-in-defaults`. The output always names the selected profile and recognizer settings. Replay
 does not execute configured actions.
-Every frame carries a timestamp, so replay applies `tap_min_duration_ms` like the live proxy.
+Every frame carries a timestamp, so replay applies tap duration and double-tap deadlines like the
+live proxy. A pending single tap is advanced to its deadline after the final recorded frame.
 
 ## Replay-format syntax
 
@@ -122,6 +123,7 @@ For a device with X range `0..1000` and a left edge width of `10%`, this fixture
 
 ```text
 tests/fixtures/left-edge-swipe-right.ev
+tests/fixtures/left-edge-double-tap.ev
 tests/fixtures/center-touch-passthrough.ev
 tests/fixtures/mixed-edge-and-center.ev
 tests/fixtures/duplicate-tracking-id.ev

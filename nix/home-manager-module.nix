@@ -47,6 +47,7 @@ let
           "left"
           "right"
           "tap"
+          "double-tap"
         ];
         description = "Recognized gesture direction.";
       };
@@ -122,6 +123,9 @@ let
       device = cfg.device;
       edge_width = cfg.edgeWidth;
       tap_min_duration_ms = cfg.tapMinDurationMs;
+      tap_max_duration_ms = cfg.tapMaxDurationMs;
+      double_tap_timeout_ms = cfg.doubleTapTimeoutMs;
+      double_tap_max_distance = cfg.doubleTapMaxDistance;
       swipe_min_distance = cfg.swipeMinDistance;
       gestures = map (gesture: {
         inherit (gesture) zone direction action;
@@ -185,6 +189,30 @@ in
       description = "Minimum edge contact duration in milliseconds required for a tap gesture.";
     };
 
+    tapMaxDurationMs = lib.mkOption {
+      type = lib.types.ints.between 1 10000;
+      default = 180;
+      description = "Maximum edge contact duration in milliseconds allowed for a tap gesture.";
+    };
+
+    doubleTapTimeoutMs = lib.mkOption {
+      type = lib.types.ints.between 1 10000;
+      default = 300;
+      description = "Maximum gap in milliseconds between taps in a double-tap sequence.";
+    };
+
+    doubleTapMaxDistance = lib.mkOption {
+      type = lib.types.float;
+      default = 0.04;
+      apply =
+        value:
+        if value > 0.0 && value <= 1.0 then
+          value
+        else
+          throw "services.edgepad.doubleTapMaxDistance must be > 0 and <= 1";
+      description = "Maximum normalized distance between taps in a double-tap sequence.";
+    };
+
     swipeMinDistance = lib.mkOption {
       type = lib.types.float;
       default = 0.02;
@@ -229,6 +257,13 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = cfg.tapMinDurationMs < cfg.tapMaxDurationMs;
+        message = "services.edgepad.tapMinDurationMs must be less than tapMaxDurationMs";
+      }
+    ];
+
     home.packages = [ cfg.package ];
 
     xdg.configFile."edgepad/edgepad.toml".source = configFile;
