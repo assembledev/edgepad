@@ -1096,6 +1096,9 @@ fn proxy(args: &ProxyArgs) -> Result<(), String> {
     Ok(())
 }
 
+// Bridges configuration, actions, and the live loop. The proxy requests a
+// reload only at an idle boundary; validate the whole candidate here before
+// changing either the action bindings or the recognizer settings.
 struct DaemonRuntimeHandler {
     dispatcher: ActionDispatcher,
     config_path: PathBuf,
@@ -1401,6 +1404,8 @@ fn register_daemon_signal_handler(signal: libc::c_int) -> Result<(), String> {
     Ok(())
 }
 
+// Signal context must not parse config, log, or lock. Defer that work by setting
+// a flag; the watcher transfers the request to the normal runtime path.
 extern "C" fn handle_daemon_signal(signal: libc::c_int) {
     if signal == libc::SIGHUP {
         DAEMON_RELOAD_REQUESTED.store(true, Ordering::SeqCst);

@@ -1,434 +1,128 @@
 # edgepad
 
-Touchpad edge gestures for Linux/Wayland.
+Touchpad edge gestures for Linux/Wayland. Use the edges to control volume, adjust
+brightness, switch workspaces, or run any command. The center stays available for
+normal pointer movement.
 
-`edgepad` turns touchpad edges into command zones while keeping normal pointer movement on the center of the pad. Swipe from an edge to run commands such as changing workspaces, opening a launcher, or sending desktop notifications.
-
-The hard part is input correctness: Type-B multitouch slots, mixed edge/center contacts, `SYN_DROPPED` recovery, and virtual touch cleanup are covered by replay tests before they touch real hardware.
-
-## Features
-
-- Edge gestures on the left, right, top, and bottom touchpad zones.
-- Spatially and temporally constrained edge double taps, with correct single-tap deferral.
-- Continuous edge sliders for stepwise controls such as volume and brightness.
-- Normal touchpad passthrough for unclaimed center contacts.
-- Long-running user-session daemon with TOML config.
-- Transactional config reload without releasing the touchpad grab.
-- Command actions as argv arrays, without shell re-splitting.
-- Automatic touchpad discovery when exactly one readable candidate is present.
-- Read-only device discovery and capture tools for debugging.
-- Bounded live proxy mode for testing real hardware.
-- Nix package, NixOS module, Home Manager module, release installer, and systemd user service.
-
-## Core concepts
-
-The touchpad is split into four edge zones: `left`, `right`, `top`, and `bottom`.
-
-- A **gesture** runs one action when the finger lifts. It can match either a directional swipe or a
-  tap.
-- A **tap** is a short gesture whose contact never leaves the configured movement tolerance.
-- A **double tap** is two taps on the same edge target within the configured time and distance.
-- A **slider** runs repeated steps while the finger moves, which is useful for volume or brightness.
-- An **action** is the command that edgepad starts for a gesture or slider step.
-
-A slider and a tap gesture can share the same edge. A slider and a directional gesture cannot,
-because both would need to own the same movement.
+Gestures start with a finger on the touchpad's left, right, top, or bottom edge.
+Swipes, taps, and double taps run an action when you lift your finger; sliders
+repeat an action as you move along an edge.
 
 ## Install
 
-### Release installer
+On an **x86_64 Linux desktop with systemd**, run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh
 ```
 
-Preview the install plan first:
+The installer puts `edgepad` in `~/.local/bin`, creates a config, sets up device
+access, and starts a user service. It asks for `sudo` to install the udev rules.
+Make sure `~/.local/bin` is on your `PATH`.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --dry-run
-```
+To preview the changes, append `-s -- --dry-run` to `sh`. Run the installer again
+to update; it keeps your config.
 
-The release installer is the complete setup for an x86_64 Linux desktop with systemd. It downloads
-a static binary, installs the udev rules, writes a default config to
-`~/.config/edgepad/edgepad.toml`, installs and starts the user service, then runs `edgepad doctor`.
-It asks for `sudo` only when installing the udev rules.
+**NixOS:** follow the [Nix setup](docs/nix.md). Use both the NixOS module for
+device access and the Home Manager module for configuration and the user service.
 
-### Update
+## Try it
 
-Run the same installer command again. It keeps your config, replaces the installed files, restarts
-the daemon, and checks that the service is healthy.
-
-### Uninstall
-
-Uninstall files created by the release installer:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --uninstall
-```
-
-This keeps `~/.config/edgepad/edgepad.toml`. To remove the config too:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --uninstall --purge
-```
-
-### Nix
-
-For normal desktop use, install both the NixOS module and the Home Manager module. The NixOS module
-provides device access; the Home Manager module owns the config and user service. See the complete
-[Nix setup](docs/nix.md).
-
-The commands below only build or run the package. They do not install device rules or a user service.
-
-Build and run from the repository:
-
-```bash
-nix build .#edgepad
-./result/bin/edgepad --help
-```
-
-Run without installing:
-
-```bash
-nix run github:assembledev/edgepad -- --help
-nix run github:assembledev/edgepad -- devices
-```
-
-## Quick start
-
-The config installed by the release script uses desktop notifications as safe example actions.
-Gestures will show what they matched, but they will not change your volume, brightness, media state,
-or workspace until you replace those commands.
-
-Check that the service, config, and touchpad are ready:
+Check that edgepad is ready:
 
 ```bash
 edgepad status
 ```
 
-The service becomes active only after the virtual touchpad is created and the physical device is
-grabbed. Status output includes the ready daemon's PID, version, and selected device when systemd
-provides them.
+With the installer’s default config, slide a finger up or down along the left
+edge. You should see a `volume-up` or `volume-down` notification. The examples
+require `notify-send` and a desktop notification service; they don't change your
+volume or other settings yet.
 
-If status reports a problem, run the full check:
+If nothing happens, run `edgepad doctor` to check device access, missing commands,
+and service health.
 
-```bash
-edgepad doctor
-```
+## Make it yours
 
-Edit your config:
-
-```bash
-$EDITOR ~/.config/edgepad/edgepad.toml
-```
-
-Example config:
+Edit `~/.config/edgepad/edgepad.toml`. For example, this complete config makes the
+left edge a volume slider and a tap on the top edge toggle media playback:
 
 ```toml
 device = "auto"
-edge_width = 0.10
-tap_min_duration_ms = 40
-tap_max_duration_ms = 180
-double_tap_timeout_ms = 300
-double_tap_max_distance = 0.04
-swipe_min_distance = 0.02
 
 [[sliders]]
 zone = "left"
-up = ["notify-send", "edgepad", "volume-up"]
-down = ["notify-send", "edgepad", "volume-down"]
-
-[[sliders]]
-zone = "right"
-up = ["notify-send", "edgepad", "brightness-up"]
-down = ["notify-send", "edgepad", "brightness-down"]
+up = ["pamixer", "-i", "3"]
+down = ["pamixer", "-d", "3"]
 
 [[gestures]]
 zone = "top"
 direction = "tap"
-action = ["notify-send", "edgepad", "play-pause"]
-
-[[gestures]]
-zone = "top"
-direction = "double-tap"
-action = ["notify-send", "edgepad", "stop"]
+action = ["playerctl", "play-pause"]
 ```
 
-Reload the user service after config changes:
+Install `pamixer` and `playerctl` for this example, or replace them with commands
+you use. Each array contains the command followed by its arguments. Edgepad does
+not run commands through a shell.
+
+Reload after editing:
 
 ```bash
 systemctl --user reload edgepad.service
 ```
 
-The daemon validates the complete file and keeps the previous configuration if the reload fails.
-If a touch or tap sequence is active, it defers the swap until recognition is idle, so one sequence
-is never interpreted using two configurations. Changing the configured input device still requires
-a service restart.
+If the config is invalid, edgepad keeps the previous one and logs the error.
+Home Manager users should edit their Nix configuration and apply it instead.
 
-Watch logs:
+See the [configuration guide](docs/configuration.md) for swipes, double taps,
+edge widths, and sensitivity settings, or start from the
+[full example config](examples/edgepad.toml.example).
 
-```bash
-journalctl --user -u edgepad.service -f
-```
+## Troubleshooting
 
-If pointer input behaves incorrectly, stop edgepad immediately:
+If pointer movement behaves incorrectly, stop edgepad to release the touchpad:
 
 ```bash
 systemctl --user stop edgepad.service
 ```
 
-The physical touchpad is ungrabbed when the daemon stops. Start it again with:
+For other problems, check the diagnostics and logs:
 
 ```bash
-systemctl --user start edgepad.service
-```
-
-For a foreground run, `edgepad daemon` reads `~/.config/edgepad/edgepad.toml` by default.
-
-## Gesture config
-
-`device` can be `"auto"` or an explicit event node:
-
-```toml
-device = "auto"
-# device = "/dev/input/event7"
-```
-
-`edge_width` is the fraction of the touchpad reserved for edge zones on each side:
-
-```toml
-edge_width = 0.10
-```
-
-Individual edges can optionally override that default. Omitted overrides continue to use
-`edge_width`:
-
-```toml
-left_edge_width = 0.08
-right_edge_width = 0.12
-```
-
-`tap_min_duration_ms` ignores very short edge taps. It defaults to `40`; set it to `0` to disable the guard.
-
-```toml
-tap_min_duration_ms = 40
-```
-
-`tap_max_duration_ms` prevents a stationary hold from becoming a tap. A contact must lift before
-this limit, which defaults to `180` milliseconds.
-
-```toml
-tap_max_duration_ms = 180
-```
-
-Double-tap recognition uses both time and position. `double_tap_timeout_ms` is the maximum gap from
-the first tap's release to the second tap's contact start. `double_tap_max_distance` is the maximum
-normalized Euclidean distance from the first tap's release position to the second tap's start
-position. The defaults are `300` milliseconds and `0.04` (4% of the normalized touchpad axes).
-
-```toml
-double_tap_timeout_ms = 300
-double_tap_max_distance = 0.04
-```
-
-These settings matter only on an edge with a `double-tap` binding. If that edge also has a `tap`
-binding, edgepad waits until the double-tap deadline before running the single-tap action. Without a
-`double-tap` binding, ordinary taps stay immediate. See the full [recognition design](docs/double-tap.md).
-
-`swipe_min_distance` is the minimum normalized touchpad travel that turns an edge contact into a
-directional gesture. It defaults to `0.02`, or 2% of the corresponding touchpad axis. Smaller
-movement remains a tap, so the same physical gesture behaves consistently across coordinate ranges.
-Once a contact reaches this distance it no longer qualifies as a tap, even if it returns to its
-starting point. A slider contact that emits any steps is also consumed by the slider and does not
-emit an additional tap when released.
-
-```toml
-swipe_min_distance = 0.02
-```
-
-Each gesture binding has a zone, direction, and action:
-
-```toml
-[[gestures]]
-zone = "top"
-direction = "right"
-action = ["notify-send", "edgepad", "top-right"]
-```
-
-Zones:
-
-```text
-left, right, top, bottom
-```
-
-Directions:
-
-```text
-up, down, left, right, tap, double-tap
-```
-
-Continuous controls use `[[sliders]]`. Side zones use vertical `up`/`down` steps; top and bottom zones use horizontal `left`/`right` steps. `step` is normalized touchpad travel and defaults to `0.04`.
-
-```toml
-[[sliders]]
-zone = "left"
-step = 0.04
-up = ["pamixer", "-i", "3"]
-down = ["pamixer", "-d", "3"]
-```
-
-Slider zones can share the same edge with `tap` and `double-tap` gestures, but not with directional
-`[[gestures]]`.
-
-Actions are argv arrays. They are not run through a shell, so write shell logic explicitly when needed:
-
-```toml
-action = ["sh", "-c", "date >> /tmp/edgepad-actions.log"]
-```
-
-For desktop commands, prefer running `edgepad` as a user service so actions inherit the user session instead of root's environment.
-
-## How it works
-
-`edgepad` reads the physical touchpad, claims contacts that begin in configured edge zones, and forwards unclaimed contacts through a virtual touchpad.
-
-For live forwarding it:
-
-1. opens the physical touchpad;
-2. reads the device's multitouch capabilities;
-3. creates a virtual touchpad through `/dev/uinput`;
-4. grabs the physical device;
-5. routes edge contacts to the gesture recognizer;
-6. emits normal contacts through the virtual device;
-7. releases virtual contacts and ungrabs the physical device on shutdown.
-
-The output side does not blindly copy raw pointer-emulation events. `BTN_TOUCH`, `BTN_TOOL_*`, and legacy `ABS_X/Y` are synthesized from unclaimed passthrough contacts so an edge-owned finger does not leak into normal pointer movement. Physical touchpad buttons (`BTN_LEFT` and related pointer buttons) are passed through, and live mode preserves input properties such as `INPUT_PROP_BUTTONPAD` so libinput keeps clickpad behavior.
-
-On a buttonpad/clickpad, a physical button press takes priority over edge recognition. Active edge-owned contacts are promoted to normal passthrough contacts before the button event, and remain passthrough until they lift, so physical clicks and click-drag work even inside configured edge zones. This cancels the pending edge gesture; slider steps already emitted are not rolled back. Tap-to-click does not produce a physical button event, so an edge tap keeps the normal edge-gesture behavior. Touchpads with separate buttons keep independent edge and button handling.
-
-Double taps are recognized from Type-B contact lifecycles and kernel frame timestamps. The live loop
-arms a real deadline after the first tap, so a pending single-tap action is released on time even when
-the touchpad remains completely idle. Linux's `BTN_TOOL_DOUBLETAP` is deliberately not used: that
-event code reports two simultaneous fingers, not two taps in time.
-
-## Permissions
-
-`edgepad` needs access to:
-
-- the physical touchpad event node under `/dev/input/event*`;
-- `/dev/uinput` for virtual touchpad output.
-
-The preferred desktop setup is a user service with logind/uaccess ACLs. The NixOS module and release installer install udev rules for that mode.
-
-Manual commands that read real input devices may need `sudo`, the `input` group, or active seat ACLs. Use `edgepad doctor` to see what your system is missing.
-
-## Troubleshooting
-
-Start with these two commands:
-
-```bash
-edgepad status
 edgepad doctor
+journalctl --user -u edgepad.service -b
 ```
 
-Common problems:
+If more than one touchpad is found, run `edgepad devices`, set `device` to the
+chosen `/dev/input/eventX` path in your config, and restart the service. Device
+changes require a restart rather than a reload.
 
-- **More than one touchpad was found:** run `edgepad devices`, then set an explicit
-  `device = "/dev/input/eventX"` in the config.
-- **The touchpad or `/dev/uinput` is not accessible:** use the access fix reported by
-  `edgepad doctor`. If udev rules or group membership just changed, start a new login session.
-- **The service stays in `activating`:** edgepad is still waiting for a readable touchpad or
-  `/dev/uinput`. Check `edgepad doctor` and the service log.
-- **An action command is missing:** install that program, use its full path, or replace the example
-  action with a command available on your desktop.
-- **Pointer input is wrong:** stop the service with `systemctl --user stop edgepad.service`, then
-  inspect `journalctl --user -u edgepad.service -b`.
+Start it again with `systemctl --user start edgepad.service`.
+[Report a bug](https://github.com/assembledev/edgepad/issues) with the relevant
+logs; the [capture guide](docs/dump-capture.md) explains how to record a gesture
+for debugging.
 
-## Diagnostics and capture
+## Uninstall
 
-`proxy`, `replay`, and `replay-raw` use the normal edgepad config. Pass `--config <file>` to use
-another config, or `--built-in-defaults` to ignore it.
-
-Device discovery is read-only:
+For installations made with the release installer:
 
 ```bash
-edgepad devices
-edgepad devices --all
+curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh | sh -s -- --uninstall
 ```
 
-Capture recognizer-level events from a real touchpad:
+Your config is kept. Add `--purge` to remove it too.
 
-```bash
-edgepad dump --device auto --out bug.ev --frames 300
-edgepad replay bug.ev
-```
+## Further reading
 
-The frame count is a minimum capture budget. If it is reached while a finger is down, dump asks you
-to release all contacts and records their release frames before exiting.
-
-Stop `edgepad.service` before capture: the running daemon holds the physical touchpad with
-`EVIOCGRAB`, so another reader receives no events. `dump` warns after three seconds without input
-but never stops the service automatically. If input arrives later, it confirms that capture has
-started and records it normally.
-
-Capture raw evdev events for passthrough/output debugging:
-
-```bash
-edgepad dump --raw --device auto --out bug.raw.ev --frames 300
-edgepad replay-raw bug.raw.ev
-```
-
-Inspect live routing without forwarding input:
-
-```bash
-edgepad proxy --device /dev/input/eventX --frames 300 --dry-run
-```
-
-Run a bounded live virtual-touchpad proxy test:
-
-This command grabs the physical touchpad for the duration of the test. Normal pointer input is sent
-through edgepad's temporary virtual touchpad until the frame limit is reached.
-
-```bash
-edgepad proxy --device /dev/input/eventX --frames 300 --uinput --grab
-```
-
-If auto-detection finds multiple touchpads, use the event node reported by `edgepad devices`. If the
-OS denies access to the event node or `/dev/uinput`, run `edgepad doctor` and use the access model it
-reports for your system.
-
-## Commands
-
-```text
-edgepad devices     List readable input devices and touchpad candidates
-edgepad status      Show a short daemon/config/device summary
-edgepad doctor      Check config, runtime prerequisites, actions, and service health
-edgepad daemon      Run the live edge-gesture proxy
-edgepad dump        Capture touchpad events into a replay fixture
-edgepad proxy       Run a bounded live proxy session for diagnostics
-edgepad replay      Replay a parsed fixture through the recognizer
-edgepad replay-raw  Replay a raw evdev capture through routing and output composition
-```
-
-## Documentation
-
-- [Device discovery](docs/device-discovery.md)
-- [Dump capture](docs/dump-capture.md)
-- [Passthrough and uinput](docs/passthrough-uinput.md)
-- [Replay fixture format](docs/replay-format.md)
-- [Nix](docs/nix.md)
+- [Configuration](docs/configuration.md) — gesture bindings and tuning.
+- [Nix](docs/nix.md) — installation, modules, and development shell.
+- [Device discovery](docs/device-discovery.md) and [event capture](docs/dump-capture.md).
+- [Input forwarding](docs/passthrough-uinput.md), [double-tap recognition](docs/double-tap.md),
+  and [replay format](docs/replay-format.md) — implementation and testing.
 
 ## Development
 
-Clone the repository and enter its development shell:
-
-```bash
-git clone https://github.com/assembledev/edgepad.git
-cd edgepad
-nix develop
-```
-
-Build and check the project from there:
+From a checkout, run `nix develop` to get the Rust toolchain, then:
 
 ```bash
 cargo build --locked
@@ -437,15 +131,6 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 ```
 
-## Contributing
-
-Feedback, issues, and pull requests are welcome.
-
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option.
+[MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.

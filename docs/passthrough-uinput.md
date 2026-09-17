@@ -68,43 +68,7 @@ systemd keeps the service in `activating` instead of reporting a false ready sta
 
 For normal desktop use, run the daemon as a user service with access to `/dev/input` and `/dev/uinput`. That lets gesture actions inherit the user session. Running the daemon with `sudo` is useful for manual diagnostics, but command actions then run with root's environment.
 
-## Config example
-
-The commands below are safe notification examples. Replace them with the commands used by your
-desktop.
-
-```toml
-device = "auto"
-edge_width = 0.10
-# Optional: left_edge_width = 0.08
-tap_min_duration_ms = 40
-tap_max_duration_ms = 180
-double_tap_timeout_ms = 300
-double_tap_max_distance = 0.04
-swipe_min_distance = 0.02
-
-[[gestures]]
-zone = "top"
-direction = "tap"
-action = ["notify-send", "edgepad", "play-pause"]
-
-[[sliders]]
-zone = "right"
-up = ["notify-send", "edgepad", "brightness-up"]
-down = ["notify-send", "edgepad", "brightness-down"]
-```
-
-`device = "auto"` succeeds only when exactly one readable touchpad candidate is present. If auto-detection is ambiguous, choose a device from:
-
-```bash
-edgepad devices
-```
-
-and set:
-
-```toml
-device = "/dev/input/event5"
-```
+For device selection, bindings, and tuning, see [Configuration](configuration.md).
 
 ## Output policy
 
