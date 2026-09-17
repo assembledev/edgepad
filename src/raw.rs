@@ -1,3 +1,9 @@
+//! Adapt evdev events to the recognizer, then compose the virtual touchpad stream.
+//!
+//! Routing decides which contacts survive. Composition rebuilds pointer-emulation
+//! state from those contacts; copying the physical device's global state would
+//! let an edge-owned finger affect the pointer. Both stages run in raw replay.
+
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -190,6 +196,8 @@ pub struct RoutedRawFrame {
     pub resync_required: bool,
 }
 
+/// Tracks the contacts and buttons visible to the virtual device, independently
+/// of physical state. `finish` releases that output state before shutdown.
 #[derive(Debug, Clone)]
 pub struct RawOutputComposer {
     caps: Capabilities,
@@ -215,6 +223,9 @@ pub enum RawOutputError<E> {
     Sink(E),
 }
 
+/// Frame output boundary shared by the recording sink and uinput.
+/// `emit` receives frame contents; `sync` commits the frame. Callers do not emit
+/// `SYN_REPORT` themselves, since the live writer supplies it.
 pub trait RawOutputSink {
     type Error;
 
@@ -305,6 +316,8 @@ impl RawOutputComposer {
             events.push(event);
         }
         self.append_legacy_state_events(&mut events);
+        // libinput needs the promoted contact's position before the click event
+        // to recognize a click-drag that started inside an edge zone.
         for event in routed.physical_buttons.iter().copied() {
             self.apply_physical_button_event(event);
             events.push(event);
@@ -848,6 +861,9 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
     if physical_buttons.iter().any(|event| event.value != 0) {
         canceled_tap_gestures = engine.interrupt_tap_sequence();
     }
+    // Treat a press as held for this entire frame, regardless of event ordering.
+    // On a buttonpad, existing and newly starting contacts must pass through for
+    // the click. Apply releases only after processing the frame's contacts.
     for event in physical_buttons.iter().filter(|event| event.value != 0) {
         promoted_contacts.extend(engine.update_physical_button(event.code, true));
     }

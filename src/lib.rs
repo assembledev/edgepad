@@ -1,7 +1,17 @@
-//! edgepad core library.
+//! Touchpad edge recognition and input forwarding.
 //!
-//! The first production surface is built test-first around Type-B
-//! multi-touch slot lifecycle and edge ownership invariants.
+//! Start with [`core::Engine`] for gesture behavior. It consumes complete input
+//! frames and decides which contacts belong to edge gestures or normal input.
+//! It does not open devices, read clocks, or execute commands.
+//!
+//! The live path is [`proxy`] -> [`raw::route_raw_frame`] -> [`core::Engine`] ->
+//! [`raw::RawOutputComposer`] -> [`uinput`]. The proxy also sends recognized
+//! gestures to [`actions`]; [`config`] supplies bindings and recognition settings.
+//! [`replay`] and raw replay exercise recognition and routing without hardware.
+//!
+//! Regression tests are grouped by boundary: `tests/core_invariants.rs` covers
+//! recognition, `tests/raw_output_composer.rs` covers virtual input, and
+//! `tests/replay_fixtures.rs` runs recorded or handwritten event sequences.
 
 pub mod actions;
 pub mod config;
@@ -14,6 +24,10 @@ pub mod raw;
 pub mod status;
 pub mod uinput;
 
+/// Gesture recognition over Linux Type-B multitouch slots.
+///
+/// A slot retains axis values between contacts; a tracking ID identifies the
+/// contact currently occupying it. Keep slot state and contact state distinct.
 pub mod core {
     use std::collections::BTreeSet;
     use std::time::Duration;
@@ -262,8 +276,12 @@ pub mod core {
         },
     }
 
+    // Ownership normally lasts until lift: moving across an edge must not steal
+    // an existing pointer contact. A physical click on a buttonpad can promote
+    // an edge contact to passthrough so click-drag still works.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum Ownership {
+        // Buffer events until the initial position is known at a frame boundary.
         Unknown,
         Claimed(Zone),
         Passthrough,
@@ -379,6 +397,11 @@ pub mod core {
         }
     }
 
+    /// Stateful recognizer shared by live input and replay.
+    ///
+    /// Feed complete frames with [`Self::process_frame_at`]. The caller must also
+    /// service [`Self::next_deadline`] through [`Self::advance_time`] when no input
+    /// arrives, or a pending single tap can wait indefinitely.
     #[derive(Debug, Clone)]
     pub struct Engine {
         caps: Capabilities,
@@ -499,10 +522,14 @@ pub mod core {
             self.pressed_physical_buttons.iter().copied().collect()
         }
 
+        /// Process an untimed frame. Tap-duration checks are skipped and double
+        /// taps cannot form; use `process_frame_at` when timestamps are available.
         pub fn process_frame(&mut self, frame: &[Event]) -> Result<FrameOutput, SlotError> {
             self.process_frame_with_time(frame, None)
         }
 
+        /// Process one complete frame using its input timestamp. Use the same
+        /// monotonic time domain for all frames and calls to `advance_time`.
         pub fn process_frame_at(
             &mut self,
             frame: &[Event],
@@ -529,6 +556,8 @@ pub mod core {
             output
         }
 
+        /// Whether tap arbitration is finished, not whether all fingers are up.
+        /// The proxy separately checks physical contacts before reload or shutdown.
         pub fn is_recognition_idle(&self) -> bool {
             self.pending_tap.is_none()
         }
@@ -546,6 +575,8 @@ pub mod core {
             output.gestures
         }
 
+        /// Restore a kernel snapshot after lost events. Existing contacts pass
+        /// through until lift because their missing history cannot prove a gesture.
         pub fn restore_passthrough_contacts(
             &mut self,
             contacts: &[ResyncContact],
@@ -808,6 +839,9 @@ pub mod core {
             match event {
                 Event::Slot(_) | Event::SynDropped => output.passthrough.push(event),
                 Event::TrackingId(_) | Event::X(_) | Event::Y(_) => {
+                    // Filtering edge contacts also filters slot switches. The
+                    // output slot can therefore differ from the physical slot;
+                    // emitting a bare release here can leave the wrong finger down.
                     if last_passthrough_slot(&output.passthrough) != Some(slot) {
                         output.passthrough.push(Event::slot(slot));
                     }
@@ -945,6 +979,9 @@ pub mod core {
 
             let slot_state = self.slot_mut(slot)?;
 
+            // Advance by whole steps, retaining the remainder. Setting the
+            // anchor to the latest position would lose small movements and make
+            // sensitivity depend on the device's event rate.
             while position - anchor >= spec.step {
                 push_slider_step(
                     slot_state,
@@ -1110,6 +1147,8 @@ pub mod core {
             Ok(dx * dx + dy * dy <= max_distance * max_distance)
         }
 
+        // The gap limit controls when the second tap starts. Once it is down,
+        // allow its own tap-duration window before releasing the first tap.
         fn matching_contact_deadline(&self) -> Option<Duration> {
             self.slots
                 .iter()

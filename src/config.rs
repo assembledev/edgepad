@@ -1,3 +1,9 @@
+//! Parse and validate user configuration before it reaches the input loop.
+//!
+//! Only zones with bindings become active edges. Validation also rejects a
+//! slider and directional gesture on the same edge, since both would consume
+//! the same movement. Live device selection is separate from TOML parsing.
+
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;

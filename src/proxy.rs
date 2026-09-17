@@ -1,3 +1,10 @@
+//! Live device lifecycle and frame loop.
+//!
+//! This module owns grabbing, polling, resynchronization, and shutdown. Gesture
+//! rules live in `core::Engine`; virtual-device state lives in `RawOutputComposer`.
+//! Both dry-run inspection and grabbed forwarding use the same loop and differ
+//! in their output sink and action handler.
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{
@@ -141,6 +148,9 @@ enum ResyncStreamAction {
     Ignore,
 }
 
+// SYN_DROPPED means the queued history is incomplete. Discard through the next
+// SYN_REPORT, then query current kernel state; replaying that tail could invent
+// gestures or miss releases. StartResync first clears the virtual contacts.
 fn observe_resync_stream_event(
     resync_pending: &mut bool,
     pending: &mut PendingRawFrame,
@@ -383,6 +393,7 @@ where
 
     let buttonpad = device.properties().contains(PropType::BUTTONPAD);
     let spec = VirtualTouchpadSpec::from_raw_device(&device, capabilities);
+    // Establish an output device before taking input away from the compositor.
     let virtual_device = build_virtual_touchpad(&spec).map_err(|err| {
         format!("failed to create virtual touchpad via /dev/uinput before grabbing physical device: {err}")
     })?;
@@ -436,6 +447,8 @@ where
         handler,
     );
     let settle_result = settle_after_uinput_proxy_run(capabilities, &mut sink, run_result);
+    // Give the compositor time to consume neutral virtual state before the
+    // physical device resumes delivery and the virtual device is dropped.
     std::thread::sleep(UINPUT_UNGRAB_SETTLE_DELAY);
     let ungrab_result = device.ungrab().map_err(|err| {
         format!(
@@ -817,6 +830,8 @@ fn apply_pending_recognition_reload<H>(
 where
     H: GestureHandler,
 {
+    // A finger can be up while its single tap still awaits a second tap. Keep
+    // both recognition settings and action bindings unchanged until that ends.
     if physical_touch_down || !engine.is_recognition_idle() {
         return false;
     }
@@ -1241,6 +1256,8 @@ impl<'a> ProxyLoopStopper<'a> {
     }
 }
 
+// Track all physical contacts, including edge-owned ones hidden from output.
+// Include those fingers in the shutdown drain; virtual output can look idle.
 #[derive(Debug, Clone)]
 struct PhysicalTouchState {
     current_slot: i32,

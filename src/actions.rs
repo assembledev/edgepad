@@ -1,3 +1,9 @@
+//! Run configured commands off the input thread.
+//!
+//! A single worker preserves command order. Its bounded queue drops new actions
+//! when full, so a slow command cannot block touchpad forwarding or grow an
+//! unlimited backlog of slider steps.
+
 use std::io;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -147,6 +153,8 @@ fn next_action_command_poll_interval(current: Duration) -> Duration {
 fn spawn_action_command(program: &str, args: &[String]) -> Result<Child, String> {
     let mut command = Command::new(program);
     command.args(args);
+    // Isolate each action so shutdown can also stop children of `sh -c`,
+    // without signaling the daemon's own process group.
     #[cfg(unix)]
     command.process_group(0);
     command
@@ -294,6 +302,8 @@ impl ActionDispatcher {
         self.stats.snapshot()
     }
 
+    /// Replace bindings for future dispatches. Already queued commands keep
+    /// their original argv, so a reload does not reinterpret an earlier gesture.
     pub fn reconfigure(
         &mut self,
         bindings: Vec<GestureBindingConfig>,

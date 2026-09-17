@@ -1,3 +1,9 @@
+//! Create the virtual touchpad and write composed frames to it.
+//!
+//! The live device mirrors physical axis metadata and input properties so
+//! libinput can retain its scaling and clickpad behavior. Recognition policy
+//! belongs upstream; this module only describes and writes the output device.
+
 use crate::core::Capabilities;
 use crate::raw::{
     is_pointer_button_code, RawEvent, RawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y,
@@ -304,6 +310,8 @@ where
             return Ok(());
         }
 
+        // evdev's VirtualDevice::emit appends SYN_REPORT. Sending each event
+        // separately would expose partial contact state as separate frames.
         self.writer
             .emit_events(&self.current)
             .map_err(UinputRawSinkError::Emit)?;
