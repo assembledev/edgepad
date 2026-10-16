@@ -249,6 +249,13 @@ impl StopToken {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum EventHistory {
+    #[default]
+    Record,
+    CountsOnly,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProxyRuntimeStats {
     pub input_frame_boundaries: usize,
@@ -268,11 +275,56 @@ pub struct ProxyRuntimeStats {
     pub idle_drain_frame_boundaries: usize,
     pub idle_drain_timed_out: bool,
     pub recognition_reloads: usize,
+    /// Ordered history for frame-limited diagnostics; empty for daemon runs.
     pub gestures: Vec<Gesture>,
     pub gesture_counts: BTreeMap<GestureCountKey, usize>,
+    /// Ordered history for frame-limited diagnostics; empty for daemon runs.
     pub slider_steps: Vec<SliderStep>,
     pub slider_step_counts: BTreeMap<SliderStepCountKey, usize>,
     pub resync_required: bool,
+    event_history: EventHistory,
+}
+
+impl ProxyRuntimeStats {
+    fn for_run(limit: &ProxyRunLimit) -> Self {
+        Self {
+            event_history: match limit {
+                ProxyRunLimit::Frames { .. } => EventHistory::Record,
+                ProxyRunLimit::UntilStopped { .. } => EventHistory::CountsOnly,
+            },
+            ..Self::default()
+        }
+    }
+
+    /// Total recognized gestures, including those omitted from event history.
+    pub fn gesture_count(&self) -> usize {
+        self.gesture_counts.values().sum()
+    }
+
+    /// Total recognized slider steps, including those omitted from event history.
+    pub fn slider_step_count(&self) -> usize {
+        self.slider_step_counts.values().sum()
+    }
+
+    fn record_gesture(&mut self, gesture: Gesture) {
+        *self
+            .gesture_counts
+            .entry(gesture_count_key(gesture))
+            .or_default() += 1;
+        if self.event_history == EventHistory::Record {
+            self.gestures.push(gesture);
+        }
+    }
+
+    fn record_slider_step(&mut self, step: SliderStep) {
+        *self
+            .slider_step_counts
+            .entry(slider_step_count_key(step))
+            .or_default() += 1;
+        if self.event_history == EventHistory::Record {
+            self.slider_steps.push(step);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -685,7 +737,7 @@ where
         .map_err(|err| format!("failed to seed multitouch slot positions: {err:?}"))?;
     engine.set_buttonpad(config.buttonpad);
     let mut composer = RawOutputComposer::new(config.capabilities);
-    let mut stats = ProxyRuntimeStats::default();
+    let mut stats = ProxyRuntimeStats::for_run(limit);
     let mut touch_state = PhysicalTouchState::new(config.capabilities);
     let mut stopper = ProxyLoopStopper::new(limit);
     let mut drain_deadline: Option<Instant> = None;
@@ -1051,19 +1103,11 @@ where
     }
     stats.resync_required |= routed.resync_required;
     for gesture in routed.gestures.iter().copied() {
-        *stats
-            .gesture_counts
-            .entry(gesture_count_key(gesture))
-            .or_default() += 1;
-        stats.gestures.push(gesture);
+        stats.record_gesture(gesture);
         handler.handle_gesture(gesture);
     }
     for step in routed.slider_steps.iter().copied() {
-        *stats
-            .slider_step_counts
-            .entry(slider_step_count_key(step))
-            .or_default() += 1;
-        stats.slider_steps.push(step);
+        stats.record_slider_step(step);
         handler.handle_slider_step(step);
     }
 
@@ -1378,6 +1422,8 @@ impl PhysicalTouchState {
 
 #[cfg(test)]
 mod tests {
+    mod history;
+
     use super::*;
     use crate::core::AxisRange;
     use crate::raw::{

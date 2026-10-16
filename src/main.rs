@@ -1479,7 +1479,7 @@ fn print_proxy_summary(summary: &ProxyRunSummary) {
     );
     println!("idle_drain_timed_out: {}", stats.idle_drain_timed_out);
     println!("recognition_reloads: {}", stats.recognition_reloads);
-    println!("gestures: {}", stats.gestures.len());
+    println!("gestures: {}", stats.gesture_count());
     if !stats.gesture_counts.is_empty() {
         println!("gesture_counts:");
         for (key, count) in &stats.gesture_counts {
@@ -1499,7 +1499,7 @@ fn print_proxy_summary(summary: &ProxyRunSummary) {
             direction_name(gesture.direction)
         );
     }
-    println!("slider_steps: {}", stats.slider_steps.len());
+    println!("slider_steps: {}", stats.slider_step_count());
     if !stats.slider_step_counts.is_empty() {
         println!("slider_step_counts:");
         for (key, count) in &stats.slider_step_counts {
