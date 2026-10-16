@@ -1,5 +1,12 @@
-//! Recognizer state and construction. Private modules own frame processing,
-//! contact handling, routing, sliders, and tap arbitration.
+//! Recognizer state and construction.
+//!
+//! Read frame.rs first: it resolves tool types for a whole frame, then routes
+//! events and finalizes new contacts. routing.rs decides ownership; contact.rs
+//! classifies releases; sliders.rs emits during motion; taps.rs can defer a
+//! released tap until an input-time deadline.
+//!
+//! Split Engine impls share the private state below. Keep cross-module helpers
+//! scoped to core so the file layout does not become part of the public API.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -34,6 +41,8 @@ enum Ownership {
     Passthrough,
 }
 
+// Motion and slider consumption are irreversible for a contact: returning
+// to its starting point must not turn it back into a tap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContactPhase {
     TapCandidate,
@@ -51,15 +60,18 @@ struct SlotState {
     start_y: Option<i32>,
     current_x: Option<i32>,
     current_y: Option<i32>,
+    // Kernel slot memory survives lift; contact start/current coordinates do not.
     retained_x: Option<i32>,
     retained_y: Option<i32>,
     tool_type: Option<i32>,
     gesture_rejected: bool,
     began_in_frame: bool,
     started_at: Option<Duration>,
+    // Eligible contacts can seed a pair; a match is already its second contact.
     tap_sequence_eligible: bool,
     tap_sequence_match: bool,
     slider_anchor: Option<f32>,
+    // Delay the initial down until ownership is known, avoiding a false pointer down.
     held_events: Vec<Event>,
 }
 
@@ -153,6 +165,8 @@ impl Engine {
         sliders: Vec<SliderSpec>,
         options: EngineOptions,
     ) {
+        // Preserve retained slot axes and button state across reload. Only recognition
+        // policy changes, after contacts and deferred taps have drained.
         assert!(
             self.slots.iter().all(|slot| !slot.active) && self.pending_tap.is_none(),
             "recognition reconfiguration requires an idle engine"
@@ -168,6 +182,8 @@ impl Engine {
         &mut self,
         positions: &[SlotSnapshot],
     ) -> Result<(), SlotError> {
+        // Inactive slots also retain kernel axes/tool type. Seed them without
+        // inventing contacts so an unchanged first touch can omit those values.
         for position in positions {
             let tool_type = position.tool_type.filter(|_| self.options.palm_rejection);
             let slot = self.slot_mut(position.slot)?;
@@ -232,6 +248,8 @@ impl Engine {
     }
 
     fn reset_for_resync(&mut self) {
+        // Lost input invalidates even retained slot memory. The live proxy replaces
+        // it from a kernel snapshot before continuing.
         for slot in &mut self.slots {
             *slot = SlotState::default();
         }

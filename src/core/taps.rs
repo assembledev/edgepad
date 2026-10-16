@@ -11,6 +11,8 @@ pub(super) struct PendingTap {
     released_at: Duration,
     x: i32,
     y: i32,
+    // Double-tap-only zones still defer a first tap for pairing, but an
+    // unmatched first tap must expire silently.
     emit_single: bool,
 }
 
@@ -39,6 +41,9 @@ impl Engine {
         self.pending_tap.is_none()
     }
 
+    /// End temporal pairing and return any deferred single tap that is enabled.
+    /// Callers must dispatch the returned gestures along with the physical input
+    /// that interrupted the sequence.
     pub fn interrupt_tap_sequence(&mut self) -> Vec<Gesture> {
         // A physical interaction can arrive after a matching second
         // contact is already down. Keep separate-button edge ownership
@@ -129,6 +134,8 @@ impl Engine {
             return Ok(false);
         }
 
+        // Match first release to second start, not its current position.
+        // Movement is handled separately by contact-phase invalidation.
         let dx = self.caps.x.normalize_delta(pending.x, x);
         let dy = self.caps.y.normalize_delta(pending.y, y);
         let max_distance = self.options.double_tap_max_distance;
@@ -163,6 +170,8 @@ impl Engine {
     }
 
     pub(super) fn flush_pending_tap(&mut self, output: &mut FrameOutput) {
+        // Flushing resolves the first tap according to its binding. Invalidating
+        // pairing must not silently lose an already valid single tap.
         for slot in &mut self.slots {
             slot.tap_sequence_match = false;
         }

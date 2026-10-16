@@ -185,6 +185,8 @@ pub fn run_frames(
         .iter()
         .map(|frame| engine.process_frame_at(&frame.events, frame.timestamp))
         .collect::<Result<Vec<_>, _>>()?;
+    // A recording can end before a deferred single tap expires. Mirror the
+    // live loop's idle timer so its last tap is resolved without another frame.
     if let Some(deadline) = engine.next_deadline() {
         let deadline_output = engine.advance_time(deadline);
         if !deadline_output.gestures.is_empty() {

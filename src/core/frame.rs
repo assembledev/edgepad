@@ -8,6 +8,7 @@ use super::{ContactPhase, Engine, Event, FrameOutput, Ownership, SlotError, MT_T
 #[derive(Debug, Clone, Copy, Default)]
 struct FrameContactTool {
     tool_type: Option<i32>,
+    // Preserve an explicit palm report even if a later event says "finger".
     palm_reported: bool,
 }
 
@@ -51,6 +52,8 @@ impl Engine {
             .iter()
             .map(|slot| slot.tracking_id)
             .collect::<Vec<_>>();
+        // A slot can be lifted and reused within this frame. Key by both slot
+        // and tracking ID so the next contact's tool label cannot reject the old one.
         let mut contacts = BTreeMap::new();
         for (index, slot) in self.slots.iter().enumerate() {
             if let Some(id) = slot.tracking_id {
@@ -159,6 +162,8 @@ impl Engine {
                         .slots
                         .iter()
                         .any(|slot| slot.active && !slot.gesture_rejected);
+                    // Double taps are sequential. Overlapping fingers invalidate
+                    // pairing; palms must not interrupt a legitimate finger sequence.
                     if another_contact_active && !tool.is_palm() {
                         for active_slot in self.slots.iter_mut().filter(|slot| slot.active) {
                             active_slot.tap_sequence_eligible = false;

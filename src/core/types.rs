@@ -37,6 +37,7 @@ pub struct Capabilities {
     pub y: AxisRange,
 }
 
+/// Fractions of each corresponding device axis: 0.1 covers 10% of its span.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EdgeWidths {
     pub left: f32,
@@ -166,6 +167,7 @@ pub struct Gesture {
 pub struct SliderSpec {
     pub zone: Zone,
     pub axis: SliderAxis,
+    /// Fraction of the selected axis per emitted step.
     pub step: f32,
 }
 
@@ -174,8 +176,10 @@ pub struct EngineOptions {
     pub palm_rejection: bool,
     pub tap_min_duration: Duration,
     pub tap_max_duration: Duration,
+    /// Per-axis normalized distance used for both tap slop and swipe detection.
     pub swipe_min_distance: f32,
     pub double_tap_timeout: Duration,
+    /// Euclidean distance in normalized X/Y, from first release to second start.
     pub double_tap_max_distance: f32,
     pub double_tap_zones: ZoneSet,
     pub single_tap_zones: ZoneSet,
@@ -226,6 +230,7 @@ pub struct FrameOutput {
     pub passthrough: Vec<Event>,
     pub gestures: Vec<Gesture>,
     pub slider_steps: Vec<SliderStep>,
+    /// Live callers must rebuild state from a kernel snapshot before resuming input.
     pub resync_required: bool,
 }
 

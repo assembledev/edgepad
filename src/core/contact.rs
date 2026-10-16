@@ -33,6 +33,8 @@ impl SlotState {
     }
 
     pub(super) fn reject_gestures(&mut self) {
+        // A palm label suppresses recognition until lift, but passthrough contacts
+        // still need their coordinates, tool type, and release forwarded.
         self.gesture_rejected = true;
         self.tap_sequence_eligible = false;
         self.tap_sequence_match = false;
@@ -137,6 +139,8 @@ impl Engine {
                 }
 
                 if let Some(classified) = classified {
+                    // Sliders own directional motion for their zone. Release can
+                    // still be a tap when no slider step consumed the contact.
                     let allowed_for_slider = !releases_slider_zone
                         || matches!(
                             classified.gesture.direction,

@@ -128,6 +128,7 @@ impl Engine {
 
         let rejected = self.slot(slot)?.gesture_rejected;
         let sequence_match = !rejected && self.current_contact_matches_pending_tap(slot, zone)?;
+        // Palms neither complete nor interrupt an unrelated finger's pending tap.
         if self.pending_tap.is_some() && !sequence_match && !rejected {
             self.flush_pending_tap(output);
         }
@@ -147,6 +148,9 @@ impl Engine {
     }
 
     fn promote_claimed_contacts(&mut self) -> Vec<Event> {
+        // These contacts' original downs were hidden from the virtual device.
+        // Synthesize complete downs at their current positions so the compositor
+        // can use them for click-drag and clickfinger.
         let mut events = Vec::new();
         for index in 0..self.slots.len() {
             let slot_number = self.caps.slot_min + index as i32;
@@ -189,6 +193,7 @@ impl Engine {
         let x = self.caps.x.normalize(slot_state.start_x.unwrap());
         let y = self.caps.y.normalize(slot_state.start_y.unwrap());
 
+        // This order resolves corner overlaps and is part of gesture behavior.
         let zone = if x < self.edges.left {
             Some(Zone::Left)
         } else if x > 1.0 - self.edges.right {

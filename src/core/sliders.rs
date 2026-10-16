@@ -87,6 +87,8 @@ impl Engine {
 }
 
 fn push_slider_step(slot_state: &mut SlotState, output: &mut FrameOutput, step: SliderStep) {
+    // Even a step smaller than tap slop commits the contact to the slider.
+    // Lifting or returning to the start must not also fire a tap.
     slot_state.consume_by_slider();
     output.slider_steps.push(step);
 }
