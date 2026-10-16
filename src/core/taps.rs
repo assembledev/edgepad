@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use super::contact::ClassifiedContact;
-use super::{Engine, FrameOutput, Gesture, GestureDirection, SlotError, Zone};
+use super::{Contact, Engine, FrameOutput, Gesture, GestureDirection, Zone};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PendingTap {
@@ -48,9 +48,13 @@ impl Engine {
         // A physical interaction can arrive after a matching second
         // contact is already down. Keep separate-button edge ownership
         // intact, but do not let that contact seed another temporal pair.
-        for slot in self.slots.iter_mut().filter(|slot| slot.active) {
-            slot.tap_sequence_eligible = false;
-            slot.tap_sequence_match = false;
+        for contact in self
+            .slots
+            .iter_mut()
+            .filter_map(|slot| slot.contact.as_mut())
+        {
+            contact.tap_sequence_eligible = false;
+            contact.tap_sequence_match = false;
         }
         let mut output = FrameOutput::empty();
         self.flush_pending_tap(&mut output);
@@ -111,27 +115,22 @@ impl Engine {
         });
     }
 
-    pub(super) fn current_contact_matches_pending_tap(
-        &self,
-        slot: i32,
-        zone: Zone,
-    ) -> Result<bool, SlotError> {
+    pub(super) fn contact_matches_pending_tap(&self, state: &Contact, zone: Zone) -> bool {
         let Some(pending) = self.pending_tap else {
-            return Ok(false);
+            return false;
         };
-        let state = self.slot(slot)?;
         if !state.tap_sequence_eligible || pending.gesture.zone != zone {
-            return Ok(false);
+            return false;
         }
         let (Some(started_at), Some(x), Some(y)) = (state.started_at, state.start_x, state.start_y)
         else {
-            return Ok(false);
+            return false;
         };
         let Some(gap) = started_at.checked_sub(pending.released_at) else {
-            return Ok(false);
+            return false;
         };
         if gap >= self.options.double_tap_timeout {
-            return Ok(false);
+            return false;
         }
 
         // Match first release to second start, not its current position.
@@ -139,7 +138,7 @@ impl Engine {
         let dx = self.caps.x.normalize_delta(pending.x, x);
         let dy = self.caps.y.normalize_delta(pending.y, y);
         let max_distance = self.options.double_tap_max_distance;
-        Ok(dx * dx + dy * dy <= max_distance * max_distance)
+        dx * dx + dy * dy <= max_distance * max_distance
     }
 
     // The gap limit controls when the second tap starts. Once it is down,
@@ -147,8 +146,9 @@ impl Engine {
     fn matching_contact_deadline(&self) -> Option<Duration> {
         self.slots
             .iter()
-            .find(|slot| slot.active && slot.tap_sequence_match)
-            .and_then(|slot| slot.started_at)
+            .filter_map(|slot| slot.contact.as_ref())
+            .find(|contact| contact.tap_sequence_match)
+            .and_then(|contact| contact.started_at)
             .map(|started_at| started_at.saturating_add(self.options.tap_max_duration))
     }
 
@@ -172,8 +172,12 @@ impl Engine {
     pub(super) fn flush_pending_tap(&mut self, output: &mut FrameOutput) {
         // Flushing resolves the first tap according to its binding. Invalidating
         // pairing must not silently lose an already valid single tap.
-        for slot in &mut self.slots {
-            slot.tap_sequence_match = false;
+        for contact in self
+            .slots
+            .iter_mut()
+            .filter_map(|slot| slot.contact.as_mut())
+        {
+            contact.tap_sequence_match = false;
         }
         if let Some(pending) = self.pending_tap.take() {
             if pending.emit_single {

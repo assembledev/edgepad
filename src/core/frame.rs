@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use super::{ContactPhase, Engine, Event, FrameOutput, Ownership, SlotError, MT_TOOL_PALM};
+use super::{Contact, ContactPhase, Engine, Event, FrameOutput, SlotError, MT_TOOL_PALM};
 
 #[derive(Debug, Clone, Copy, Default)]
 struct FrameContactTool {
@@ -45,23 +45,23 @@ impl Engine {
         let mut tools = self
             .slots
             .iter()
-            .map(|slot| slot.tool_type)
+            .map(|slot| slot.memory.tool_type)
             .collect::<Vec<_>>();
         let mut tracking_ids = self
             .slots
             .iter()
-            .map(|slot| slot.tracking_id)
+            .map(|slot| slot.contact.as_ref().map(|contact| contact.tracking_id))
             .collect::<Vec<_>>();
         // A slot can be lifted and reused within this frame. Key by both slot
         // and tracking ID so the next contact's tool label cannot reject the old one.
         let mut contacts = BTreeMap::new();
         for (index, slot) in self.slots.iter().enumerate() {
-            if let Some(id) = slot.tracking_id {
+            if let Some(contact) = &slot.contact {
                 contacts.insert(
-                    (self.caps.slot_min + index as i32, id),
+                    (self.caps.slot_min + index as i32, contact.tracking_id),
                     FrameContactTool {
-                        tool_type: slot.tool_type,
-                        palm_reported: slot.gesture_rejected,
+                        tool_type: slot.memory.tool_type,
+                        palm_reported: contact.gesture_rejected,
                     },
                 );
             }
@@ -120,12 +120,12 @@ impl Engine {
             BTreeMap::new()
         };
         for (index, slot) in self.slots.iter_mut().enumerate() {
-            if let Some(id) = slot.tracking_id {
+            if let Some(contact) = &mut slot.contact {
                 if frame_tools
-                    .get(&(self.caps.slot_min + index as i32, id))
+                    .get(&(self.caps.slot_min + index as i32, contact.tracking_id))
                     .is_some_and(|tool| tool.is_palm())
                 {
-                    slot.reject_gestures();
+                    contact.reject_gestures();
                 }
             }
         }
@@ -147,13 +147,6 @@ impl Engine {
                 }
                 Event::TrackingId(tracking_id) if tracking_id >= 0 => {
                     let slot = self.current_slot;
-                    if self.slot(slot)?.active {
-                        return Err(SlotError::SlotAlreadyActive {
-                            slot,
-                            active_tracking_id: self.slot(slot)?.tracking_id.unwrap_or_default(),
-                            new_tracking_id: tracking_id,
-                        });
-                    }
                     let tool = frame_tools
                         .get(&(slot, tracking_id))
                         .copied()
@@ -161,40 +154,39 @@ impl Engine {
                     let another_contact_active = self
                         .slots
                         .iter()
-                        .any(|slot| slot.active && !slot.gesture_rejected);
+                        .filter_map(|slot| slot.contact.as_ref())
+                        .any(|contact| !contact.gesture_rejected);
+                    let mut contact = Contact::new(
+                        tracking_id,
+                        timestamp,
+                        !another_contact_active && !tool.is_palm(),
+                    );
+                    if tool.is_palm() {
+                        contact.reject_gestures();
+                    }
+                    let slot_state = self.slot_mut(slot)?;
+                    slot_state.begin_contact(slot, contact)?;
+                    slot_state.memory.tool_type = tool.tool_type;
                     // Double taps are sequential. Overlapping fingers invalidate
                     // pairing; palms must not interrupt a legitimate finger sequence.
                     if another_contact_active && !tool.is_palm() {
-                        for active_slot in self.slots.iter_mut().filter(|slot| slot.active) {
-                            active_slot.tap_sequence_eligible = false;
-                            active_slot.tap_sequence_match = false;
+                        for contact in self
+                            .slots
+                            .iter_mut()
+                            .filter_map(|slot| slot.contact.as_mut())
+                        {
+                            contact.tap_sequence_eligible = false;
+                            contact.tap_sequence_match = false;
                         }
                         self.flush_pending_tap(&mut output);
                     }
-                    let slot_state = self.slot_mut(slot)?;
-                    slot_state.active = true;
-                    slot_state.tracking_id = Some(tracking_id);
-                    slot_state.ownership = Ownership::Unknown;
-                    slot_state.contact_phase = ContactPhase::TapCandidate;
-                    slot_state.began_in_frame = true;
-                    slot_state.started_at = timestamp;
-                    slot_state.tool_type = tool.tool_type;
-                    slot_state.tap_sequence_eligible = !another_contact_active && !tool.is_palm();
-                    slot_state.tap_sequence_match = false;
-                    slot_state.held_events.push(event);
-                    if tool.is_palm() {
-                        slot_state.reject_gestures();
-                    }
-                }
-                Event::TrackingId(-1) => {
-                    self.release_current_slot(event, timestamp, &mut output)?;
                 }
                 Event::TrackingId(_) => {
                     self.release_current_slot(event, timestamp, &mut output)?;
                 }
                 Event::ToolType(_) if !self.options.palm_rejection => continue,
                 Event::ToolType(tool_type) => {
-                    self.slot_mut(self.current_slot)?.tool_type = Some(tool_type);
+                    self.slot_mut(self.current_slot)?.memory.tool_type = Some(tool_type);
                     self.route_event_for_current_slot(event, &mut output)?;
                 }
                 Event::X(x) => {
@@ -202,14 +194,18 @@ impl Engine {
                     let swipe_min_distance = self.options.swipe_min_distance;
                     let sequence_invalidated = {
                         let slot_state = self.slot_mut(self.current_slot)?;
-                        slot_state.retained_x = Some(x);
-                        slot_state.current_x = Some(x);
-                        if slot_state.active && slot_state.start_x.is_none() {
-                            slot_state.start_x = Some(x);
+                        slot_state.memory.x = Some(x);
+                        if let Some(contact) = &mut slot_state.contact {
+                            contact.current_x = Some(x);
+                            if contact.start_x.is_none() {
+                                contact.start_x = Some(x);
+                            }
+                            contact.observe_position(capabilities, swipe_min_distance);
+                            contact.tap_sequence_match
+                                && contact.contact_phase != ContactPhase::TapCandidate
+                        } else {
+                            false
                         }
-                        slot_state.observe_position(capabilities, swipe_min_distance);
-                        slot_state.tap_sequence_match
-                            && slot_state.contact_phase != ContactPhase::TapCandidate
                     };
                     if sequence_invalidated {
                         self.flush_pending_tap(&mut output);
@@ -221,14 +217,18 @@ impl Engine {
                     let swipe_min_distance = self.options.swipe_min_distance;
                     let sequence_invalidated = {
                         let slot_state = self.slot_mut(self.current_slot)?;
-                        slot_state.retained_y = Some(y);
-                        slot_state.current_y = Some(y);
-                        if slot_state.active && slot_state.start_y.is_none() {
-                            slot_state.start_y = Some(y);
+                        slot_state.memory.y = Some(y);
+                        if let Some(contact) = &mut slot_state.contact {
+                            contact.current_y = Some(y);
+                            if contact.start_y.is_none() {
+                                contact.start_y = Some(y);
+                            }
+                            contact.observe_position(capabilities, swipe_min_distance);
+                            contact.tap_sequence_match
+                                && contact.contact_phase != ContactPhase::TapCandidate
+                        } else {
+                            false
                         }
-                        slot_state.observe_position(capabilities, swipe_min_distance);
-                        slot_state.tap_sequence_match
-                            && slot_state.contact_phase != ContactPhase::TapCandidate
                     };
                     if sequence_invalidated {
                         self.flush_pending_tap(&mut output);
@@ -237,7 +237,12 @@ impl Engine {
                 }
             }
 
-            if !self.slot(self.current_slot)?.began_in_frame {
+            if !self
+                .slot(self.current_slot)?
+                .contact
+                .as_ref()
+                .is_some_and(|contact| contact.began_in_frame)
+            {
                 self.decide_ownership_if_ready(&mut output)?;
                 self.emit_slider_steps_if_ready(&mut output)?;
             }

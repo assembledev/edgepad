@@ -9,12 +9,12 @@
 //! scoped to core so the file layout does not become part of the public API.
 
 use std::collections::BTreeSet;
-use std::time::Duration;
 
 mod contact;
 mod frame;
 mod routing;
 mod sliders;
+mod slot;
 mod taps;
 mod types;
 
@@ -27,78 +27,10 @@ pub use types::{
     DEFAULT_TAP_MIN_DURATION_MS, MT_TOOL_PALM,
 };
 
+use contact::{Contact, ContactPhase, Ownership};
 use sliders::validate_slider_specs;
+use slot::SlotState;
 use taps::PendingTap;
-
-// Ownership normally lasts until lift: moving across an edge must not steal
-// an existing pointer contact. A physical click on a buttonpad can promote
-// an edge contact to passthrough so click-drag still works.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ownership {
-    // Buffer events until the initial position is known at a frame boundary.
-    Unknown,
-    Claimed(Zone),
-    Passthrough,
-}
-
-// Motion and slider consumption are irreversible for a contact: returning
-// to its starting point must not turn it back into a tap.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ContactPhase {
-    TapCandidate,
-    Motion,
-    ConsumedBySlider,
-}
-
-#[derive(Debug, Clone)]
-struct SlotState {
-    active: bool,
-    tracking_id: Option<i32>,
-    ownership: Ownership,
-    contact_phase: ContactPhase,
-    start_x: Option<i32>,
-    start_y: Option<i32>,
-    current_x: Option<i32>,
-    current_y: Option<i32>,
-    // Kernel slot memory survives lift; contact start/current coordinates do not.
-    retained_x: Option<i32>,
-    retained_y: Option<i32>,
-    tool_type: Option<i32>,
-    gesture_rejected: bool,
-    began_in_frame: bool,
-    started_at: Option<Duration>,
-    // Eligible contacts can seed a pair; a match is already its second contact.
-    tap_sequence_eligible: bool,
-    tap_sequence_match: bool,
-    slider_anchor: Option<f32>,
-    // Delay the initial down until ownership is known, avoiding a false pointer down.
-    held_events: Vec<Event>,
-}
-
-impl Default for SlotState {
-    fn default() -> Self {
-        Self {
-            active: false,
-            tracking_id: None,
-            ownership: Ownership::Unknown,
-            contact_phase: ContactPhase::TapCandidate,
-            start_x: None,
-            start_y: None,
-            current_x: None,
-            current_y: None,
-            retained_x: None,
-            retained_y: None,
-            tool_type: None,
-            gesture_rejected: false,
-            began_in_frame: false,
-            started_at: None,
-            tap_sequence_eligible: true,
-            tap_sequence_match: false,
-            slider_anchor: None,
-            held_events: Vec::new(),
-        }
-    }
-}
 
 /// Stateful recognizer shared by live input and replay.
 ///
@@ -168,7 +100,7 @@ impl Engine {
         // Preserve retained slot axes and button state across reload. Only recognition
         // policy changes, after contacts and deferred taps have drained.
         assert!(
-            self.slots.iter().all(|slot| !slot.active) && self.pending_tap.is_none(),
+            self.slots.iter().all(|slot| slot.contact.is_none()) && self.pending_tap.is_none(),
             "recognition reconfiguration requires an idle engine"
         );
         validate_slider_specs(&sliders);
@@ -187,9 +119,9 @@ impl Engine {
         for position in positions {
             let tool_type = position.tool_type.filter(|_| self.options.palm_rejection);
             let slot = self.slot_mut(position.slot)?;
-            slot.retained_x = Some(position.x);
-            slot.retained_y = Some(position.y);
-            slot.tool_type = tool_type;
+            slot.memory.x = Some(position.x);
+            slot.memory.y = Some(position.y);
+            slot.memory.tool_type = tool_type;
         }
         Ok(())
     }
@@ -208,19 +140,7 @@ impl Engine {
             self.current_slot = contact.slot;
             let tool_type = contact.tool_type.filter(|_| self.options.palm_rejection);
             let slot = self.slot_mut(contact.slot)?;
-            slot.active = true;
-            slot.tracking_id = Some(contact.tracking_id);
-            slot.ownership = Ownership::Passthrough;
-            slot.start_x = Some(contact.x);
-            slot.start_y = Some(contact.y);
-            slot.current_x = Some(contact.x);
-            slot.current_y = Some(contact.y);
-            slot.retained_x = Some(contact.x);
-            slot.retained_y = Some(contact.y);
-            slot.tool_type = tool_type;
-            if tool_type == Some(MT_TOOL_PALM) {
-                slot.reject_gestures();
-            }
+            slot.restore_contact(contact, tool_type);
 
             output.passthrough.extend([
                 Event::slot(contact.slot),

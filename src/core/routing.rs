@@ -43,10 +43,12 @@ impl Engine {
         output: &mut FrameOutput,
     ) -> Result<(), SlotError> {
         let slot_state = self.slot_mut(self.current_slot)?;
-        match slot_state.ownership {
-            Ownership::Passthrough => self.push_passthrough_event_for_current_slot(event, output),
-            Ownership::Unknown => slot_state.held_events.push(event),
-            Ownership::Claimed(_) => {}
+        match slot_state.contact.as_ref().map(|contact| contact.ownership) {
+            Some(Ownership::Passthrough) => {
+                self.push_passthrough_event_for_current_slot(event, output)
+            }
+            None | Some(Ownership::Unknown) => slot_state.held_events.push(event),
+            Some(Ownership::Claimed(_)) => {}
         }
         Ok(())
     }
@@ -79,71 +81,57 @@ impl Engine {
         output: &mut FrameOutput,
     ) -> Result<(), SlotError> {
         let slot = self.current_slot;
+        let Some(contact) = &self.slot(slot)?.contact else {
+            return Ok(());
+        };
+        if contact.ownership != Ownership::Unknown {
+            return Ok(());
+        }
+        let (Some(start_x), Some(start_y)) = (contact.start_x, contact.start_y) else {
+            return Ok(());
+        };
         let zone = if self.buttonpad && !self.pressed_physical_buttons.is_empty() {
             None
         } else {
-            self.zone_for_current_slot()?
+            self.zone_for_position(start_x, start_y)
         };
+        let rejected = contact.gesture_rejected;
         let Some(zone) = zone else {
-            let (held_events, became_passthrough) = {
-                let slot_state = self.slot_mut(slot)?;
-                if slot_state.active
-                    && matches!(slot_state.ownership, Ownership::Unknown)
-                    && slot_state.start_x.is_some()
-                    && slot_state.start_y.is_some()
-                {
-                    slot_state.ownership = Ownership::Passthrough;
-                    (std::mem::take(&mut slot_state.held_events), true)
-                } else {
-                    (Vec::new(), false)
-                }
-            };
-            if became_passthrough && !self.slot(slot)?.gesture_rejected {
+            let state = self.slot_mut(slot)?;
+            state
+                .contact
+                .as_mut()
+                .expect("contact is being classified")
+                .ownership = Ownership::Passthrough;
+            let held_events = std::mem::take(&mut state.held_events);
+            let tool_type = state.memory.tool_type;
+            if !rejected {
                 self.flush_pending_tap(output);
             }
             for event in held_events {
                 self.push_passthrough_event_for_slot(slot, event, output);
             }
-            if became_passthrough {
-                if let Some(tool_type) = self.slot(slot)?.tool_type {
-                    self.push_passthrough_event_for_slot(slot, Event::tool_type(tool_type), output);
-                }
+            if let Some(tool_type) = tool_type {
+                self.push_passthrough_event_for_slot(slot, Event::tool_type(tool_type), output);
             }
             return Ok(());
         };
 
-        let slider_anchor = {
-            let slot_state = self.slot(slot)?;
-            if slot_state.active
-                && matches!(slot_state.ownership, Ownership::Unknown)
-                && slot_state.start_x.is_some()
-                && slot_state.start_y.is_some()
-            {
-                self.slider_for_zone(zone)
-                    .and_then(|spec| slider_position(self.caps, spec.axis, slot_state))
-            } else {
-                None
-            }
-        };
-
-        let rejected = self.slot(slot)?.gesture_rejected;
-        let sequence_match = !rejected && self.current_contact_matches_pending_tap(slot, zone)?;
+        let slider_anchor = self
+            .slider_for_zone(zone)
+            .and_then(|spec| slider_position(self.caps, spec.axis, contact));
+        let sequence_match = !rejected && self.contact_matches_pending_tap(contact, zone);
         // Palms neither complete nor interrupt an unrelated finger's pending tap.
         if self.pending_tap.is_some() && !sequence_match && !rejected {
             self.flush_pending_tap(output);
         }
 
-        let slot_state = self.slot_mut(slot)?;
-        if slot_state.active
-            && matches!(slot_state.ownership, Ownership::Unknown)
-            && slot_state.start_x.is_some()
-            && slot_state.start_y.is_some()
-        {
-            slot_state.ownership = Ownership::Claimed(zone);
-            slot_state.slider_anchor = slider_anchor;
-            slot_state.tap_sequence_match = sequence_match;
-            slot_state.held_events.clear();
-        }
+        let state = self.slot_mut(slot)?;
+        let contact = state.contact.as_mut().expect("contact is being classified");
+        contact.ownership = Ownership::Claimed(zone);
+        contact.slider_anchor = slider_anchor;
+        contact.tap_sequence_match = sequence_match;
+        state.held_events.clear();
         Ok(())
     }
 
@@ -154,47 +142,40 @@ impl Engine {
         let mut events = Vec::new();
         for index in 0..self.slots.len() {
             let slot_number = self.caps.slot_min + index as i32;
-            let snapshot = {
-                let slot = &mut self.slots[index];
-                if !slot.active || !matches!(slot.ownership, Ownership::Claimed(_)) {
-                    None
-                } else {
-                    match (slot.tracking_id, slot.current_x, slot.current_y) {
-                        (Some(tracking_id), Some(x), Some(y)) => {
-                            slot.ownership = Ownership::Passthrough;
-                            slot.slider_anchor = None;
-                            Some((tracking_id, x, y, slot.tool_type))
-                        }
-                        _ => None,
-                    }
-                }
+            let slot = &mut self.slots[index];
+            let Some(contact) = &mut slot.contact else {
+                continue;
             };
+            if !matches!(contact.ownership, Ownership::Claimed(_)) {
+                continue;
+            }
+            let (Some(x), Some(y)) = (contact.current_x, contact.current_y) else {
+                continue;
+            };
+            contact.ownership = Ownership::Passthrough;
+            contact.slider_anchor = None;
+            let tracking_id = contact.tracking_id;
+            let tool_type = slot.memory.tool_type;
 
-            if let Some((tracking_id, x, y, tool_type)) = snapshot {
-                events.extend([
-                    Event::slot(slot_number),
-                    Event::tracking_id(tracking_id),
-                    Event::x(x),
-                    Event::y(y),
-                ]);
-                if let Some(tool_type) = tool_type {
-                    events.push(Event::tool_type(tool_type));
-                }
+            events.extend([
+                Event::slot(slot_number),
+                Event::tracking_id(tracking_id),
+                Event::x(x),
+                Event::y(y),
+            ]);
+            if let Some(tool_type) = tool_type {
+                events.push(Event::tool_type(tool_type));
             }
         }
         events
     }
 
-    fn zone_for_current_slot(&self) -> Result<Option<Zone>, SlotError> {
-        let slot_state = self.slot(self.current_slot)?;
-        if !slot_state.active || slot_state.start_x.is_none() || slot_state.start_y.is_none() {
-            return Ok(None);
-        }
-        let x = self.caps.x.normalize(slot_state.start_x.unwrap());
-        let y = self.caps.y.normalize(slot_state.start_y.unwrap());
+    fn zone_for_position(&self, start_x: i32, start_y: i32) -> Option<Zone> {
+        let x = self.caps.x.normalize(start_x);
+        let y = self.caps.y.normalize(start_y);
 
         // This order resolves corner overlaps and is part of gesture behavior.
-        let zone = if x < self.edges.left {
+        if x < self.edges.left {
             Some(Zone::Left)
         } else if x > 1.0 - self.edges.right {
             Some(Zone::Right)
@@ -204,8 +185,7 @@ impl Engine {
             Some(Zone::Bottom)
         } else {
             None
-        };
-        Ok(zone)
+        }
     }
 }
 

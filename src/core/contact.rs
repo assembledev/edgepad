@@ -1,11 +1,46 @@
-//! Contact completion and gesture classification, including retained slot axes.
+//! Active contact state and release classification.
 
 use std::time::Duration;
 
 use super::{
-    Capabilities, ContactPhase, Engine, EngineOptions, Event, FrameOutput, Gesture,
-    GestureDirection, Ownership, SlotError, SlotState, Zone,
+    Capabilities, Engine, EngineOptions, Event, FrameOutput, Gesture, GestureDirection,
+    ResyncContact, SlotError, Zone, MT_TOOL_PALM,
 };
+
+// Ownership lasts until lift. A buttonpad press can promote an edge contact
+// to passthrough so it can participate in click-drag or clickfinger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Ownership {
+    Unknown,
+    Claimed(Zone),
+    Passthrough,
+}
+
+// Returning to the start cannot undo motion or a slider step and produce a tap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ContactPhase {
+    TapCandidate,
+    Motion,
+    ConsumedBySlider,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct Contact {
+    pub(super) tracking_id: i32,
+    pub(super) ownership: Ownership,
+    pub(super) contact_phase: ContactPhase,
+    pub(super) start_x: Option<i32>,
+    pub(super) start_y: Option<i32>,
+    pub(super) current_x: Option<i32>,
+    pub(super) current_y: Option<i32>,
+    pub(super) gesture_rejected: bool,
+    pub(super) began_in_frame: bool,
+    pub(super) started_at: Option<Duration>,
+    // Eligibility permits double-tap pairing; a match identifies the second contact.
+    pub(super) tap_sequence_eligible: bool,
+    pub(super) tap_sequence_match: bool,
+    pub(super) slider_anchor: Option<f32>,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ClassifiedContact {
@@ -16,20 +51,43 @@ pub(super) struct ClassifiedContact {
     pub(super) y: Option<i32>,
 }
 
-impl SlotState {
-    pub(super) fn finish_contact(&mut self) {
-        // Type-B slots retain axis state after TRACKING_ID -1. Linux may
-        // suppress unchanged positions or tool type when the next contact
-        // begins. Retain those axes while clearing contact-owned state.
-        let retained_x = self.retained_x;
-        let retained_y = self.retained_y;
-        let tool_type = self.tool_type;
-        *self = Self {
-            retained_x,
-            retained_y,
-            tool_type,
-            ..Self::default()
+impl Contact {
+    pub(super) fn new(
+        tracking_id: i32,
+        started_at: Option<Duration>,
+        sequence_eligible: bool,
+    ) -> Self {
+        Self {
+            tracking_id,
+            ownership: Ownership::Unknown,
+            contact_phase: ContactPhase::TapCandidate,
+            start_x: None,
+            start_y: None,
+            current_x: None,
+            current_y: None,
+            gesture_rejected: false,
+            began_in_frame: true,
+            started_at,
+            tap_sequence_eligible: sequence_eligible,
+            tap_sequence_match: false,
+            slider_anchor: None,
+        }
+    }
+
+    pub(super) fn restored(snapshot: &ResyncContact, tool_type: Option<i32>) -> Self {
+        let mut contact = Self {
+            ownership: Ownership::Passthrough,
+            start_x: Some(snapshot.x),
+            start_y: Some(snapshot.y),
+            current_x: Some(snapshot.x),
+            current_y: Some(snapshot.y),
+            began_in_frame: false,
+            ..Self::new(snapshot.tracking_id, None, true)
         };
+        if tool_type == Some(MT_TOOL_PALM) {
+            contact.reject_gestures();
+        }
+        contact
     }
 
     pub(super) fn reject_gestures(&mut self) {
@@ -77,23 +135,7 @@ impl Engine {
         let previous_slot = self.current_slot;
         for index in 0..self.slots.len() {
             let slot_number = self.caps.slot_min + index as i32;
-            let should_finalize = {
-                let slot = &mut self.slots[index];
-                if !slot.active || !slot.began_in_frame {
-                    false
-                } else {
-                    // Resolve any omitted axes only after the whole SYN
-                    // frame. Doing it at TRACKING_ID would briefly classify
-                    // a moved contact from the preceding contact's position.
-                    slot.current_x = slot.current_x.or(slot.retained_x);
-                    slot.current_y = slot.current_y.or(slot.retained_y);
-                    slot.start_x = slot.start_x.or(slot.current_x);
-                    slot.start_y = slot.start_y.or(slot.current_y);
-                    slot.began_in_frame = false;
-                    true
-                }
-            };
-            if should_finalize {
+            if self.slots[index].finalize_new_contact() {
                 self.current_slot = slot_number;
                 self.decide_ownership_if_ready(output)?;
                 self.emit_slider_steps_if_ready(output)?;
@@ -110,33 +152,29 @@ impl Engine {
         output: &mut FrameOutput,
     ) -> Result<(), SlotError> {
         let slot = self.current_slot;
-        if self.slot(slot)?.gesture_rejected {
-            if self.slot(slot)?.ownership == Ownership::Passthrough {
+        let Some(contact) = self.slot_mut(slot)?.take_contact() else {
+            self.slot_mut(slot)?.held_events.push(event);
+            return Ok(());
+        };
+        if contact.gesture_rejected {
+            if contact.ownership == Ownership::Passthrough {
                 self.push_passthrough_event_for_current_slot(event, output);
             }
-            self.slot_mut(slot)?.finish_contact();
             return Ok(());
         }
-        match self.slot(slot)?.ownership {
+        match contact.ownership {
             Ownership::Claimed(zone) => {
                 let releases_slider_zone = self.slider_for_zone(zone).is_some();
-                let options = self.options;
-                let capabilities = self.caps;
-                let classified = {
-                    let slot_state = self.slot(slot)?;
-                    classify_gesture(capabilities, slot, zone, slot_state, options, timestamp).map(
+                let classified =
+                    classify_gesture(self.caps, slot, zone, &contact, self.options, timestamp).map(
                         |gesture| ClassifiedContact {
                             gesture,
-                            sequence_match: slot_state.tap_sequence_match,
-                            sequence_eligible: slot_state.tap_sequence_eligible,
-                            x: slot_state.current_x.or(slot_state.start_x),
-                            y: slot_state.current_y.or(slot_state.start_y),
+                            sequence_match: contact.tap_sequence_match,
+                            sequence_eligible: contact.tap_sequence_eligible,
+                            x: contact.current_x.or(contact.start_x),
+                            y: contact.current_y.or(contact.start_y),
                         },
-                    )
-                };
-                if self.slot(slot)?.active {
-                    self.slot_mut(slot)?.finish_contact();
-                }
+                    );
 
                 if let Some(classified) = classified {
                     // Sliders own directional motion for their zone. Release can
@@ -157,17 +195,8 @@ impl Engine {
             }
             Ownership::Passthrough => {
                 self.push_passthrough_event_for_current_slot(event, output);
-                if self.slot(slot)?.active {
-                    self.slot_mut(slot)?.finish_contact();
-                }
             }
-            Ownership::Unknown => {
-                let slot_state = self.slot_mut(slot)?;
-                slot_state.held_events.push(event);
-                if slot_state.active {
-                    slot_state.finish_contact();
-                }
-            }
+            Ownership::Unknown => {}
         }
         Ok(())
     }
@@ -177,7 +206,7 @@ fn classify_gesture(
     capabilities: Capabilities,
     slot: i32,
     zone: Zone,
-    state: &SlotState,
+    state: &Contact,
     options: EngineOptions,
     released_at: Option<Duration>,
 ) -> Option<Gesture> {
@@ -215,7 +244,7 @@ fn classify_gesture(
         zone,
         direction,
         slot,
-        tracking_id: state.tracking_id?,
+        tracking_id: state.tracking_id,
     })
 }
 

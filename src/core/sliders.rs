@@ -1,8 +1,8 @@
 //! Continuous slider steps and fractional movement retention.
 
 use super::{
-    Capabilities, Engine, FrameOutput, Ownership, SliderAxis, SliderDirection, SliderSpec,
-    SliderStep, SlotError, SlotState, Zone,
+    Capabilities, Contact, Engine, FrameOutput, Ownership, SliderAxis, SliderDirection, SliderSpec,
+    SliderStep, SlotError, Zone,
 };
 
 impl Engine {
@@ -12,43 +12,42 @@ impl Engine {
     ) -> Result<(), SlotError> {
         let slot = self.current_slot;
         let (zone, spec, position, tracking_id) = {
-            let slot_state = self.slot(slot)?;
-            if slot_state.gesture_rejected {
+            let Some(contact) = &self.slot(slot)?.contact else {
+                return Ok(());
+            };
+            if contact.gesture_rejected {
                 return Ok(());
             }
-            let Ownership::Claimed(zone) = slot_state.ownership else {
+            let Ownership::Claimed(zone) = contact.ownership else {
                 return Ok(());
             };
             let Some(spec) = self.slider_for_zone(zone) else {
                 return Ok(());
             };
-            let Some(position) = slider_position(self.caps, spec.axis, slot_state) else {
+            let Some(position) = slider_position(self.caps, spec.axis, contact) else {
                 return Ok(());
             };
-            let Some(tracking_id) = slot_state.tracking_id else {
-                return Ok(());
-            };
-            (zone, spec, position, tracking_id)
+            (zone, spec, position, contact.tracking_id)
         };
 
-        let slot_state = self.slot_mut(slot)?;
-        let Some(mut anchor) = slot_state.slider_anchor else {
-            slot_state.slider_anchor = Some(position);
+        let contact = self
+            .slot_mut(slot)?
+            .contact
+            .as_mut()
+            .expect("slider contact remains active");
+        let Some(mut anchor) = contact.slider_anchor else {
+            contact.slider_anchor = Some(position);
             return Ok(());
         };
 
-        if (position - anchor).abs() >= spec.step {
-            self.flush_pending_tap(output);
-        }
-
-        let slot_state = self.slot_mut(slot)?;
+        let moved_by_step = (position - anchor).abs() >= spec.step;
 
         // Advance by whole steps, retaining the remainder. Setting the
         // anchor to the latest position would lose small movements and make
         // sensitivity depend on the device's event rate.
         while position - anchor >= spec.step {
             push_slider_step(
-                slot_state,
+                contact,
                 output,
                 SliderStep {
                     zone,
@@ -62,7 +61,7 @@ impl Engine {
 
         while anchor - position >= spec.step {
             push_slider_step(
-                slot_state,
+                contact,
                 output,
                 SliderStep {
                     zone,
@@ -74,7 +73,10 @@ impl Engine {
             anchor -= spec.step;
         }
 
-        slot_state.slider_anchor = Some(anchor);
+        contact.slider_anchor = Some(anchor);
+        if moved_by_step {
+            self.flush_pending_tap(output);
+        }
         Ok(())
     }
 
@@ -86,10 +88,10 @@ impl Engine {
     }
 }
 
-fn push_slider_step(slot_state: &mut SlotState, output: &mut FrameOutput, step: SliderStep) {
+fn push_slider_step(contact: &mut Contact, output: &mut FrameOutput, step: SliderStep) {
     // Even a step smaller than tap slop commits the contact to the slider.
     // Lifting or returning to the start must not also fire a tap.
-    slot_state.consume_by_slider();
+    contact.consume_by_slider();
     output.slider_steps.push(step);
 }
 
@@ -107,7 +109,7 @@ pub(super) fn validate_slider_specs(sliders: &[SliderSpec]) {
 pub(super) fn slider_position(
     caps: Capabilities,
     axis: SliderAxis,
-    state: &SlotState,
+    state: &Contact,
 ) -> Option<f32> {
     match axis {
         SliderAxis::Horizontal => state.current_x.map(|x| caps.x.normalize(x)),
