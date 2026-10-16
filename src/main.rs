@@ -1148,6 +1148,10 @@ impl DaemonRuntimeHandler {
             );
             return None;
         }
+        if candidate.palm_rejection != self.active_config.palm_rejection {
+            eprintln!("edgepad daemon: reload rejected: palm_rejection changed; restart required; keeping previous configuration");
+            return None;
+        }
         if candidate == self.active_config {
             eprintln!("edgepad daemon: reload complete; configuration unchanged");
             return None;
@@ -1541,14 +1545,15 @@ fn edge_widths_label(widths: EdgeWidths) -> String {
 fn print_recognition_profile(profile: &RecognitionProfile) {
     println!("profile: {}", profile.source_label());
     println!(
-        "profile_settings: edge_widths={} tap_min_duration_ms={} tap_max_duration_ms={} double_tap_timeout_ms={} double_tap_max_distance={:.3} swipe_min_distance={:.3} sliders={}",
+        "profile_settings: edge_widths={} tap_min_duration_ms={} tap_max_duration_ms={} double_tap_timeout_ms={} double_tap_max_distance={:.3} swipe_min_distance={:.3} sliders={} palm_rejection={}",
         edge_widths_label(profile.edge_widths),
         profile.engine_options.tap_min_duration.as_millis(),
         profile.engine_options.tap_max_duration.as_millis(),
         profile.engine_options.double_tap_timeout.as_millis(),
         profile.engine_options.double_tap_max_distance,
         profile.engine_options.swipe_min_distance,
-        profile.slider_specs.len()
+        profile.slider_specs.len(),
+        profile.engine_options.palm_rejection
     );
 }
 
@@ -1598,14 +1603,15 @@ fn replay(args: &ReplayArgs) -> Result<(), String> {
     );
     println!("frames: {}", replay.frames.len());
     println!(
-        "events: total={} slot={} tracking_start={} tracking_end={} x={} y={} syn_dropped={}",
+        "events: total={} slot={} tracking_start={} tracking_end={} x={} y={} syn_dropped={} tool_type={}",
         stats.total_events,
         stats.slot_events,
         stats.tracking_starts,
         stats.tracking_ends,
         stats.x_events,
         stats.y_events,
-        stats.syn_dropped_events
+        stats.syn_dropped_events,
+        stats.tool_type_events
     );
     println!(
         "contacts: started={} ended={}",
@@ -2018,6 +2024,45 @@ mod tests {
         assert_eq!(runtime.active_config(), &initial);
         runtime.shutdown();
         fs::remove_file(config_path).expect("test config should be removed");
+    }
+
+    #[test]
+    fn daemon_reload_rejects_palm_rejection_change_as_restart_only() {
+        let config_path = unique_test_config_path("edgepad-reload-palm-rejection");
+        let initial = parse_test_daemon_config(
+            r#"
+            device = "auto"
+            [[gestures]]
+            zone = "left"
+            direction = "right"
+            action = { log = true }
+            "#,
+        );
+        fs::write(
+            &config_path,
+            r#"
+            device = "auto"
+            palm_rejection = false
+            [[gestures]]
+            zone = "left"
+            direction = "right"
+            action = { log = true }
+            "#,
+        )
+        .unwrap();
+        let args = DaemonArgs {
+            config: initial.clone(),
+            config_path: config_path.clone(),
+            input_root: PathBuf::from("/dev/input"),
+            overrides: DaemonConfigOverrides::default(),
+        };
+        let reload = ReloadToken::new();
+        let mut runtime = DaemonRuntimeHandler::new(&args, reload.clone()).unwrap();
+        reload.request();
+        assert!(runtime.apply_pending_reload().is_none());
+        assert_eq!(runtime.active_config(), &initial);
+        runtime.shutdown();
+        fs::remove_file(config_path).unwrap();
     }
 
     #[test]

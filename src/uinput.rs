@@ -7,8 +7,8 @@
 use crate::core::Capabilities;
 use crate::raw::{
     is_pointer_button_code, RawEvent, RawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y,
-    ABS_MT_SLOT, ABS_MT_TRACKING_ID, ABS_X, ABS_Y, BTN_TOOL_DOUBLETAP, BTN_TOOL_FINGER,
-    BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP, BTN_TOOL_TRIPLETAP, BTN_TOUCH,
+    ABS_MT_SLOT, ABS_MT_TOOL_TYPE, ABS_MT_TRACKING_ID, ABS_X, ABS_Y, BTN_TOOL_DOUBLETAP,
+    BTN_TOOL_FINGER, BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP, BTN_TOOL_TRIPLETAP, BTN_TOUCH,
 };
 use evdev::{
     raw_stream::RawDevice, uinput::VirtualDevice, AbsInfo, AbsoluteAxisCode, AttributeSet,
@@ -70,6 +70,7 @@ pub struct PhysicalTouchpadAbsInfo {
     pub mt_tracking_id: Option<VirtualAbsAxis>,
     pub mt_position_x: VirtualAbsAxis,
     pub mt_position_y: VirtualAbsAxis,
+    pub mt_tool_type: Option<VirtualAbsAxis>,
 }
 
 impl PhysicalTouchpadAbsInfo {
@@ -86,6 +87,7 @@ impl PhysicalTouchpadAbsInfo {
                 capabilities.y.max,
             )),
             mt_slot: VirtualAbsAxis::new(ABS_MT_SLOT, capabilities.slot_min, capabilities.slot_max),
+            mt_tool_type: None,
             mt_tracking_id: Some(VirtualAbsAxis::new(ABS_MT_TRACKING_ID, 0, TRACKING_ID_MAX)),
             mt_position_x: VirtualAbsAxis::new(
                 ABS_MT_POSITION_X,
@@ -108,6 +110,7 @@ impl PhysicalTouchpadAbsInfo {
             .unwrap_or_default();
 
         Self {
+            mt_tool_type: axis_from_abs_infos(&axes, ABS_MT_TOOL_TYPE),
             abs_x: axis_from_abs_infos(&axes, ABS_X).or(fallback.abs_x),
             abs_y: axis_from_abs_infos(&axes, ABS_Y).or(fallback.abs_y),
             mt_slot: axis_from_abs_infos(&axes, ABS_MT_SLOT).unwrap_or(fallback.mt_slot),
@@ -152,7 +155,11 @@ impl VirtualTouchpadSpec {
         Self::named(capabilities, DEFAULT_VIRTUAL_TOUCHPAD_NAME)
     }
 
-    pub fn from_raw_device(device: &RawDevice, capabilities: Capabilities) -> Self {
+    pub fn from_raw_device(
+        device: &RawDevice,
+        capabilities: Capabilities,
+        palm_rejection: bool,
+    ) -> Self {
         let properties = device
             .properties()
             .iter()
@@ -170,6 +177,7 @@ impl VirtualTouchpadSpec {
             properties,
             physical_buttons,
             DEFAULT_VIRTUAL_TOUCHPAD_NAME,
+            palm_rejection,
         )
     }
 
@@ -190,6 +198,17 @@ impl VirtualTouchpadSpec {
         let abs_y = abs_info
             .abs_y
             .unwrap_or_else(|| abs_info.mt_position_y.with_code(ABS_Y));
+        let mut absolute_axes = vec![
+            abs_x,
+            abs_y,
+            abs_info.mt_slot,
+            abs_info
+                .mt_tracking_id
+                .unwrap_or_else(|| VirtualAbsAxis::new(ABS_MT_TRACKING_ID, 0, TRACKING_ID_MAX)),
+            abs_info.mt_position_x,
+            abs_info.mt_position_y,
+        ];
+        absolute_axes.extend(abs_info.mt_tool_type);
         Self {
             name: name.into(),
             properties: vec![PropType::POINTER.0],
@@ -201,16 +220,7 @@ impl VirtualTouchpadSpec {
                 BTN_TOOL_QUADTAP,
                 BTN_TOOL_QUINTTAP,
             ],
-            absolute_axes: vec![
-                abs_x,
-                abs_y,
-                abs_info.mt_slot,
-                abs_info
-                    .mt_tracking_id
-                    .unwrap_or_else(|| VirtualAbsAxis::new(ABS_MT_TRACKING_ID, 0, TRACKING_ID_MAX)),
-                abs_info.mt_position_x,
-                abs_info.mt_position_y,
-            ],
+            absolute_axes,
             misc: Vec::new(),
         }
     }
@@ -220,7 +230,12 @@ impl VirtualTouchpadSpec {
         properties: Vec<u16>,
         physical_buttons: Vec<u16>,
         name: impl Into<String>,
+        palm_rejection: bool,
     ) -> Self {
+        let mut abs_info = abs_info;
+        if !palm_rejection {
+            abs_info.mt_tool_type = None;
+        }
         let mut spec = Self::from_physical_abs_info(abs_info, name);
         for property in properties {
             if !spec.properties.contains(&property) {

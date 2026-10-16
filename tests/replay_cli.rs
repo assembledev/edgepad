@@ -672,3 +672,43 @@ fn tap_fixture(released_at_us: u64) -> String {
 fn unique_temp_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()))
 }
+
+#[test]
+fn replay_raw_applies_palm_rejection_from_config() {
+    let config = unique_temp_path("edgepad-palm-rejection.toml");
+    for enabled in [true, false] {
+        fs::write(
+            &config,
+            format!(
+                r#"
+palm_rejection = {enabled}
+[[gestures]]
+zone = "right"
+direction = "down"
+action = {{ log = true }}
+"#
+            ),
+        )
+        .unwrap();
+        let output = edgepad()
+            .arg("replay-raw")
+            .arg(fixture("palm-classification.raw.ev"))
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(&format!("palm_rejection={enabled}")));
+        if enabled {
+            assert!(stdout.contains("gestures: 0"));
+        } else {
+            assert!(stdout.contains("gestures: 3"));
+        }
+    }
+    fs::remove_file(config).unwrap();
+}

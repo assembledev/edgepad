@@ -156,6 +156,12 @@ let
     ];
   };
 
+  homePalmDisabledEval = homeEval.extendModules {
+    modules = [ { services.edgepad.palmRejection = false; } ];
+  };
+  homePalmDisabledConfigFile =
+    homePalmDisabledEval.config.xdg.configFile."edgepad/edgepad.toml".source;
+
   homeConfigFile = homeEval.config.xdg.configFile."edgepad/edgepad.toml".source;
   homeService = homeEval.config.systemd.user.services.edgepad;
   homeExecStart = builtins.unsafeDiscardStringContext homeService.Service.ExecStart;
@@ -175,6 +181,11 @@ let
       builtins.unsafeDiscardStringContext homeService.Service.ExecReload
     );
     assert homeService.Unit."X-Reload-Triggers" == [ homeConfigFile ];
+    assert homeEval.config.services.edgepad.palmRejection;
+    assert homeService.Unit."X-Restart-Triggers" == [ "palm_rejection=true" ];
+    assert
+      homePalmDisabledEval.config.systemd.user.services.edgepad.Unit."X-Restart-Triggers"
+      == [ "palm_rejection=false" ];
     assert homeService.Service.Type == "notify";
     assert homeService.Service.NotifyAccess == "main";
     assert homeService.Service.TimeoutStartSec == "45s";
@@ -192,6 +203,8 @@ let
       grep -F 'double_tap_timeout_ms = 320' ${homeConfigFile}
       grep -F 'double_tap_max_distance = 0.05' ${homeConfigFile}
       grep -F 'swipe_min_distance = 0.03' ${homeConfigFile}
+      grep -F 'palm_rejection = true' ${homeConfigFile}
+      grep -F 'palm_rejection = false' ${homePalmDisabledConfigFile}
       grep -F '[[gestures]]' ${homeConfigFile}
       grep -F 'zone = "right"' ${homeConfigFile}
       grep -F 'direction = "down"' ${homeConfigFile}

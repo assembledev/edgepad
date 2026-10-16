@@ -23,9 +23,14 @@ ABS_MT_SLOT <slot>
 ABS_MT_TRACKING_ID <id|-1>
 ABS_MT_POSITION_X <x>
 ABS_MT_POSITION_Y <y>
+ABS_MT_TOOL_TYPE <type>
 SYN_REPORT <timestamp_us>
 SYN_DROPPED <timestamp_us>
 ```
+
+Tool type is optional: 0 is a finger, 1 a pen, and 2 a palm. Like other slot axes,
+it persists across lifts until another value is reported. Palm classification
+cancels recognition for that contact until lift.
 
 Comments are allowed:
 

@@ -24,14 +24,15 @@ use crate::device::{
 pub const DEFAULT_EDGE_WIDTH: f32 = 0.10;
 pub const DEFAULT_SLIDER_STEP: f32 = 0.04;
 pub use crate::core::{
-    DEFAULT_DOUBLE_TAP_MAX_DISTANCE, DEFAULT_DOUBLE_TAP_TIMEOUT_MS, DEFAULT_SWIPE_MIN_DISTANCE,
-    DEFAULT_TAP_MAX_DURATION_MS, DEFAULT_TAP_MIN_DURATION_MS,
+    DEFAULT_DOUBLE_TAP_MAX_DISTANCE, DEFAULT_DOUBLE_TAP_TIMEOUT_MS, DEFAULT_PALM_REJECTION,
+    DEFAULT_SWIPE_MIN_DISTANCE, DEFAULT_TAP_MAX_DURATION_MS, DEFAULT_TAP_MIN_DURATION_MS,
 };
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgepadConfig {
     pub device: DeviceConfig,
     pub edge_width: f32,
+    pub palm_rejection: bool,
     pub edge_width_overrides: EdgeWidthOverrides,
     pub tap_min_duration_ms: u64,
     pub tap_max_duration_ms: u64,
@@ -55,6 +56,7 @@ impl Default for EdgepadConfig {
         Self {
             device: DeviceConfig::Auto,
             edge_width: DEFAULT_EDGE_WIDTH,
+            palm_rejection: DEFAULT_PALM_REJECTION,
             edge_width_overrides: EdgeWidthOverrides::default(),
             tap_min_duration_ms: DEFAULT_TAP_MIN_DURATION_MS,
             tap_max_duration_ms: DEFAULT_TAP_MAX_DURATION_MS,
@@ -78,6 +80,9 @@ impl EdgepadConfig {
         if let Some(device) = raw.device {
             config.device = DeviceConfig::parse(&device)
                 .map_err(|err| format!("invalid device config: {err}"))?;
+        }
+        if let Some(palm_rejection) = raw.palm_rejection {
+            config.palm_rejection = palm_rejection;
         }
         if let Some(edge_width) = raw.edge_width {
             config.edge_width = validate_edge_width(edge_width, "edge_width")?;
@@ -190,6 +195,7 @@ impl EdgepadConfig {
 
     pub fn engine_options(&self) -> EngineOptions {
         EngineOptions {
+            palm_rejection: self.palm_rejection,
             tap_min_duration: Duration::from_millis(self.tap_min_duration_ms),
             tap_max_duration: Duration::from_millis(self.tap_max_duration_ms),
             swipe_min_distance: self.swipe_min_distance,
@@ -635,6 +641,7 @@ fn slider_label(index: usize) -> String {
 #[serde(deny_unknown_fields)]
 struct RawEdgepadConfig {
     device: Option<String>,
+    palm_rejection: Option<bool>,
     edge_width: Option<f32>,
     left_edge_width: Option<f32>,
     right_edge_width: Option<f32>,
@@ -799,6 +806,19 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn palm_rejection_defaults_on_and_can_be_disabled() {
+        let defaults = EdgepadConfig::parse("").unwrap();
+        assert!(defaults.palm_rejection);
+        assert!(defaults.engine_options().palm_rejection);
+        let enabled = EdgepadConfig::parse("palm_rejection = true").unwrap();
+        assert!(enabled.engine_options().palm_rejection);
+        let disabled = EdgepadConfig::parse("palm_rejection = false").unwrap();
+        assert!(!disabled.palm_rejection);
+        assert!(!disabled.engine_options().palm_rejection);
+        assert!(EdgepadConfig::parse("palm_rejection = \"false\"").is_err());
     }
 
     #[test]

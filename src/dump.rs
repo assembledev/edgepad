@@ -69,6 +69,9 @@ pub fn fixture_line_for_event(event: InputEvent) -> io::Result<Option<String>> {
         EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_X, value) => {
             Some(format!("ABS_MT_POSITION_X {value}"))
         }
+        EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TOOL_TYPE, value) => {
+            Some(format!("ABS_MT_TOOL_TYPE {value}"))
+        }
         EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, value) => {
             Some(format!("ABS_MT_POSITION_Y {value}"))
         }

@@ -86,6 +86,19 @@ edge. `left_edge_width`, `right_edge_width`, `top_edge_width`, and
 `bottom_edge_width` override individual edges. Omitted overrides use `edge_width`.
 Only edges with bindings reserve space for gestures.
 
+## Palm rejection
+
+`palm_rejection` defaults to `true`. It is a top-level setting, placed above
+the first `[[gestures]]` or `[[sliders]]` header. In TOML, keys after a header
+belong to that section.
+
+```toml
+palm_rejection = false
+```
+
+Setting it to `false` restores contact handling without palm classification.
+Restart the service after changing this setting.
+
 ## Tap and swipe sensitivity
 
 These are also top-level settings, placed before the binding tables. Distances
@@ -122,7 +135,7 @@ journalctl --user -u edgepad.service -b
 ```
 
 A reload waits for active touches and pending tap sequences to finish. Changing
-`device` requires `systemctl --user restart edgepad.service`.
+`device` or `palm_rejection` requires `systemctl --user restart edgepad.service`.
 
 Home Manager applies recognition and binding changes with a reload when you
-activate the new generation. Package or device changes restart the service.
+activate the new generation. Package, device, or palm-rejection changes restart the service.

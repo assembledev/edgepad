@@ -8,6 +8,9 @@ Gestures start with a finger on the touchpad's left, right, top, or bottom edge.
 Swipes, taps, and double taps run an action when you lift your finger; sliders
 repeat an action as you move along an edge.
 
+Edgepad applies [palm rejection](docs/passthrough-uinput.md#firmware-palm-rejection)
+when the touchpad reports palm contacts.
+
 ## Install
 
 On an **x86_64 Linux desktop with systemd**, run:

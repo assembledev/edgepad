@@ -2,6 +2,7 @@
 # Replace them with the volume, brightness, media, and workspace commands used by your desktop.
 
 device = "auto"
+palm_rejection = true
 edge_width = 0.10
 # Optional per-edge overrides; omitted edges use edge_width.
 # left_edge_width = 0.08

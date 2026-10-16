@@ -15,7 +15,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use crate::core::{
     Capabilities, EdgeWidths, Engine, EngineOptions, Gesture, GestureDirection, ResyncContact,
-    SliderDirection, SliderSpec, SliderStep, SlotPosition, Zone,
+    SliderDirection, SliderSpec, SliderStep, SlotSnapshot, Zone,
 };
 #[cfg(test)]
 use crate::core::{Event, SliderAxis, ZoneSet};
@@ -24,13 +24,13 @@ use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
     extract_core_events, is_pointer_button_code, route_raw_frame, route_recognition_deadline,
     route_resync_contacts, RawEvent, RawFrame, RawOutputComposer, RawOutputSink,
-    RecordingRawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TRACKING_ID,
-    BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED, SYN_REPORT,
+    RecordingRawOutputSink, ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_SLOT, ABS_MT_TOOL_TYPE,
+    ABS_MT_TRACKING_ID, BTN_TOUCH, EV_ABS, EV_KEY, EV_SYN, SYN_DROPPED, SYN_REPORT,
 };
 use crate::uinput::{
     build_virtual_touchpad, UinputEventWriter, UinputRawOutputSink, VirtualTouchpadSpec,
 };
-use evdev::{raw_stream::RawDevice, PropType};
+use evdev::{raw_stream::RawDevice, AbsoluteAxisCode, PropType};
 
 pub use crate::config::DEFAULT_EDGE_WIDTH;
 
@@ -50,7 +50,7 @@ struct ProxyLoopConfig {
     edge_widths: EdgeWidths,
     engine_options: EngineOptions,
     slider_specs: Vec<SliderSpec>,
-    initial_slot_positions: Vec<SlotPosition>,
+    initial_slot_snapshots: Vec<SlotSnapshot>,
     buttonpad: bool,
 }
 
@@ -352,7 +352,8 @@ where
 {
     let (mut device, capabilities) = open_proxy_device(&config.device_path)?;
     let buttonpad = device.properties().contains(PropType::BUTTONPAD);
-    let initial_slot_positions = read_slot_positions(&device, capabilities)?;
+    let initial_slot_snapshots =
+        read_slot_snapshots(&device, capabilities, config.engine_options.palm_rejection)?;
     let mut sink = RecordingRawOutputSink::default();
     let stats = run_proxy_loop(
         &mut device,
@@ -361,7 +362,7 @@ where
             edge_widths: config.edge_widths,
             engine_options: config.engine_options,
             slider_specs: config.slider_specs.clone(),
-            initial_slot_positions,
+            initial_slot_snapshots,
             buttonpad,
         },
         &config.limit,
@@ -392,7 +393,11 @@ where
     ensure_physical_touchpad_idle_at_start(&config.device_path, &device, capabilities)?;
 
     let buttonpad = device.properties().contains(PropType::BUTTONPAD);
-    let spec = VirtualTouchpadSpec::from_raw_device(&device, capabilities);
+    let spec = VirtualTouchpadSpec::from_raw_device(
+        &device,
+        capabilities,
+        config.engine_options.palm_rejection,
+    );
     // Establish an output device before taking input away from the compositor.
     let virtual_device = build_virtual_touchpad(&spec).map_err(|err| {
         format!("failed to create virtual touchpad via /dev/uinput before grabbing physical device: {err}")
@@ -405,21 +410,22 @@ where
             config.device_path.display()
         )
     })?;
-    let initial_slot_positions = match read_slot_positions(&device, capabilities) {
-        Ok(positions) => positions,
-        Err(err) => {
-            let ungrab_result = device.ungrab().map_err(|ungrab_err| {
-                format!(
-                    "failed to ungrab device {} after slot-state read failure: {ungrab_err}",
-                    config.device_path.display()
-                )
-            });
-            return match ungrab_result {
-                Ok(()) => Err(err),
-                Err(ungrab_err) => Err(append_additional_error(err, ungrab_err)),
-            };
-        }
-    };
+    let initial_slot_snapshots =
+        match read_slot_snapshots(&device, capabilities, config.engine_options.palm_rejection) {
+            Ok(positions) => positions,
+            Err(err) => {
+                let ungrab_result = device.ungrab().map_err(|ungrab_err| {
+                    format!(
+                        "failed to ungrab device {} after slot-state read failure: {ungrab_err}",
+                        config.device_path.display()
+                    )
+                });
+                return match ungrab_result {
+                    Ok(()) => Err(err),
+                    Err(ungrab_err) => Err(append_additional_error(err, ungrab_err)),
+                };
+            }
+        };
     if let Err(ready_err) = on_ready(&config.device_path) {
         let ungrab_result = device.ungrab().map_err(|err| {
             format!(
@@ -439,7 +445,7 @@ where
             edge_widths: config.edge_widths,
             engine_options: config.engine_options,
             slider_specs: config.slider_specs.clone(),
-            initial_slot_positions,
+            initial_slot_snapshots,
             buttonpad,
         },
         &config.limit,
@@ -500,43 +506,76 @@ fn ensure_physical_touchpad_idle_at_start(
 fn read_resync_slot_snapshot(
     device: &RawDevice,
     capabilities: Capabilities,
-) -> Result<(Vec<ResyncContact>, Vec<SlotPosition>), String> {
+    palm_rejection: bool,
+) -> Result<(Vec<ResyncContact>, Vec<SlotSnapshot>), String> {
     let tracking_ids = mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)
         .map_err(|err| format!("failed to read current multitouch tracking IDs: {err}"))?;
     let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)
         .map_err(|err| format!("failed to read current multitouch X positions: {err}"))?;
     let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)
         .map_err(|err| format!("failed to read current multitouch Y positions: {err}"))?;
-    let contacts =
-        resync_contacts_from_slot_values(capabilities, &tracking_ids, &x_values, &y_values);
-    let positions = slot_positions_from_values(capabilities, x_values, y_values);
+    let tool_types = read_slot_tool_types(device, capabilities, palm_rejection)?;
+    let contacts = resync_contacts_from_slot_values(
+        capabilities,
+        &tracking_ids,
+        &x_values,
+        &y_values,
+        tool_types.as_deref(),
+    );
+    let positions = slot_snapshots_from_values(capabilities, x_values, y_values, tool_types);
     Ok((contacts, positions))
 }
 
-fn read_slot_positions(
+fn read_slot_snapshots(
     device: &RawDevice,
     capabilities: Capabilities,
-) -> Result<Vec<SlotPosition>, String> {
+    palm_rejection: bool,
+) -> Result<Vec<SlotSnapshot>, String> {
     let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)
         .map_err(|err| format!("failed to read current multitouch X positions: {err}"))?;
     let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)
         .map_err(|err| format!("failed to read current multitouch Y positions: {err}"))?;
-    Ok(slot_positions_from_values(capabilities, x_values, y_values))
+    let tool_types = read_slot_tool_types(device, capabilities, palm_rejection)?;
+    Ok(slot_snapshots_from_values(
+        capabilities,
+        x_values,
+        y_values,
+        tool_types,
+    ))
 }
 
-fn slot_positions_from_values(
+fn read_slot_tool_types(
+    device: &RawDevice,
+    capabilities: Capabilities,
+    palm_rejection: bool,
+) -> Result<Option<Vec<i32>>, String> {
+    if !palm_rejection
+        || !device
+            .supported_absolute_axes()
+            .is_some_and(|axes| axes.contains(AbsoluteAxisCode::ABS_MT_TOOL_TYPE))
+    {
+        return Ok(None);
+    }
+    mt_slot_values(device, capabilities, ABS_MT_TOOL_TYPE)
+        .map(Some)
+        .map_err(|err| format!("failed to read current multitouch tool types: {err}"))
+}
+
+fn slot_snapshots_from_values(
     capabilities: Capabilities,
     x_values: Vec<i32>,
     y_values: Vec<i32>,
-) -> Vec<SlotPosition> {
+    tool_types: Option<Vec<i32>>,
+) -> Vec<SlotSnapshot> {
     x_values
         .into_iter()
         .zip(y_values)
         .enumerate()
-        .map(|(index, (x, y))| SlotPosition {
+        .map(|(index, (x, y))| SlotSnapshot {
             slot: capabilities.slot_min + index as i32,
             x,
             y,
+            tool_type: tool_types.as_ref().map(|values| values[index]),
         })
         .collect()
 }
@@ -558,6 +597,7 @@ fn resync_contacts_from_slot_values(
     tracking_ids: &[i32],
     x_values: &[i32],
     y_values: &[i32],
+    tool_types: Option<&[i32]>,
 ) -> Vec<ResyncContact> {
     tracking_ids
         .iter()
@@ -570,6 +610,7 @@ fn resync_contacts_from_slot_values(
                 tracking_id: *tracking_id,
                 x: *x,
                 y: *y,
+                tool_type: tool_types.map(|values| values[index]),
             })
         })
         .collect()
@@ -640,7 +681,7 @@ where
         config.engine_options,
     );
     engine
-        .seed_slot_positions(&config.initial_slot_positions)
+        .seed_slot_snapshots(&config.initial_slot_snapshots)
         .map_err(|err| format!("failed to seed multitouch slot positions: {err:?}"))?;
     engine.set_buttonpad(config.buttonpad);
     let mut composer = RawOutputComposer::new(config.capabilities);
@@ -724,8 +765,11 @@ where
                     continue;
                 }
                 ResyncStreamAction::CompleteResync => {
-                    let (contacts, slot_positions) =
-                        read_resync_slot_snapshot(device, config.capabilities)?;
+                    let (contacts, slot_snapshots) = read_resync_slot_snapshot(
+                        device,
+                        config.capabilities,
+                        config.engine_options.palm_rejection,
+                    )?;
                     let pressed_physical_buttons = read_pressed_physical_buttons(device)?;
                     process_proxy_resync_contacts(
                         &contacts,
@@ -736,7 +780,7 @@ where
                         &mut stats,
                         handler,
                     )?;
-                    engine.seed_slot_positions(&slot_positions).map_err(|err| {
+                    engine.seed_slot_snapshots(&slot_snapshots).map_err(|err| {
                         format!("failed to restore multitouch slot positions: {err:?}")
                     })?;
                     recognition_deadline.sync(&engine, event.timestamp, Instant::now());
@@ -1373,15 +1417,16 @@ mod tests {
             edge_widths: EdgeWidths::all(0.10),
             engine_options: EngineOptions::default(),
             slider_specs: Vec::new(),
-            initial_slot_positions: Vec::new(),
+            initial_slot_snapshots: Vec::new(),
             buttonpad: true,
         };
         let mut engine = Engine::new(capabilities, config.edge_widths);
         engine
-            .seed_slot_positions(&[SlotPosition {
+            .seed_slot_snapshots(&[SlotSnapshot {
                 slot: 0,
                 x: 20,
                 y: 300,
+                tool_type: None,
             }])
             .expect("slot state should seed");
         engine.set_buttonpad(true);
@@ -1562,7 +1607,7 @@ mod tests {
             edge_widths: EdgeWidths::all(0.10),
             engine_options: EngineOptions::default(),
             slider_specs: Vec::new(),
-            initial_slot_positions: Vec::new(),
+            initial_slot_snapshots: Vec::new(),
             buttonpad: false,
         };
         let mut engine = Engine::with_options(
@@ -2078,6 +2123,75 @@ mod tests {
     }
 
     #[test]
+    fn startup_snapshot_preserves_inactive_slot_palm_type_without_a_new_event() {
+        let mut engine = Engine::new(test_capabilities(), EdgeWidths::all(0.10));
+        engine
+            .seed_slot_snapshots(&[SlotSnapshot {
+                slot: 0,
+                x: 20,
+                y: 300,
+                tool_type: Some(2),
+            }])
+            .unwrap();
+        engine.process_frame(&[Event::tracking_id(700)]).unwrap();
+        engine.process_frame(&[Event::x(220)]).unwrap();
+        let output = engine.process_frame(&[Event::tracking_id(-1)]).unwrap();
+        assert!(output.gestures.is_empty());
+    }
+
+    #[test]
+    fn disabled_palm_rejection_ignores_seeded_slot_type() {
+        let mut engine = Engine::with_options(
+            test_capabilities(),
+            EdgeWidths::all(0.1),
+            vec![],
+            EngineOptions {
+                palm_rejection: false,
+                ..EngineOptions::default()
+            },
+        );
+        engine
+            .seed_slot_snapshots(&[SlotSnapshot {
+                slot: 0,
+                x: 20,
+                y: 300,
+                tool_type: Some(2),
+            }])
+            .unwrap();
+        engine
+            .process_frame_at(&[Event::tracking_id(702)], Duration::from_millis(1000))
+            .unwrap();
+        let output = engine
+            .process_frame_at(&[Event::tracking_id(-1)], Duration::from_millis(1100))
+            .unwrap();
+        assert_eq!(output.gestures.len(), 1);
+    }
+
+    #[test]
+    fn slot_snapshots_and_resync_include_optional_tool_types() {
+        let capabilities = test_capabilities();
+        let snapshots = slot_snapshots_from_values(
+            capabilities,
+            vec![20, 500],
+            vec![300, 400],
+            Some(vec![2, 0]),
+        );
+        assert_eq!(snapshots[0].tool_type, Some(2));
+        let contacts = resync_contacts_from_slot_values(
+            capabilities,
+            &[701, -1],
+            &[20, 500],
+            &[300, 400],
+            Some(&[2, 0]),
+        );
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].tool_type, Some(2));
+        let unsupported =
+            slot_snapshots_from_values(capabilities, vec![20, 500], vec![300, 400], None);
+        assert!(unsupported.iter().all(|slot| slot.tool_type.is_none()));
+    }
+
+    #[test]
     fn resync_snapshot_keeps_only_active_slots_with_real_slot_numbers() {
         let contacts = resync_contacts_from_slot_values(
             Capabilities {
@@ -2088,6 +2202,7 @@ mod tests {
             &[-1, 501, -1],
             &[10, 20, 30],
             &[40, 50, 60],
+            None,
         );
 
         assert_eq!(
@@ -2097,6 +2212,7 @@ mod tests {
                 tracking_id: 501,
                 x: 20,
                 y: 50,
+                tool_type: None,
             }]
         );
     }

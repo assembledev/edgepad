@@ -61,6 +61,7 @@ fn virtual_touchpad_spec_preserves_physical_buttonpad_capabilities() {
         vec![PropType::POINTER.0, PropType::BUTTONPAD.0],
         vec![BTN_LEFT, BTN_RIGHT, 30],
         "edgepad mirrored buttonpad",
+        true,
     );
 
     assert_eq!(
@@ -79,6 +80,7 @@ fn virtual_touchpad_spec_preserves_physical_buttonpad_capabilities() {
 fn virtual_touchpad_spec_preserves_physical_abs_resolution_for_pointer_speed() {
     let spec = VirtualTouchpadSpec::from_physical_abs_info(
         PhysicalTouchpadAbsInfo {
+            mt_tool_type: None,
             abs_x: Some(VirtualAbsAxis {
                 code: ABS_X,
                 value: 400,
@@ -181,4 +183,44 @@ fn virtual_touchpad_spec_preserves_physical_abs_resolution_for_pointer_speed() {
             },
         ]
     );
+}
+
+#[test]
+fn virtual_touchpad_mirrors_tool_type_only_when_the_physical_axis_exists() {
+    use edgepad::raw::ABS_MT_TOOL_TYPE;
+    let plain = VirtualTouchpadSpec::from_capabilities(test_capabilities());
+    assert!(!plain
+        .absolute_axes
+        .iter()
+        .any(|axis| axis.code == ABS_MT_TOOL_TYPE));
+    let mut physical = PhysicalTouchpadAbsInfo::from_capabilities(test_capabilities());
+    let axis = VirtualAbsAxis::new(ABS_MT_TOOL_TYPE, 0, 2);
+    physical.mt_tool_type = Some(axis.clone());
+    let supported = VirtualTouchpadSpec::from_physical_abs_info(physical, "palm-capable touchpad");
+    assert_eq!(
+        supported
+            .absolute_axes
+            .iter()
+            .find(|candidate| candidate.code == ABS_MT_TOOL_TYPE),
+        Some(&axis)
+    );
+}
+
+#[test]
+fn disabled_palm_rejection_omits_virtual_tool_type_axis() {
+    use edgepad::raw::ABS_MT_TOOL_TYPE;
+    let mut physical = PhysicalTouchpadAbsInfo::from_capabilities(test_capabilities());
+    physical.mt_tool_type = Some(VirtualAbsAxis::new(ABS_MT_TOOL_TYPE, 0, 2));
+    let spec = VirtualTouchpadSpec::from_physical_device_info(
+        physical,
+        vec![PropType::POINTER.0],
+        vec![BTN_LEFT],
+        "touchpad",
+        false,
+    );
+    assert!(!spec
+        .absolute_axes
+        .iter()
+        .any(|axis| axis.code == ABS_MT_TOOL_TYPE));
+    assert!(spec.keys.contains(&BTN_LEFT));
 }

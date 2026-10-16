@@ -332,3 +332,22 @@ fn write_raw_events_with_budget_keeps_events_after_budget_until_a_complete_frame
         "EV_KEY BTN_TOUCH 1\nEV_ABS ABS_X 640\nEV_ABS ABS_MT_SLOT 1\nEV_SYN SYN_REPORT 0 0\n\nEV_KEY BTN_TOUCH 0\nEV_SYN SYN_DROPPED 0 0\n\nEV_ABS ABS_Y 320\n"
     );
 }
+
+#[test]
+fn palm_type_survives_both_capture_formats_and_replay_parsing() {
+    use edgepad::core::Event;
+    use edgepad::raw::{extract_core_events, parse_raw_frames};
+    use edgepad::replay::parse_frames;
+    let event = InputEvent::new(
+        EventType::ABSOLUTE.0,
+        AbsoluteAxisCode::ABS_MT_TOOL_TYPE.0,
+        2,
+    );
+    let fixture = fixture_line_for_event(event).unwrap();
+    assert_eq!(fixture, "ABS_MT_TOOL_TYPE 2");
+    let frames = parse_frames(&format!("{fixture}\nSYN_REPORT 1000\n")).unwrap();
+    assert_eq!(frames[0].events, vec![Event::tool_type(2)]);
+    let raw = raw_line_for_event(event);
+    let frames = parse_raw_frames(&format!("{raw}\nEV_SYN SYN_REPORT 0 1000\n")).unwrap();
+    assert_eq!(extract_core_events(&frames[0]), vec![Event::tool_type(2)]);
+}

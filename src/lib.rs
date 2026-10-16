@@ -29,8 +29,11 @@ pub mod uinput;
 /// A slot retains axis values between contacts; a tracking ID identifies the
 /// contact currently occupying it. Keep slot state and contact state distinct.
 pub mod core {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::time::Duration;
+
+    pub const MT_TOOL_PALM: i32 = 2;
+    pub const DEFAULT_PALM_REJECTION: bool = true;
 
     pub const DEFAULT_TAP_MIN_DURATION_MS: u64 = 40;
     pub const DEFAULT_TAP_MAX_DURATION_MS: u64 = 180;
@@ -89,6 +92,7 @@ pub mod core {
         TrackingId(i32),
         X(i32),
         Y(i32),
+        ToolType(i32),
         SynDropped,
     }
 
@@ -107,6 +111,10 @@ pub mod core {
 
         pub fn y(y: i32) -> Self {
             Self::Y(y)
+        }
+
+        pub fn tool_type(tool_type: i32) -> Self {
+            Self::ToolType(tool_type)
         }
 
         pub fn syn_dropped() -> Self {
@@ -193,6 +201,7 @@ pub mod core {
 
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub struct EngineOptions {
+        pub palm_rejection: bool,
         pub tap_min_duration: Duration,
         pub tap_max_duration: Duration,
         pub swipe_min_distance: f32,
@@ -205,6 +214,7 @@ pub mod core {
     impl Default for EngineOptions {
         fn default() -> Self {
             Self {
+                palm_rejection: DEFAULT_PALM_REJECTION,
                 tap_min_duration: Duration::from_millis(DEFAULT_TAP_MIN_DURATION_MS),
                 tap_max_duration: Duration::from_millis(DEFAULT_TAP_MAX_DURATION_MS),
                 swipe_min_distance: DEFAULT_SWIPE_MIN_DISTANCE,
@@ -230,13 +240,15 @@ pub mod core {
         pub tracking_id: i32,
         pub x: i32,
         pub y: i32,
+        pub tool_type: Option<i32>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) struct SlotPosition {
+    pub(crate) struct SlotSnapshot {
         pub slot: i32,
         pub x: i32,
         pub y: i32,
+        pub tool_type: Option<i32>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,6 +318,8 @@ pub mod core {
         current_y: Option<i32>,
         retained_x: Option<i32>,
         retained_y: Option<i32>,
+        tool_type: Option<i32>,
+        gesture_rejected: bool,
         began_in_frame: bool,
         started_at: Option<Duration>,
         tap_sequence_eligible: bool,
@@ -327,6 +341,8 @@ pub mod core {
                 current_y: None,
                 retained_x: None,
                 retained_y: None,
+                tool_type: None,
+                gesture_rejected: false,
                 began_in_frame: false,
                 started_at: None,
                 tap_sequence_eligible: true,
@@ -358,19 +374,28 @@ pub mod core {
     impl SlotState {
         fn finish_contact(&mut self) {
             // Type-B slots retain axis state after TRACKING_ID -1. Linux may
-            // suppress an unchanged X or Y when the next contact begins, so
-            // keep those values while clearing all contact-owned state.
+            // suppress unchanged positions or tool type when the next contact
+            // begins. Retain those axes while clearing contact-owned state.
             let retained_x = self.retained_x;
             let retained_y = self.retained_y;
+            let tool_type = self.tool_type;
             *self = Self {
                 retained_x,
                 retained_y,
+                tool_type,
                 ..Self::default()
             };
         }
 
+        fn reject_gestures(&mut self) {
+            self.gesture_rejected = true;
+            self.tap_sequence_eligible = false;
+            self.tap_sequence_match = false;
+            self.slider_anchor = None;
+        }
+
         fn observe_position(&mut self, capabilities: Capabilities, swipe_min_distance: f32) {
-            if self.contact_phase != ContactPhase::TapCandidate {
+            if self.gesture_rejected || self.contact_phase != ContactPhase::TapCandidate {
                 return;
             }
 
@@ -394,6 +419,18 @@ pub mod core {
 
         fn consume_by_slider(&mut self) {
             self.contact_phase = ContactPhase::ConsumedBySlider;
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct FrameContactTool {
+        tool_type: Option<i32>,
+        palm_reported: bool,
+    }
+
+    impl FrameContactTool {
+        fn is_palm(self) -> bool {
+            self.palm_reported || self.tool_type == Some(MT_TOOL_PALM)
         }
     }
 
@@ -477,14 +514,16 @@ pub mod core {
             self.options = options;
         }
 
-        pub(crate) fn seed_slot_positions(
+        pub(crate) fn seed_slot_snapshots(
             &mut self,
-            positions: &[SlotPosition],
+            positions: &[SlotSnapshot],
         ) -> Result<(), SlotError> {
             for position in positions {
+                let tool_type = position.tool_type.filter(|_| self.options.palm_rejection);
                 let slot = self.slot_mut(position.slot)?;
                 slot.retained_x = Some(position.x);
                 slot.retained_y = Some(position.y);
+                slot.tool_type = tool_type;
             }
             Ok(())
         }
@@ -587,6 +626,7 @@ pub mod core {
             for contact in contacts {
                 self.ensure_slot(contact.slot)?;
                 self.current_slot = contact.slot;
+                let tool_type = contact.tool_type.filter(|_| self.options.palm_rejection);
                 let slot = self.slot_mut(contact.slot)?;
                 slot.active = true;
                 slot.tracking_id = Some(contact.tracking_id);
@@ -597,6 +637,10 @@ pub mod core {
                 slot.current_y = Some(contact.y);
                 slot.retained_x = Some(contact.x);
                 slot.retained_y = Some(contact.y);
+                slot.tool_type = tool_type;
+                if tool_type == Some(MT_TOOL_PALM) {
+                    slot.reject_gestures();
+                }
 
                 output.passthrough.extend([
                     Event::slot(contact.slot),
@@ -604,9 +648,84 @@ pub mod core {
                     Event::x(contact.x),
                     Event::y(contact.y),
                 ]);
+                if let Some(tool_type) = tool_type {
+                    output.passthrough.push(Event::tool_type(tool_type));
+                }
             }
 
             Ok(output)
+        }
+
+        // Resolve each contact's classification before recognition. Coordinates
+        // can precede TOOL_TYPE within a SYN frame, and a reused slot can inherit
+        // a palm value that a later finger update overrides in its first frame.
+        fn frame_contact_tools(
+            &self,
+            frame: &[Event],
+        ) -> Result<BTreeMap<(i32, i32), FrameContactTool>, SlotError> {
+            let mut tools = self
+                .slots
+                .iter()
+                .map(|slot| slot.tool_type)
+                .collect::<Vec<_>>();
+            let mut tracking_ids = self
+                .slots
+                .iter()
+                .map(|slot| slot.tracking_id)
+                .collect::<Vec<_>>();
+            let mut contacts = BTreeMap::new();
+            for (index, slot) in self.slots.iter().enumerate() {
+                if let Some(id) = slot.tracking_id {
+                    contacts.insert(
+                        (self.caps.slot_min + index as i32, id),
+                        FrameContactTool {
+                            tool_type: slot.tool_type,
+                            palm_reported: slot.gesture_rejected,
+                        },
+                    );
+                }
+            }
+            let mut current_slot = self.current_slot;
+            for event in frame {
+                match *event {
+                    Event::Slot(slot) => {
+                        self.ensure_slot(slot)?;
+                        current_slot = slot;
+                    }
+                    Event::TrackingId(id) => {
+                        let index = (current_slot - self.caps.slot_min) as usize;
+                        tracking_ids[index] = (id >= 0).then_some(id);
+                        if id >= 0 {
+                            contacts.insert(
+                                (current_slot, id),
+                                FrameContactTool {
+                                    tool_type: tools[index],
+                                    palm_reported: false,
+                                },
+                            );
+                        }
+                    }
+                    Event::ToolType(tool_type) => {
+                        let index = (current_slot - self.caps.slot_min) as usize;
+                        tools[index] = Some(tool_type);
+                        if let Some(id) = tracking_ids[index] {
+                            let contact = contacts
+                                .get_mut(&(current_slot, id))
+                                .expect("active contact has tool state");
+                            contact.tool_type = Some(tool_type);
+                            contact.palm_reported |= tool_type == MT_TOOL_PALM;
+                        }
+                    }
+                    Event::SynDropped => {
+                        tools.fill(None);
+                        tracking_ids.fill(None);
+                        contacts.clear();
+                        current_slot = self.caps.slot_min;
+                    }
+                    Event::X(_) | Event::Y(_) => {}
+                }
+            }
+            Ok(contacts)
         }
 
         fn process_frame_with_time(
@@ -614,6 +733,21 @@ pub mod core {
             frame: &[Event],
             timestamp: Option<Duration>,
         ) -> Result<FrameOutput, SlotError> {
+            let frame_tools = if self.options.palm_rejection {
+                self.frame_contact_tools(frame)?
+            } else {
+                BTreeMap::new()
+            };
+            for (index, slot) in self.slots.iter_mut().enumerate() {
+                if let Some(id) = slot.tracking_id {
+                    if frame_tools
+                        .get(&(self.caps.slot_min + index as i32, id))
+                        .is_some_and(|tool| tool.is_palm())
+                    {
+                        slot.reject_gestures();
+                    }
+                }
+            }
             let mut output = FrameOutput::empty();
             if let Some(timestamp) = timestamp {
                 self.expire_pending_tap(timestamp, &mut output);
@@ -642,8 +776,15 @@ pub mod core {
                                 new_tracking_id: tracking_id,
                             });
                         }
-                        let another_contact_active = self.slots.iter().any(|slot| slot.active);
-                        if another_contact_active {
+                        let tool = frame_tools
+                            .get(&(slot, tracking_id))
+                            .copied()
+                            .unwrap_or_default();
+                        let another_contact_active = self
+                            .slots
+                            .iter()
+                            .any(|slot| slot.active && !slot.gesture_rejected);
+                        if another_contact_active && !tool.is_palm() {
                             for active_slot in self.slots.iter_mut().filter(|slot| slot.active) {
                                 active_slot.tap_sequence_eligible = false;
                                 active_slot.tap_sequence_match = false;
@@ -657,15 +798,25 @@ pub mod core {
                         slot_state.contact_phase = ContactPhase::TapCandidate;
                         slot_state.began_in_frame = true;
                         slot_state.started_at = timestamp;
-                        slot_state.tap_sequence_eligible = !another_contact_active;
+                        slot_state.tool_type = tool.tool_type;
+                        slot_state.tap_sequence_eligible =
+                            !another_contact_active && !tool.is_palm();
                         slot_state.tap_sequence_match = false;
                         slot_state.held_events.push(event);
+                        if tool.is_palm() {
+                            slot_state.reject_gestures();
+                        }
                     }
                     Event::TrackingId(-1) => {
                         self.release_current_slot(event, timestamp, &mut output)?;
                     }
                     Event::TrackingId(_) => {
                         self.release_current_slot(event, timestamp, &mut output)?;
+                    }
+                    Event::ToolType(_) if !self.options.palm_rejection => continue,
+                    Event::ToolType(tool_type) => {
+                        self.slot_mut(self.current_slot)?.tool_type = Some(tool_type);
+                        self.route_event_for_current_slot(event, &mut output)?;
                     }
                     Event::X(x) => {
                         let capabilities = self.caps;
@@ -758,6 +909,13 @@ pub mod core {
             output: &mut FrameOutput,
         ) -> Result<(), SlotError> {
             let slot = self.current_slot;
+            if self.slot(slot)?.gesture_rejected {
+                if self.slot(slot)?.ownership == Ownership::Passthrough {
+                    self.push_passthrough_event_for_current_slot(event, output);
+                }
+                self.slot_mut(slot)?.finish_contact();
+                return Ok(());
+            }
             match self.slot(slot)?.ownership {
                 Ownership::Claimed(zone) => {
                     let releases_slider_zone = self.slider_for_zone(zone).is_some();
@@ -838,7 +996,7 @@ pub mod core {
         ) {
             match event {
                 Event::Slot(_) | Event::SynDropped => output.passthrough.push(event),
-                Event::TrackingId(_) | Event::X(_) | Event::Y(_) => {
+                Event::TrackingId(_) | Event::X(_) | Event::Y(_) | Event::ToolType(_) => {
                     // Filtering edge contacts also filters slot switches. The
                     // output slot can therefore differ from the physical slot;
                     // emitting a bare release here can leave the wrong finger down.
@@ -871,11 +1029,20 @@ pub mod core {
                         (Vec::new(), false)
                     }
                 };
-                if became_passthrough {
+                if became_passthrough && !self.slot(slot)?.gesture_rejected {
                     self.flush_pending_tap(output);
                 }
                 for event in held_events {
                     self.push_passthrough_event_for_slot(slot, event, output);
+                }
+                if became_passthrough {
+                    if let Some(tool_type) = self.slot(slot)?.tool_type {
+                        self.push_passthrough_event_for_slot(
+                            slot,
+                            Event::tool_type(tool_type),
+                            output,
+                        );
+                    }
                 }
                 return Ok(());
             };
@@ -894,8 +1061,10 @@ pub mod core {
                 }
             };
 
-            let sequence_match = self.current_contact_matches_pending_tap(slot, zone)?;
-            if self.pending_tap.is_some() && !sequence_match {
+            let rejected = self.slot(slot)?.gesture_rejected;
+            let sequence_match =
+                !rejected && self.current_contact_matches_pending_tap(slot, zone)?;
+            if self.pending_tap.is_some() && !sequence_match && !rejected {
                 self.flush_pending_tap(output);
             }
 
@@ -926,20 +1095,23 @@ pub mod core {
                             (Some(tracking_id), Some(x), Some(y)) => {
                                 slot.ownership = Ownership::Passthrough;
                                 slot.slider_anchor = None;
-                                Some((tracking_id, x, y))
+                                Some((tracking_id, x, y, slot.tool_type))
                             }
                             _ => None,
                         }
                     }
                 };
 
-                if let Some((tracking_id, x, y)) = snapshot {
+                if let Some((tracking_id, x, y, tool_type)) = snapshot {
                     events.extend([
                         Event::slot(slot_number),
                         Event::tracking_id(tracking_id),
                         Event::x(x),
                         Event::y(y),
                     ]);
+                    if let Some(tool_type) = tool_type {
+                        events.push(Event::tool_type(tool_type));
+                    }
                 }
             }
             events
@@ -952,6 +1124,9 @@ pub mod core {
             let slot = self.current_slot;
             let (zone, spec, position, tracking_id) = {
                 let slot_state = self.slot(slot)?;
+                if slot_state.gesture_rejected {
+                    return Ok(());
+                }
                 let Ownership::Claimed(zone) = slot_state.ownership else {
                     return Ok(());
                 };
@@ -1249,6 +1424,9 @@ pub mod core {
         options: EngineOptions,
         released_at: Option<Duration>,
     ) -> Option<Gesture> {
+        if state.gesture_rejected {
+            return None;
+        }
         let start_x = state.start_x?;
         let start_y = state.start_y?;
         let current_x = state.current_x.unwrap_or(start_x);
@@ -1400,6 +1578,7 @@ pub mod replay {
         pub tracking_ends: usize,
         pub x_events: usize,
         pub y_events: usize,
+        pub tool_type_events: usize,
         pub syn_dropped_events: usize,
     }
 
@@ -1415,6 +1594,7 @@ pub mod replay {
                     Event::TrackingId(_) => stats.tracking_ends += 1,
                     Event::X(_) => stats.x_events += 1,
                     Event::Y(_) => stats.y_events += 1,
+                    Event::ToolType(_) => stats.tool_type_events += 1,
                     Event::SynDropped => stats.syn_dropped_events += 1,
                 }
             }
@@ -1484,6 +1664,11 @@ pub mod replay {
                 "ABS_MT_POSITION_X" => {
                     current.push(Event::x(parse_i32_value(line_number, name, parts.next())?))
                 }
+                "ABS_MT_TOOL_TYPE" => current.push(Event::tool_type(parse_i32_value(
+                    line_number,
+                    name,
+                    parts.next(),
+                )?)),
                 "ABS_MT_POSITION_Y" => {
                     current.push(Event::y(parse_i32_value(line_number, name, parts.next())?))
                 }
