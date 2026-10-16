@@ -163,7 +163,7 @@ pub(super) fn proxy(args: &ProxyArgs) -> Result<(), String> {
         device_path: device,
         limit: ProxyRunLimit::Frames {
             frame_boundaries: args.frames,
-            stop_after_limit: match args.mode {
+            stop_after_limit: match args.mode() {
                 ProxyMode::DryRun => StopAfterFrameLimit::Immediately,
                 ProxyMode::UinputGrab => StopAfterFrameLimit::WhenIdle,
             },
@@ -171,7 +171,7 @@ pub(super) fn proxy(args: &ProxyArgs) -> Result<(), String> {
         edge_widths: profile.edge_widths,
         engine_options: profile.engine_options,
         slider_specs: profile.slider_specs,
-        mode: args.mode,
+        mode: args.mode(),
     })?;
     print_proxy_summary(&summary);
     Ok(())

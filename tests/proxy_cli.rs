@@ -21,7 +21,7 @@ fn proxy_cli_requires_frames_and_mode() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("edgepad proxy --frames N (--dry-run | --uinput --grab)"),
+        stderr.contains("Usage: edgepad proxy"),
         "stderr was: {stderr}"
     );
 }
@@ -69,7 +69,7 @@ fn proxy_cli_requires_mode_before_device_open() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("proxy requires either --dry-run or --uinput --grab"),
+        stderr.contains("the following required arguments were not provided"),
         "stderr was: {stderr}"
     );
 }
@@ -95,7 +95,7 @@ fn proxy_cli_rejects_uinput_without_grab_before_device_open() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("proxy --uinput requires --grab"),
+        stderr.contains("the following required arguments were not provided:\n  --grab"),
         "stderr was: {stderr}"
     );
     assert!(
@@ -125,7 +125,8 @@ fn proxy_cli_rejects_grab_without_uinput_before_device_open() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("proxy --grab requires --uinput"),
+        stderr.contains("the following required arguments were not provided")
+            && stderr.contains("--uinput"),
         "stderr was: {stderr}"
     );
     assert!(
@@ -185,7 +186,7 @@ fn proxy_cli_rejects_no_grab_mode() {
     assert!(!output.status.success(), "--no-grab should not exist");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unknown proxy option --no-grab"),
+        stderr.contains("unexpected argument '--no-grab'"),
         "stderr was: {stderr}"
     );
 }
@@ -396,7 +397,7 @@ fn proxy_cli_rejects_config_with_built_in_defaults() {
     assert!(!output.status.success(), "conflicting profiles should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("proxy --config and --built-in-defaults are mutually exclusive"),
+        stderr.contains("the argument '--config <FILE>' cannot be used with '--built-in-defaults'"),
         "stderr was: {stderr}"
     );
 }

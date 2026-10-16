@@ -11,9 +11,16 @@ use edgepad::config::{
 use edgepad::core::{EdgeWidths, EngineOptions, SliderSpec};
 use edgepad::proxy::DEFAULT_EDGE_WIDTH;
 
-#[derive(Default)]
+pub(super) const CONFIG_PATH_HELP: &str =
+    "TOML config path [default: $XDG_CONFIG_HOME/edgepad/edgepad.toml or ~/.config/edgepad/edgepad.toml]";
+
+#[derive(Debug, Default, clap::Args)]
+#[group(multiple = true)]
 pub(super) struct RecognitionProfileArgs {
+    #[arg(long = "config", value_name = "FILE", help = CONFIG_PATH_HELP, conflicts_with = "built_in_defaults")]
     pub(super) config_path: Option<PathBuf>,
+    /// Use the built-in recognizer profile instead of a config
+    #[arg(long)]
     pub(super) built_in_defaults: bool,
 }
 
@@ -77,9 +84,14 @@ impl RecognitionProfile {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, clap::Args)]
+#[group(multiple = true)]
 pub(super) struct DaemonConfigOverrides {
+    /// Override touchpad device selection from config (auto or event node)
+    #[arg(long, value_name = "DEVICE")]
     pub(super) device: Option<DeviceConfig>,
+    /// Override edge zone width as a fraction of the touchpad axis
+    #[arg(long = "edge-width", value_name = "F", value_parser = edgepad::config::parse_edge_width)]
     pub(super) edge_width: Option<f32>,
 }
 

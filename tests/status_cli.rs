@@ -98,7 +98,7 @@ fn status_cli_rejects_unknown_option() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unknown status option --wat"),
+        stderr.contains("unexpected argument '--wat'"),
         "stderr was: {stderr}"
     );
 }

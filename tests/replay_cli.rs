@@ -654,7 +654,7 @@ fn replay_cli_rejects_config_with_built_in_defaults() {
     assert!(!output.status.success(), "conflicting profiles should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("replay --config and --built-in-defaults are mutually exclusive"),
+        stderr.contains("the argument '--config <FILE>' cannot be used with '--built-in-defaults'"),
         "stderr was: {stderr}"
     );
 }
