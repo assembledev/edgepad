@@ -1,5 +1,6 @@
 use super::*;
 use crate::diagnostics::ServiceState;
+use crate::doctor::DoctorReport;
 
 #[test]
 fn missing_stopped_and_failed_units_are_problems_while_starting_is_pending() {

@@ -1,9 +1,10 @@
 use crate::diagnostics::{command_output, observe_user_service, ServiceObservation};
 
-use super::{CheckStatus, DoctorCheck, DoctorReport, DoctorSection};
+use super::{CheckStatus, DoctorCheck, DoctorSection};
 
-pub(super) fn check_service(service_name: &str, report: &mut DoctorReport) {
-    let check = if check_systemd_user(report) {
+pub(super) fn check(service_name: &str) -> Vec<DoctorCheck> {
+    let manager = check_systemd_user();
+    let unit = if manager.status == CheckStatus::Ok {
         unit_check(service_name, observe_user_service(service_name))
     } else {
         DoctorCheck::new(
@@ -13,7 +14,7 @@ pub(super) fn check_service(service_name: &str, report: &mut DoctorReport) {
             "skipped because systemctl --user is not available",
         )
     };
-    report.checks.push(check);
+    vec![manager, unit]
 }
 
 fn unit_check(service_name: &str, observation: ServiceObservation) -> DoctorCheck {
@@ -58,36 +59,18 @@ fn unit_check(service_name: &str, observation: ServiceObservation) -> DoctorChec
     DoctorCheck::new(status, DoctorSection::Service, "unit", detail)
 }
 
-fn check_systemd_user(report: &mut DoctorReport) -> bool {
-    match command_output("systemctl", &["--user", "show-environment"]) {
+fn check_systemd_user() -> DoctorCheck {
+    let (status, detail) = match command_output("systemctl", &["--user", "show-environment"]) {
         Ok(output) if output.status_success => {
-            report.checks.push(DoctorCheck::new(
-                CheckStatus::Ok,
-                DoctorSection::Session,
-                "systemd",
-                "systemctl --user is available",
-            ));
-            true
+            (CheckStatus::Ok, "systemctl --user is available".to_string())
         }
-        Ok(output) => {
-            report.checks.push(DoctorCheck::new(
-                CheckStatus::Fail,
-                DoctorSection::Session,
-                "systemd",
-                format!("systemctl --user failed: {}", output.stderr_or_stdout()),
-            ));
-            false
-        }
-        Err(err) => {
-            report.checks.push(DoctorCheck::new(
-                CheckStatus::Fail,
-                DoctorSection::Session,
-                "systemd",
-                err,
-            ));
-            false
-        }
-    }
+        Ok(output) => (
+            CheckStatus::Fail,
+            format!("systemctl --user failed: {}", output.stderr_or_stdout()),
+        ),
+        Err(err) => (CheckStatus::Fail, err),
+    };
+    DoctorCheck::new(status, DoctorSection::Session, "systemd", detail)
 }
 
 #[cfg(test)]
