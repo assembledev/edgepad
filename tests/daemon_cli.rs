@@ -36,6 +36,10 @@ fn daemon_cli_accepts_explicit_device_before_device_open() {
         "daemon should parse arguments before device open, stderr was: {stderr}"
     );
     assert!(
+        stderr.contains("startup timed out"),
+        "missing device should enter startup retry policy, stderr was: {stderr}"
+    );
+    assert!(
         stderr.contains(&missing_device.display().to_string()),
         "stderr was: {stderr}"
     );
@@ -140,6 +144,49 @@ fn daemon_cli_times_out_startup_retry_with_clear_error() {
 
     std::fs::remove_file(config_path).expect("config should be removed");
     std::fs::remove_dir_all(root).expect("temp root should be removed");
+}
+
+#[test]
+fn daemon_cli_retries_failed_discovery_and_unreadable_event_nodes() {
+    let root = unique_temp_dir("edgepad-daemon-discovery-errors");
+    let config_path = root.join("edgepad.toml");
+    write_daemon_config(&config_path, "auto");
+    let unreadable_root = root.join("input");
+    std::fs::create_dir_all(&unreadable_root).expect("input root should be created");
+    std::fs::write(unreadable_root.join("event0"), "").expect("fake event node should be created");
+
+    for (input_root, diagnostic) in [
+        (&config_path, "failed to list "),
+        (
+            &unreadable_root,
+            "device=auto found no readable event devices",
+        ),
+    ] {
+        let output = edgepad()
+            .env("EDGEPAD_DAEMON_STARTUP_RETRY_MS", "0")
+            .arg("daemon")
+            .arg("--config")
+            .arg(&config_path)
+            .arg("--input-root")
+            .arg(input_root)
+            .output()
+            .expect("edgepad binary should run");
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("edgepad daemon startup timed out"),
+            "stderr was: {stderr}"
+        );
+        assert!(
+            stderr.contains(&format!("last error: {diagnostic}")),
+            "stderr was: {stderr}"
+        );
+        assert!(
+            stderr.contains(&input_root.display().to_string()),
+            "stderr was: {stderr}"
+        );
+    }
+    std::fs::remove_dir_all(root).expect("test files should be removed");
 }
 
 #[test]

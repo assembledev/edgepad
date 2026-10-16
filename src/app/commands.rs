@@ -156,7 +156,8 @@ pub(super) fn proxy(args: &ProxyArgs) -> Result<(), String> {
         .as_ref()
         .or(profile.device.as_ref())
         .ok_or_else(|| "proxy --built-in-defaults requires --device auto|<event-node>".to_string())?
-        .resolve(&args.input_root)?;
+        .resolve(&args.input_root)
+        .map_err(|err| err.to_string())?;
 
     print_recognition_profile(&profile);
     let summary = run_proxy(&ProxyRunConfig {
@@ -172,7 +173,8 @@ pub(super) fn proxy(args: &ProxyArgs) -> Result<(), String> {
         engine_options: profile.engine_options,
         slider_specs: profile.slider_specs,
         mode: args.mode(),
-    })?;
+    })
+    .map_err(|err| err.to_string())?;
     print_proxy_summary(&summary);
     Ok(())
 }

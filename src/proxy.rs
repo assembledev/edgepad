@@ -6,7 +6,7 @@
 //! in their output sink and action handler.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -31,6 +31,9 @@ use crate::uinput::{
     build_virtual_touchpad, UinputEventWriter, UinputRawOutputSink, VirtualTouchpadSpec,
 };
 use evdev::{raw_stream::RawDevice, AbsoluteAxisCode, PropType};
+
+mod error;
+pub use error::ProxyError;
 
 pub use crate::config::DEFAULT_EDGE_WIDTH;
 
@@ -356,7 +359,7 @@ impl GestureHandler for NoopGestureHandler {
     fn handle_gesture(&mut self, _gesture: Gesture) {}
 }
 
-pub fn run_proxy(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
+pub fn run_proxy(config: &ProxyRunConfig) -> Result<ProxyRunSummary, ProxyError> {
     let mut handler = NoopGestureHandler;
     run_proxy_with_gesture_handler(config, &mut handler)
 }
@@ -364,7 +367,7 @@ pub fn run_proxy(config: &ProxyRunConfig) -> Result<ProxyRunSummary, String> {
 pub fn run_proxy_with_gesture_handler<H>(
     config: &ProxyRunConfig,
     handler: &mut H,
-) -> Result<ProxyRunSummary, String>
+) -> Result<ProxyRunSummary, ProxyError>
 where
     H: GestureHandler,
 {
@@ -376,7 +379,7 @@ pub fn run_proxy_with_gesture_handler_and_ready<H, F>(
     config: &ProxyRunConfig,
     handler: &mut H,
     on_ready: &mut F,
-) -> Result<ProxyRunSummary, String>
+) -> Result<ProxyRunSummary, ProxyError>
 where
     H: GestureHandler,
     F: FnMut(&std::path::Path) -> Result<(), String>,
@@ -388,17 +391,17 @@ where
     }
 }
 
-fn validate_run_limit(limit: &ProxyRunLimit) -> Result<(), String> {
+fn validate_run_limit(limit: &ProxyRunLimit) -> Result<(), ProxyError> {
     match limit {
         ProxyRunLimit::Frames {
             frame_boundaries: 0,
             ..
-        } => Err("proxy frame limit must be a positive integer".to_string()),
+        } => Err(ProxyError::InvalidFrameLimit),
         _ => Ok(()),
     }
 }
 
-fn proxy_dry_run<H>(config: &ProxyRunConfig, handler: &mut H) -> Result<ProxyRunSummary, String>
+fn proxy_dry_run<H>(config: &ProxyRunConfig, handler: &mut H) -> Result<ProxyRunSummary, ProxyError>
 where
     H: GestureHandler,
 {
@@ -420,7 +423,8 @@ where
         &config.limit,
         &mut sink,
         handler,
-    )?;
+    )
+    .map_err(ProxyError::Runtime)?;
 
     Ok(ProxyRunSummary {
         mode: ProxyMode::DryRun,
@@ -436,7 +440,7 @@ fn proxy_uinput_grab<H, F>(
     config: &ProxyRunConfig,
     handler: &mut H,
     on_ready: &mut F,
-) -> Result<ProxyRunSummary, String>
+) -> Result<ProxyRunSummary, ProxyError>
 where
     H: GestureHandler,
     F: FnMut(&std::path::Path) -> Result<(), String>,
@@ -451,44 +455,33 @@ where
         config.engine_options.palm_rejection,
     );
     // Establish an output device before taking input away from the compositor.
-    let virtual_device = build_virtual_touchpad(&spec).map_err(|err| {
-        format!("failed to create virtual touchpad via /dev/uinput before grabbing physical device: {err}")
-    })?;
+    let virtual_device = build_virtual_touchpad(&spec)
+        .map_err(|source| ProxyError::CreateVirtualDevice { source })?;
     let mut sink = UinputRawOutputSink::new(virtual_device);
 
-    device.grab().map_err(|err| {
-        format!(
-            "failed to grab device {}: {err}",
-            config.device_path.display()
-        )
+    device.grab().map_err(|source| ProxyError::GrabDevice {
+        device_path: config.device_path.clone(),
+        source,
     })?;
     let initial_slot_snapshots =
         match read_slot_snapshots(&device, capabilities, config.engine_options.palm_rejection) {
             Ok(positions) => positions,
             Err(err) => {
-                let ungrab_result = device.ungrab().map_err(|ungrab_err| {
-                    format!(
-                        "failed to ungrab device {} after slot-state read failure: {ungrab_err}",
-                        config.device_path.display()
-                    )
-                });
-                return match ungrab_result {
-                    Ok(()) => Err(err),
-                    Err(ungrab_err) => Err(append_additional_error(err, ungrab_err)),
-                };
+                return combine_proxy_run_and_ungrab_result(
+                    Err(err),
+                    ungrab_proxy_device(
+                        &mut device,
+                        &config.device_path,
+                        Some("slot-state read failure"),
+                    ),
+                );
             }
         };
     if let Err(ready_err) = on_ready(&config.device_path) {
-        let ungrab_result = device.ungrab().map_err(|err| {
-            format!(
-                "failed to ungrab device {} after readiness failure: {err}",
-                config.device_path.display()
-            )
-        });
-        return match ungrab_result {
-            Ok(()) => Err(ready_err),
-            Err(ungrab_err) => Err(append_additional_error(ready_err, ungrab_err)),
-        };
+        return combine_proxy_run_and_ungrab_result(
+            Err(ProxyError::Readiness(ready_err)),
+            ungrab_proxy_device(&mut device, &config.device_path, Some("readiness failure")),
+        );
     }
     let run_result = run_proxy_loop(
         &mut device,
@@ -504,16 +497,12 @@ where
         &mut sink,
         handler,
     );
-    let settle_result = settle_after_uinput_proxy_run(capabilities, &mut sink, run_result);
+    let settle_result = settle_after_uinput_proxy_run(capabilities, &mut sink, run_result)
+        .map_err(ProxyError::Runtime);
     // Give the compositor time to consume neutral virtual state before the
     // physical device resumes delivery and the virtual device is dropped.
     std::thread::sleep(UINPUT_UNGRAB_SETTLE_DELAY);
-    let ungrab_result = device.ungrab().map_err(|err| {
-        format!(
-            "failed to ungrab device {}: {err}",
-            config.device_path.display()
-        )
-    });
+    let ungrab_result = ungrab_proxy_device(&mut device, &config.device_path, None);
     let stats = combine_proxy_run_and_ungrab_result(settle_result, ungrab_result)?;
 
     Ok(ProxyRunSummary {
@@ -526,46 +515,58 @@ where
     })
 }
 
-fn open_proxy_device(device_path: &std::path::Path) -> Result<(RawDevice, Capabilities), String> {
-    let device = RawDevice::open(device_path)
-        .map_err(|err| format!("failed to open device {}: {err}", device_path.display()))?;
-    let capabilities = capabilities_from_raw_device(&device).ok_or_else(|| {
-        format!(
-            "failed to read touchpad capabilities from {}; proxy needs ABS_MT_SLOT, ABS_MT_POSITION_X, and ABS_MT_POSITION_Y",
-            device_path.display()
-        )
+fn open_proxy_device(device_path: &Path) -> Result<(RawDevice, Capabilities), ProxyError> {
+    let device = RawDevice::open(device_path).map_err(|source| ProxyError::OpenDevice {
+        device_path: device_path.to_path_buf(),
+        source,
     })?;
+    let capabilities = capabilities_from_raw_device(&device)
+        .map_err(|source| ProxyError::CapabilitiesUnavailable {
+            device_path: device_path.to_path_buf(),
+            source: Some(source),
+        })?
+        .ok_or_else(|| ProxyError::CapabilitiesUnavailable {
+            device_path: device_path.to_path_buf(),
+            source: None,
+        })?;
     Ok((device, capabilities))
 }
 
 fn ensure_physical_touchpad_idle_at_start(
-    device_path: &std::path::Path,
+    device_path: &Path,
     device: &RawDevice,
     capabilities: Capabilities,
-) -> Result<(), String> {
+) -> Result<(), ProxyError> {
     if !physical_touch_is_down(device, Some(capabilities))
-        .map_err(|err| format!("failed to read current touch state before live proxy: {err}"))?
+        .map_err(|source| ProxyError::ReadTouchState { source })?
     {
         return Ok(());
     }
+    Err(ProxyError::TouchpadBusy {
+        device_path: device_path.to_path_buf(),
+    })
+}
 
-    Err(format!(
-        "touchpad is already touched on {}; release all fingers and retry live proxy",
-        device_path.display()
-    ))
+fn ungrab_proxy_device(
+    device: &mut RawDevice,
+    device_path: &Path,
+    after: Option<&'static str>,
+) -> Result<(), ProxyError> {
+    device.ungrab().map_err(|source| ProxyError::UngrabDevice {
+        device_path: device_path.to_path_buf(),
+        after,
+        source,
+    })
 }
 
 fn read_resync_slot_snapshot(
     device: &RawDevice,
     capabilities: Capabilities,
     palm_rejection: bool,
-) -> Result<(Vec<ResyncContact>, Vec<SlotSnapshot>), String> {
-    let tracking_ids = mt_slot_values(device, capabilities, ABS_MT_TRACKING_ID)
-        .map_err(|err| format!("failed to read current multitouch tracking IDs: {err}"))?;
-    let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)
-        .map_err(|err| format!("failed to read current multitouch X positions: {err}"))?;
-    let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)
-        .map_err(|err| format!("failed to read current multitouch Y positions: {err}"))?;
+) -> Result<(Vec<ResyncContact>, Vec<SlotSnapshot>), ProxyError> {
+    let tracking_ids = read_slot_values(device, capabilities, ABS_MT_TRACKING_ID, "tracking IDs")?;
+    let x_values = read_slot_values(device, capabilities, ABS_MT_POSITION_X, "X positions")?;
+    let y_values = read_slot_values(device, capabilities, ABS_MT_POSITION_Y, "Y positions")?;
     let tool_types = read_slot_tool_types(device, capabilities, palm_rejection)?;
     let contacts = resync_contacts_from_slot_values(
         capabilities,
@@ -582,11 +583,9 @@ fn read_slot_snapshots(
     device: &RawDevice,
     capabilities: Capabilities,
     palm_rejection: bool,
-) -> Result<Vec<SlotSnapshot>, String> {
-    let x_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_X)
-        .map_err(|err| format!("failed to read current multitouch X positions: {err}"))?;
-    let y_values = mt_slot_values(device, capabilities, ABS_MT_POSITION_Y)
-        .map_err(|err| format!("failed to read current multitouch Y positions: {err}"))?;
+) -> Result<Vec<SlotSnapshot>, ProxyError> {
+    let x_values = read_slot_values(device, capabilities, ABS_MT_POSITION_X, "X positions")?;
+    let y_values = read_slot_values(device, capabilities, ABS_MT_POSITION_Y, "Y positions")?;
     let tool_types = read_slot_tool_types(device, capabilities, palm_rejection)?;
     Ok(slot_snapshots_from_values(
         capabilities,
@@ -600,7 +599,7 @@ fn read_slot_tool_types(
     device: &RawDevice,
     capabilities: Capabilities,
     palm_rejection: bool,
-) -> Result<Option<Vec<i32>>, String> {
+) -> Result<Option<Vec<i32>>, ProxyError> {
     if !palm_rejection
         || !device
             .supported_absolute_axes()
@@ -608,9 +607,17 @@ fn read_slot_tool_types(
     {
         return Ok(None);
     }
-    mt_slot_values(device, capabilities, ABS_MT_TOOL_TYPE)
-        .map(Some)
-        .map_err(|err| format!("failed to read current multitouch tool types: {err}"))
+    read_slot_values(device, capabilities, ABS_MT_TOOL_TYPE, "tool types").map(Some)
+}
+
+fn read_slot_values(
+    device: &RawDevice,
+    capabilities: Capabilities,
+    axis_code: u16,
+    field: &'static str,
+) -> Result<Vec<i32>, ProxyError> {
+    mt_slot_values(device, capabilities, axis_code)
+        .map_err(|source| ProxyError::ReadSlotState { field, source })
 }
 
 fn slot_snapshots_from_values(
@@ -698,15 +705,15 @@ where
     }
 }
 
-fn combine_proxy_run_and_ungrab_result(
-    run_result: Result<ProxyRuntimeStats, String>,
-    ungrab_result: Result<(), String>,
-) -> Result<ProxyRuntimeStats, String> {
+fn combine_proxy_run_and_ungrab_result<T>(
+    run_result: Result<T, ProxyError>,
+    ungrab_result: Result<(), ProxyError>,
+) -> Result<T, ProxyError> {
     match (run_result, ungrab_result) {
-        (Ok(stats), Ok(())) => Ok(stats),
+        (Ok(value), Ok(())) => Ok(value),
         (Err(err), Ok(())) => Err(err),
         (Ok(_), Err(ungrab_err)) => Err(ungrab_err),
-        (Err(err), Err(ungrab_err)) => Err(append_additional_error(err, ungrab_err)),
+        (Err(err), Err(ungrab_err)) => Err(err.with_cleanup(ungrab_err)),
     }
 }
 
@@ -821,7 +828,8 @@ where
                         device,
                         config.capabilities,
                         config.engine_options.palm_rejection,
-                    )?;
+                    )
+                    .map_err(|err| err.to_string())?;
                     let pressed_physical_buttons = read_pressed_physical_buttons(device)?;
                     process_proxy_resync_contacts(
                         &contacts,
@@ -1422,6 +1430,7 @@ impl PhysicalTouchState {
 
 #[cfg(test)]
 mod tests {
+    mod errors;
     mod history;
 
     use super::*;
@@ -1971,15 +1980,20 @@ mod tests {
 
     #[test]
     fn post_grab_ungrab_error_is_reported_with_primary_failure() {
-        let result = combine_proxy_run_and_ungrab_result(
-            Err("proxy loop failed".to_string()),
-            Err("failed to ungrab device /dev/input/event5: EIO".to_string()),
+        let result = combine_proxy_run_and_ungrab_result::<ProxyRuntimeStats>(
+            Err(ProxyError::Runtime("proxy loop failed".to_string())),
+            Err(ProxyError::UngrabDevice {
+                device_path: PathBuf::from("/dev/input/event5"),
+                after: None,
+                source: std::io::Error::other("EIO"),
+            }),
         );
-
+        let err = result.expect_err("both failures should be reported");
         assert_eq!(
-            result.as_ref().err().map(String::as_str),
-            Some("proxy loop failed; additionally failed to ungrab device /dev/input/event5: EIO")
+            err.to_string(),
+            "proxy loop failed; additionally failed to ungrab device /dev/input/event5: EIO"
         );
+        assert!(matches!(err, ProxyError::WithCleanup { .. }));
     }
 
     #[test]
@@ -2129,13 +2143,13 @@ mod tests {
 
     #[test]
     fn frames_limit_rejects_zero_boundaries() {
-        assert_eq!(
+        assert!(matches!(
             validate_run_limit(&ProxyRunLimit::Frames {
                 frame_boundaries: 0,
                 stop_after_limit: StopAfterFrameLimit::Immediately,
             }),
-            Err("proxy frame limit must be a positive integer".to_string())
-        );
+            Err(ProxyError::InvalidFrameLimit)
+        ));
     }
 
     #[test]

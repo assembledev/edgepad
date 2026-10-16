@@ -26,7 +26,10 @@ pub(super) fn run() -> Result<i32, String> {
         Command::Doctor(args) => doctor(&args.into()),
         Command::Status(args) => status(&args.into()),
         Command::Dump(args) => {
-            let device_path = args.device.resolve(&args.input_root)?;
+            let device_path = args
+                .device
+                .resolve(&args.input_root)
+                .map_err(|err| err.to_string())?;
             dump(&device_path, &args.out, args.frames, args.raw).map(|()| 0)
         }
         Command::Proxy(args) => proxy(&args).map(|()| 0),

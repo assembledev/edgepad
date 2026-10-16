@@ -12,10 +12,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use edgepad::actions::{ActionDispatcher, ActionDispatcherStats};
-use edgepad::config::{DeviceConfig, EdgepadConfig};
+use edgepad::config::{DeviceConfig, DeviceResolveError, EdgepadConfig};
 use edgepad::proxy::{
-    run_proxy_with_gesture_handler_and_ready, GestureHandler, ProxyMode, ProxyRecognitionConfig,
-    ProxyRunConfig, ProxyRunLimit, ProxyRunSummary, StopToken,
+    run_proxy_with_gesture_handler_and_ready, GestureHandler, ProxyError, ProxyMode,
+    ProxyRecognitionConfig, ProxyRunConfig, ProxyRunLimit, ProxyRunSummary, StopToken,
 };
 
 use super::cli::DaemonArgs;
@@ -36,6 +36,74 @@ const DAEMON_STARTUP_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const DAEMON_ACTION_QUEUE_CAPACITY: usize = 32;
 
 const DAEMON_STARTUP_RETRY_ENV: &str = "EDGEPAD_DAEMON_STARTUP_RETRY_MS";
+
+#[derive(Debug)]
+enum DaemonStartupError {
+    Device(DeviceResolveError),
+    Proxy(ProxyError),
+}
+
+impl DaemonStartupError {
+    fn should_retry(&self) -> bool {
+        match self {
+            Self::Device(err) => match err {
+                DeviceResolveError::Discovery { .. }
+                | DeviceResolveError::NoEventDevices { .. }
+                | DeviceResolveError::NoReadableEventDevices { .. }
+                | DeviceResolveError::NoTouchpadCandidates { .. } => true,
+                DeviceResolveError::AmbiguousTouchpads { .. } => false,
+            },
+            Self::Proxy(err) => Self::should_retry_proxy(err),
+        }
+    }
+
+    fn should_retry_proxy(err: &ProxyError) -> bool {
+        match err {
+            ProxyError::OpenDevice { .. }
+            | ProxyError::CapabilitiesUnavailable { .. }
+            | ProxyError::CreateVirtualDevice { .. }
+            | ProxyError::GrabDevice { .. } => true,
+            ProxyError::InvalidFrameLimit
+            | ProxyError::ReadTouchState { .. }
+            | ProxyError::TouchpadBusy { .. }
+            | ProxyError::ReadSlotState { .. }
+            | ProxyError::Readiness(_)
+            | ProxyError::Runtime(_)
+            | ProxyError::UngrabDevice { .. } => false,
+            ProxyError::WithCleanup { primary, .. } => Self::should_retry_proxy(primary),
+        }
+    }
+}
+
+impl From<DeviceResolveError> for DaemonStartupError {
+    fn from(err: DeviceResolveError) -> Self {
+        Self::Device(err)
+    }
+}
+
+impl From<ProxyError> for DaemonStartupError {
+    fn from(err: ProxyError) -> Self {
+        Self::Proxy(err)
+    }
+}
+
+impl std::fmt::Display for DaemonStartupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Device(err) => err.fmt(f),
+            Self::Proxy(err) => err.fmt(f),
+        }
+    }
+}
+
+impl std::error::Error for DaemonStartupError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Device(err) => Some(err),
+            Self::Proxy(err) => Some(err),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 struct ReloadToken {
@@ -229,7 +297,8 @@ fn run_daemon_proxy_with_startup_retry(
         let _ = runtime.apply_pending_reload();
         let config = runtime.active_config().clone();
 
-        let run_result = config.device.resolve(input_root).and_then(|device_path| {
+        let run_result: Result<_, DaemonStartupError> = (|| {
+            let device_path = config.device.resolve(input_root)?;
             let edge_widths = config.active_edge_widths();
             if last_announced_device.as_ref() != Some(&device_path) {
                 eprintln!(
@@ -242,7 +311,7 @@ fn run_daemon_proxy_with_startup_retry(
                 last_announced_device = Some(device_path.clone());
             }
 
-            run_proxy_with_gesture_handler_and_ready(
+            Ok(run_proxy_with_gesture_handler_and_ready(
                 &ProxyRunConfig {
                     device_path,
                     limit: ProxyRunLimit::UntilStopped {
@@ -264,12 +333,12 @@ fn run_daemon_proxy_with_startup_retry(
                     }
                     Ok(())
                 },
-            )
-        });
+            )?)
+        })();
 
         match run_result {
             Ok(summary) => return Ok(Some(summary)),
-            Err(err) if should_retry_daemon_startup_error(&err) => {
+            Err(err) if err.should_retry() => {
                 let elapsed = started_at.elapsed();
                 if startup_retry_timeout == Duration::ZERO || elapsed >= startup_retry_timeout {
                     return Err(format!(
@@ -293,7 +362,7 @@ fn run_daemon_proxy_with_startup_retry(
                     return Ok(None);
                 }
             }
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.to_string()),
         }
     }
 }
@@ -308,19 +377,6 @@ fn wait_for_daemon_startup_retry(stop: &StopToken, delay: Duration) -> bool {
         thread::sleep(DAEMON_SIGNAL_POLL_INTERVAL.min(remaining));
     }
     !stop.is_stopped()
-}
-
-fn should_retry_daemon_startup_error(err: &str) -> bool {
-    err.starts_with("device=auto found no event devices")
-        || err.starts_with("device=auto found no readable event devices")
-        || err.starts_with("device=auto found no touchpad candidates")
-        || err.starts_with("failed to list ")
-        || err.starts_with("failed to open device ")
-        || err.starts_with("failed to read touchpad capabilities from ")
-        || err.starts_with(
-            "failed to create virtual touchpad via /dev/uinput before grabbing physical device",
-        )
-        || err.starts_with("failed to grab device ")
 }
 
 #[cfg(test)]

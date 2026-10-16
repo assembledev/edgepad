@@ -49,7 +49,8 @@ pub(super) fn dump(
     let file = File::create(out_path)
         .map_err(|err| format!("failed to create {}: {err}", out_path.display()))?;
     let mut writer = LineWriter::new(file);
-    let capabilities = capabilities_from_raw_device(&device);
+    // Axis metadata is optional in capture files.
+    let capabilities = capabilities_from_raw_device(&device).ok().flatten();
     write_capture_header(&mut writer, device_path, capabilities)
         .map_err(|err| format!("failed to write {}: {err}", out_path.display()))?;
     let mut total = WriteEventsResult::default();

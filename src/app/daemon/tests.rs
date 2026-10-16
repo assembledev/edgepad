@@ -23,24 +23,7 @@ fn daemon_startup_retry_timeout_env_parses_millis() {
     assert!(parse_daemon_startup_retry_timeout_ms("wat").is_err());
 }
 
-#[test]
-fn daemon_startup_retry_classifies_boot_race_errors() {
-    assert!(should_retry_daemon_startup_error(
-        "device=auto found no readable event devices under /dev/input"
-    ));
-    assert!(should_retry_daemon_startup_error(
-        "failed to open device /dev/input/event7: Permission denied"
-    ));
-    assert!(should_retry_daemon_startup_error(
-            "failed to create virtual touchpad via /dev/uinput before grabbing physical device: Permission denied"
-        ));
-    assert!(!should_retry_daemon_startup_error(
-        "device=auto matched multiple touchpad candidates under /dev/input"
-    ));
-    assert!(!should_retry_daemon_startup_error(
-            "touchpad is already touched on /dev/input/event7; release all fingers and retry live proxy"
-        ));
-}
+mod startup;
 
 #[test]
 fn daemon_reload_applies_valid_config_and_preserves_cli_overrides() {

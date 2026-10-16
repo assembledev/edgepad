@@ -20,7 +20,7 @@ mod validation;
 pub use bindings::{
     CommandActionConfig, GestureActionConfig, GestureBindingConfig, SliderBindingConfig,
 };
-pub use device::DeviceConfig;
+pub use device::{DeviceConfig, DeviceResolveError};
 pub use validation::parse_edge_width;
 
 pub const DEFAULT_EDGE_WIDTH: f32 = 0.10;
