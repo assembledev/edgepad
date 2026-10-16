@@ -373,6 +373,7 @@ fn route_resync_contacts_rebuilds_kernel_snapshot_as_passthrough() {
             tracking_id: 200,
             x: 20,
             y: 300,
+            tool_type: None,
         }],
     )
     .expect("resync snapshot should route");

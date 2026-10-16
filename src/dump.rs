@@ -36,25 +36,38 @@ pub fn write_capture_header(
     Ok(())
 }
 
-pub fn capabilities_from_raw_device(device: &RawDevice) -> Option<Capabilities> {
-    let slot = axis_info(device, AbsoluteAxisCode::ABS_MT_SLOT)?;
-    let x = axis_info(device, AbsoluteAxisCode::ABS_MT_POSITION_X)?;
-    let y = axis_info(device, AbsoluteAxisCode::ABS_MT_POSITION_Y)?;
-
-    Some(Capabilities {
-        slot_min: slot.min,
-        slot_max: slot.max,
-        x,
-        y,
-    })
-}
-
-fn axis_info(device: &RawDevice, wanted: AbsoluteAxisCode) -> Option<AxisRange> {
-    device.get_absinfo().ok()?.find_map(|(axis, info)| {
-        (axis == wanted).then_some(AxisRange {
+/// Read the multitouch slot and position ranges.
+///
+/// Returns `Ok(None)` if ABS_MT_SLOT, ABS_MT_POSITION_X, or ABS_MT_POSITION_Y
+/// is missing.
+///
+/// # Errors
+///
+/// Returns errors from the kernel's absolute-axis query.
+pub fn capabilities_from_raw_device(device: &RawDevice) -> io::Result<Option<Capabilities>> {
+    let mut slot = None;
+    let mut x = None;
+    let mut y = None;
+    for (axis, info) in device.get_absinfo()? {
+        let range = AxisRange {
             min: info.minimum(),
             max: info.maximum(),
-        })
+        };
+        match axis {
+            AbsoluteAxisCode::ABS_MT_SLOT => slot = Some(range),
+            AbsoluteAxisCode::ABS_MT_POSITION_X => x = Some(range),
+            AbsoluteAxisCode::ABS_MT_POSITION_Y => y = Some(range),
+            _ => {}
+        }
+    }
+    Ok(match (slot, x, y) {
+        (Some(slot), Some(x), Some(y)) => Some(Capabilities {
+            slot_min: slot.min,
+            slot_max: slot.max,
+            x,
+            y,
+        }),
+        _ => None,
     })
 }
 
@@ -68,6 +81,9 @@ pub fn fixture_line_for_event(event: InputEvent) -> io::Result<Option<String>> {
         }
         EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_X, value) => {
             Some(format!("ABS_MT_POSITION_X {value}"))
+        }
+        EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_TOOL_TYPE, value) => {
+            Some(format!("ABS_MT_TOOL_TYPE {value}"))
         }
         EventSummary::AbsoluteAxis(_, AbsoluteAxisCode::ABS_MT_POSITION_Y, value) => {
             Some(format!("ABS_MT_POSITION_Y {value}"))

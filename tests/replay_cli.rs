@@ -1,3 +1,6 @@
+#[path = "replay_cli/metadata.rs"]
+mod metadata;
+
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -651,7 +654,7 @@ fn replay_cli_rejects_config_with_built_in_defaults() {
     assert!(!output.status.success(), "conflicting profiles should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("replay --config and --built-in-defaults are mutually exclusive"),
+        stderr.contains("the argument '--config <FILE>' cannot be used with '--built-in-defaults'"),
         "stderr was: {stderr}"
     );
 }
@@ -671,4 +674,44 @@ fn tap_fixture(released_at_us: u64) -> String {
 
 fn unique_temp_path(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{}-{}", prefix, std::process::id()))
+}
+
+#[test]
+fn replay_raw_applies_palm_rejection_from_config() {
+    let config = unique_temp_path("edgepad-palm-rejection.toml");
+    for enabled in [true, false] {
+        fs::write(
+            &config,
+            format!(
+                r#"
+palm_rejection = {enabled}
+[[gestures]]
+zone = "right"
+direction = "down"
+action = {{ log = true }}
+"#
+            ),
+        )
+        .unwrap();
+        let output = edgepad()
+            .arg("replay-raw")
+            .arg(fixture("palm-classification.raw.ev"))
+            .arg("--config")
+            .arg(&config)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(&format!("palm_rejection={enabled}")));
+        if enabled {
+            assert!(stdout.contains("gestures: 0"));
+        } else {
+            assert!(stdout.contains("gestures: 3"));
+        }
+    }
+    fs::remove_file(config).unwrap();
 }

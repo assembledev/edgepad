@@ -63,6 +63,43 @@ download() {
     curl -fsSL --retry 3 -o "$out" "$url"
 }
 
+render_user_service() {
+    # ExecStart expands both % specifiers and $ variables after unquoting.
+    EDGEPAD_SERVICE_CONFIG="$CONFIG_FILE" awk '
+        function quote_argument(value, result, i, character) {
+            result = "\""
+            for (i = 1; i <= length(value); i++) {
+                character = substr(value, i, 1)
+                if (character == "\\" || character == "\"")
+                    result = result "\\" character
+                else if (character == "%" || character == "$")
+                    result = result character character
+                else if (character == "\n")
+                    result = result "\\n"
+                else if (character == "\r")
+                    result = result "\\r"
+                else if (character == "\t")
+                    result = result "\\t"
+                else
+                    result = result character
+            }
+            return result "\""
+        }
+        /^ExecStart=/ {
+            print "ExecStart=%h/.local/bin/edgepad daemon --config " quote_argument(ENVIRON["EDGEPAD_SERVICE_CONFIG"])
+            found = 1
+            next
+        }
+        { print }
+        END {
+            if (!found) {
+                print "error: downloaded edgepad.service has no ExecStart" > "/dev/stderr"
+                exit 1
+            }
+        }
+    ' "$1"
+}
+
 sudo_run() {
     sudo "$@"
 }
@@ -130,8 +167,10 @@ print_install_dry_run_plan() {
         info "  ${tmp_dir}/edgepad.toml.example -> ${CONFIG_FILE}"
     fi
     info ""
-    info "Would copy systemd user service to:"
-    info "  ${tmp_dir}/edgepad.service -> ${SERVICE_FILE}"
+    info "Would configure the systemd user service to read:"
+    info "  ${CONFIG_FILE}"
+    info "Would install systemd user service to:"
+    info "  ${SERVICE_FILE}"
     info "Would run:"
     info "  systemctl --user daemon-reload"
     info "  systemctl --user enable edgepad.service"
@@ -139,7 +178,7 @@ print_install_dry_run_plan() {
     info "  systemctl --user is-active --quiet edgepad.service"
     info ""
     info "Would run:"
-    info "  ${BIN_DIR}/edgepad doctor"
+    info "  ${BIN_DIR}/edgepad doctor --config ${CONFIG_FILE}"
     info ""
     info "Dry run complete; no files were downloaded or changed."
 }
@@ -265,6 +304,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
     need_command curl
     need_command install
     need_command sha256sum
+    need_command awk
     need_command sudo
     need_command systemctl
     need_command udevadm
@@ -294,6 +334,7 @@ download "${release_base}/edgepad.toml.example" "${tmp_dir}/edgepad.toml.example
 download "${release_base}/checksums" "${tmp_dir}/checksums"
 
 (cd "$tmp_dir" && sha256sum -c checksums)
+render_user_service "${tmp_dir}/edgepad.service" > "${tmp_dir}/edgepad.service.configured"
 
 run install -Dm0755 "${tmp_dir}/${asset}" "${BIN_DIR}/edgepad"
 sudo_run install -Dm0644 "${tmp_dir}/70-edgepad.rules" "$UDEV_RULE_FILE"
@@ -307,11 +348,11 @@ else
     run install -Dm0644 "${tmp_dir}/edgepad.toml.example" "$CONFIG_FILE"
 fi
 
-run install -Dm0644 "${tmp_dir}/edgepad.service" "$SERVICE_FILE"
+run install -Dm0644 "${tmp_dir}/edgepad.service.configured" "$SERVICE_FILE"
 run systemctl --user daemon-reload
 run systemctl --user enable edgepad.service
 run systemctl --user restart edgepad.service
 run systemctl --user is-active --quiet edgepad.service
-run "${BIN_DIR}/edgepad" doctor
+run "${BIN_DIR}/edgepad" doctor --config "$CONFIG_FILE"
 
 info "edgepad installed"

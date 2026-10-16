@@ -127,6 +127,7 @@ let
       double_tap_timeout_ms = cfg.doubleTapTimeoutMs;
       double_tap_max_distance = cfg.doubleTapMaxDistance;
       swipe_min_distance = cfg.swipeMinDistance;
+      palm_rejection = cfg.palmRejection;
       gestures = map (gesture: {
         inherit (gesture) zone direction action;
       }) cfg.gestures;
@@ -156,6 +157,12 @@ in
       default = "auto";
       example = "/dev/input/event7";
       description = "`auto` or an explicit /dev/input/eventX path.";
+    };
+
+    palmRejection = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = "Reject firmware-labeled palm contacts. Changes restart the service.";
     };
 
     edgeWidth = lib.mkOption {
@@ -274,6 +281,7 @@ in
         After = [ "graphical-session.target" ];
         PartOf = [ "graphical-session.target" ];
         "X-Reload-Triggers" = [ configFile ];
+        "X-Restart-Triggers" = [ "palm_rejection=${lib.boolToString cfg.palmRejection}" ];
       };
 
       Service = {

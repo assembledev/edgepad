@@ -182,7 +182,8 @@ fn live_proxy_recognizes_double_tap_from_real_uinput_frames() -> Result<(), Stri
 
     let summary = proxy
         .join()
-        .map_err(|_| "live proxy thread panicked".to_string())??;
+        .map_err(|_| "live proxy thread panicked".to_string())?
+        .map_err(|err| err.to_string())?;
     let gesture = gesture_receiver
         .recv_timeout(Duration::from_secs(2))
         .map_err(|err| {
@@ -235,7 +236,8 @@ fn live_proxy_releases_single_tap_on_idle_deadline() -> Result<(), String> {
 
     let summary = proxy
         .join()
-        .map_err(|_| "live proxy thread panicked".to_string())??;
+        .map_err(|_| "live proxy thread panicked".to_string())?
+        .map_err(|err| err.to_string())?;
     let gesture = gesture_receiver
         .recv_timeout(Duration::from_secs(2))
         .map_err(|err| {

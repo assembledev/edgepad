@@ -4,6 +4,27 @@
 
 The live path reads a physical touchpad, claims contacts that start inside configured edge zones, and forwards unclaimed contacts through `/dev/uinput`. The compositor still sees one touchpad stream: edge gestures become actions, center touches remain pointer input.
 
+## Firmware palm rejection
+
+Palm rejection prevents accidental edge gestures and slider actions caused by
+your palm brushing the touchpad while typing. It relies on the touchpad's palm
+classification.
+
+`palm_rejection` is enabled by default. Set `palm_rejection = false` and restart
+the service to restore contact handling without palm classification.
+
+When a touchpad reports `ABS_MT_TOOL_TYPE = MT_TOOL_PALM` (value 2), edgepad
+excludes the contact from gesture recognition until lift. This cancels pending
+recognition and stops further slider steps for that contact.
+
+Classification applies to the complete input frame; previously emitted slider
+steps remain applied. A valid first tap keeps its normal timeout when a second
+contact becomes a palm.
+
+For passthrough contacts, edgepad forwards tool type and advertises the physical
+axis on the virtual device for libinput. Tool type is retained across slot reuse
+and read from the kernel at startup and after dropped events.
+
 ## Modes
 
 The bounded `proxy` uses the recognizer profile from the default user config. `--config <file>`

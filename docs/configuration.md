@@ -3,6 +3,8 @@
 Edgepad reads `~/.config/edgepad/edgepad.toml`, or
 `$XDG_CONFIG_HOME/edgepad/edgepad.toml` when that variable is set. Use
 `edgepad daemon --config <file>` to select another file for a foreground run.
+The release installer records the resolved config path in the user service. If you
+change `XDG_CONFIG_HOME`, run the installer again to update that path.
 For declarative configuration, see the [Home Manager setup](nix.md).
 
 The [example config](../examples/edgepad.toml.example) has bindings for all four
@@ -86,6 +88,19 @@ edge. `left_edge_width`, `right_edge_width`, `top_edge_width`, and
 `bottom_edge_width` override individual edges. Omitted overrides use `edge_width`.
 Only edges with bindings reserve space for gestures.
 
+## Palm rejection
+
+`palm_rejection` defaults to `true`. It is a top-level setting, placed above
+the first `[[gestures]]` or `[[sliders]]` header. In TOML, keys after a header
+belong to that section.
+
+```toml
+palm_rejection = false
+```
+
+Setting it to `false` restores contact handling without palm classification.
+Restart the service after changing this setting.
+
 ## Tap and swipe sensitivity
 
 These are also top-level settings, placed before the binding tables. Distances
@@ -122,7 +137,7 @@ journalctl --user -u edgepad.service -b
 ```
 
 A reload waits for active touches and pending tap sequences to finish. Changing
-`device` requires `systemctl --user restart edgepad.service`.
+`device` or `palm_rejection` requires `systemctl --user restart edgepad.service`.
 
 Home Manager applies recognition and binding changes with a reload when you
-activate the new generation. Package or device changes restart the service.
+activate the new generation. Package, device, or palm-rejection changes restart the service.

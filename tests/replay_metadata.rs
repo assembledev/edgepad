@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use edgepad::core::{AxisRange, Capabilities, Event};
+use edgepad::raw::{parse_raw_dump_file, RawParseError};
 use edgepad::replay::{parse_replay_file, ReplayError, ReplayFrame};
 
 #[test]
@@ -80,4 +81,95 @@ fn parse_replay_file_rejects_invalid_metadata_range() {
             value: "nope".to_string(),
         }
     );
+}
+
+#[test]
+fn replay_formats_reject_invalid_capability_ranges_with_matching_context() {
+    for (index, field) in ["slots", "x", "y"].into_iter().enumerate() {
+        for value in [
+            "4..=0",
+            "nope",
+            "0..=2147483648",
+            "-2147483649..=0",
+            "1..=2..=3",
+        ] {
+            let mut ranges = ["0..=4", "10..=1210", "20..=820"];
+            ranges[index] = value;
+            let input = format!(
+                "# capture metadata\n# slots: {}\n# x: {}\n# y: {}\n",
+                ranges[0], ranges[1], ranges[2]
+            );
+            let line = index + 2;
+
+            assert_eq!(
+                parse_replay_file(&input),
+                Err(ReplayError::InvalidMetadata {
+                    line,
+                    name: field.to_string(),
+                    value: value.to_string(),
+                }),
+                "parsed replay should reject {field}={value}"
+            );
+            assert_eq!(
+                parse_raw_dump_file(&input),
+                Err(RawParseError::InvalidMetadataRange {
+                    line,
+                    field,
+                    value: value.to_string(),
+                }),
+                "raw replay should reject {field}={value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn replay_formats_preserve_valid_capability_headers() {
+    let input = "\
+# unrelated: ignored
+   # slots: 3..=5
+# x: -1000..=1000
+# y: 42..=42
+# x: -500..=1500
+";
+    let expected = Some(Capabilities {
+        slot_min: 3,
+        slot_max: 5,
+        x: AxisRange {
+            min: -500,
+            max: 1500,
+        },
+        y: AxisRange { min: 42, max: 42 },
+    });
+
+    assert_eq!(
+        parse_replay_file(input)
+            .expect("valid parsed header should load")
+            .capabilities,
+        expected
+    );
+    assert_eq!(
+        parse_raw_dump_file(input)
+            .expect("valid raw header should load")
+            .capabilities,
+        expected
+    );
+}
+
+#[test]
+fn replay_formats_require_all_fields_when_capability_metadata_is_present() {
+    for (input, field) in [
+        ("# x: 10..=1210\n# y: 20..=820\n", "slots"),
+        ("# slots: 0..=4\n# y: 20..=820\n", "x"),
+        ("# slots: 0..=4\n# x: 10..=1210\n", "y"),
+    ] {
+        assert_eq!(
+            parse_replay_file(input),
+            Err(ReplayError::MissingMetadataField { field })
+        );
+        assert_eq!(
+            parse_raw_dump_file(input),
+            Err(RawParseError::MissingMetadataField { field })
+        );
+    }
 }

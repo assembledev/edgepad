@@ -1,6 +1,6 @@
 use edgepad::raw::{
-    RawEvent, RawOutputSink, ABS_MT_POSITION_X, ABS_MT_TRACKING_ID, ABS_X, EV_ABS, EV_SYN,
-    SYN_REPORT,
+    RawEvent, RawFrame, RawOutputSink, ABS_MT_POSITION_X, ABS_MT_TRACKING_ID, ABS_X, EV_ABS,
+    EV_SYN, SYN_REPORT,
 };
 use edgepad::uinput::{UinputEventWriter, UinputRawOutputSink, UinputRawSinkError};
 use evdev::InputEvent;
@@ -88,4 +88,33 @@ fn uinput_sink_propagates_writer_errors() {
         sink.sync(),
         Err(UinputRawSinkError::Emit(TestWriterError("emit failed")))
     );
+}
+
+#[test]
+fn frame_writer_batches_each_nonempty_frame_without_adding_syn_report() {
+    let mut sink = UinputRawOutputSink::new(RecordingWriter::default());
+    let down = RawFrame::new(vec![
+        RawEvent::abs_mt_tracking_id(100),
+        RawEvent::abs_mt_position_x(500),
+        RawEvent::abs_x(500),
+    ]);
+    let up = RawFrame::new(vec![RawEvent::abs_mt_tracking_id(-1)]);
+    sink.write_frame(&down).unwrap();
+    sink.write_frame(&RawFrame::default()).unwrap();
+    sink.write_frame(&up).unwrap();
+    let batches = sink.into_inner().batches;
+    assert_eq!(batches.len(), 2);
+    for (batch, frame) in batches.iter().zip([down, up]) {
+        assert_eq!(
+            event_triples(batch),
+            frame
+                .events
+                .iter()
+                .map(|event| (event.kind, event.code, event.value))
+                .collect::<Vec<_>>(),
+        );
+        assert!(!batch
+            .iter()
+            .any(|event| event.event_type().0 == EV_SYN && event.code() == SYN_REPORT));
+    }
 }

@@ -741,6 +741,7 @@ fn restored_contact_is_passthrough_until_release_even_when_it_is_on_an_edge() {
             tracking_id: 42,
             x: 20,
             y: 300,
+            tool_type: None,
         }])
         .expect("kernel snapshot should restore the active contact");
 

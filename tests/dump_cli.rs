@@ -17,7 +17,7 @@ fn dump_cli_requires_device_and_out_arguments() {
     assert!(!output.status.success(), "dump without --out should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]"),
+        stderr.contains("the following required arguments were not provided:\n  --out <FILE>"),
         "stderr was: {stderr}"
     );
 }
@@ -215,7 +215,7 @@ fn dump_cli_rejects_unknown_dump_flag_before_device_open() {
     assert!(!output.status.success(), "unknown dump flag should fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("edgepad dump --device auto|<event-node> --out <file.ev> [--input-root <input-root>] [--frames N] [--raw]"),
+        stderr.contains("unexpected argument '--wat'"),
         "stderr was: {stderr}"
     );
     assert!(
