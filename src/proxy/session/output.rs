@@ -132,12 +132,8 @@ where
 
     stats.composed_frames += 1;
     stats.composed_events += output_frame.events.len();
-    for event in output_frame.events {
-        sink.emit(event)
-            .map_err(|err| format!("proxy output emit failed: {err:?}"))?;
-    }
-    sink.sync()
-        .map_err(|err| format!("proxy output sync failed: {err:?}"))?;
+    sink.write_frame(&output_frame)
+        .map_err(|err| format!("proxy output {err}"))?;
 
     Ok(())
 }
@@ -163,12 +159,8 @@ where
     stats.composed_events += event_count;
     stats.cleanup_output_frames += 1;
     stats.cleanup_output_events += event_count;
-    for event in output_frame.events {
-        sink.emit(event)
-            .map_err(|err| format!("proxy output cleanup emit failed: {err:?}"))?;
-    }
-    sink.sync()
-        .map_err(|err| format!("proxy output cleanup sync failed: {err:?}"))?;
+    sink.write_frame(&output_frame)
+        .map_err(|err| format!("proxy output cleanup {err}"))?;
 
     Ok(())
 }

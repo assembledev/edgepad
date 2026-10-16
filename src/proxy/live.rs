@@ -7,8 +7,8 @@ use crate::core::{Capabilities, ResyncContact, SlotSnapshot};
 use crate::device::{mt_slot_values, physical_touch_is_down, wait_for_raw_device_events};
 use crate::dump::capabilities_from_raw_device;
 use crate::raw::{
-    is_pointer_button_code, RawEvent, RawOutputSink, RecordingRawOutputSink, ABS_MT_POSITION_X,
-    ABS_MT_POSITION_Y, ABS_MT_TOOL_TYPE, ABS_MT_TRACKING_ID,
+    is_pointer_button_code, RawEvent, RawFrame, RawOutputSink, RecordingRawOutputSink,
+    ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TOOL_TYPE, ABS_MT_TRACKING_ID,
 };
 use crate::uinput::{
     build_virtual_touchpad, UinputEventWriter, UinputRawOutputSink, VirtualTouchpadSpec,
@@ -438,12 +438,8 @@ where
     let events = proxy_settle_events(capabilities);
     stats.settle_output_frames += 1;
     stats.settle_output_events += events.len();
-    for event in events {
-        sink.emit(event)
-            .map_err(|err| format!("proxy output settle emit failed: {err:?}"))?;
-    }
-    sink.sync()
-        .map_err(|err| format!("proxy output settle sync failed: {err:?}"))?;
+    sink.write_frame(&RawFrame::new(events))
+        .map_err(|err| format!("proxy output settle {err}"))?;
     Ok(())
 }
 

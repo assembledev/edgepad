@@ -1,7 +1,7 @@
 use edgepad::core::{AxisRange, Capabilities, EdgeWidths, Engine};
 use edgepad::raw::{
-    route_raw_frame, write_raw_output_frame, RawEvent, RawFrame, RawOutputComposer, RawOutputError,
-    RawOutputSink, RecordingRawOutputSink, RoutedRawFrame,
+    route_raw_frame, write_raw_output_frame, RawEvent, RawFrame, RawFrameWriteError,
+    RawOutputComposer, RawOutputError, RawOutputSink, RecordingRawOutputSink, RoutedRawFrame,
 };
 
 fn test_capabilities() -> Capabilities {
@@ -140,6 +140,7 @@ struct FailingSink {
     emitted: Vec<RawEvent>,
     fail_on_emit: usize,
     sync_called: bool,
+    fail_on_sync: bool,
 }
 
 impl RawOutputSink for FailingSink {
@@ -155,6 +156,9 @@ impl RawOutputSink for FailingSink {
 
     fn sync(&mut self) -> Result<(), Self::Error> {
         self.sync_called = true;
+        if self.fail_on_sync {
+            return Err(TestSinkError("sync failed"));
+        }
         Ok(())
     }
 }
@@ -190,3 +194,8 @@ fn sink_emit_errors_are_returned_without_syncing_partial_frames() {
     assert_eq!(sink.emitted, vec![RawEvent::abs_mt_tracking_id(100)]);
     assert!(!sink.sync_called);
 }
+
+#[path = "raw_output_sink/pipeline.rs"]
+mod pipeline;
+#[path = "raw_output_sink/writer.rs"]
+mod writer;

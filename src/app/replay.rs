@@ -165,14 +165,8 @@ pub(super) fn replay_raw(args: &ReplayArgs) -> Result<(), String> {
     let finish_frame = composer
         .finish()
         .map_err(|err| format!("raw output finish failed: {err:?}"))?;
-    if !finish_frame.events.is_empty() {
-        for event in finish_frame.events {
-            sink.emit(event)
-                .map_err(|err| format!("raw output finish emit failed: {err:?}"))?;
-        }
-        sink.sync()
-            .map_err(|err| format!("raw output finish sync failed: {err:?}"))?;
-    }
+    sink.write_frame(&finish_frame)
+        .map_err(|err| format!("raw output finish {err}"))?;
 
     let composed_events = sink
         .frames()
