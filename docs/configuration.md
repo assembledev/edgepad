@@ -3,6 +3,8 @@
 Edgepad reads `~/.config/edgepad/edgepad.toml`, or
 `$XDG_CONFIG_HOME/edgepad/edgepad.toml` when that variable is set. Use
 `edgepad daemon --config <file>` to select another file for a foreground run.
+The release installer records the resolved config path in the user service. If you
+change `XDG_CONFIG_HOME`, run the installer again to update that path.
 For declarative configuration, see the [Home Manager setup](nix.md).
 
 The [example config](../examples/edgepad.toml.example) has bindings for all four
