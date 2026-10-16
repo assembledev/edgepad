@@ -1,6 +1,8 @@
 use super::super::*;
+use crate::proxy::*;
 use std::error::Error;
 use std::io;
+use std::path::PathBuf;
 
 fn missing_device_config(mode: ProxyMode) -> ProxyRunConfig {
     ProxyRunConfig {

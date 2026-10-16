@@ -1,4 +1,8 @@
-use super::*;
+use super::super::process_proxy_routed_frame;
+use crate::proxy::test_support::{test_capabilities, RecordingGestureHandler};
+use crate::proxy::*;
+use crate::raw::{RawOutputComposer, RecordingRawOutputSink};
+use std::time::Duration;
 
 #[test]
 fn daemon_statistics_do_not_retain_event_history() {
