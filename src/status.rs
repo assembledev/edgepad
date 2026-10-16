@@ -1,7 +1,6 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use evdev::Device;
 
@@ -10,6 +9,8 @@ use crate::config::{
 };
 use crate::core::{EdgeWidths, Zone};
 use crate::device::{discover_device_report, format_device_line, touchpad_candidates};
+
+mod service;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusConfig {
@@ -124,7 +125,7 @@ pub struct StatusReport {
 }
 
 pub fn run_status(config: &StatusConfig) -> StatusReport {
-    let mut lines = vec![service_status_line(&config.service_name)];
+    let mut lines = vec![service::status_line(&config.service_name)];
 
     match load_status_config(config) {
         Ok((config_path, edgepad_config)) => {
@@ -325,101 +326,6 @@ fn actions_status_line(config: &EdgepadConfig) -> StatusLine {
     StatusLine::ok(StatusSubject::Actions, detail)
 }
 
-fn service_status_line(service_name: &str) -> StatusLine {
-    match systemctl_user_show(service_name) {
-        Ok(output) if output.status_success => {
-            let load_state = property_value(&output.stdout, "LoadState").unwrap_or("unknown");
-            let active_state = property_value(&output.stdout, "ActiveState").unwrap_or("unknown");
-            let sub_state = property_value(&output.stdout, "SubState").unwrap_or("unknown");
-            let detail = service_state_detail(active_state, sub_state, &output.stdout);
-
-            if load_state == "not-found" {
-                StatusLine::fail(
-                    StatusSubject::Service,
-                    format!("{service_name} is not installed"),
-                )
-            } else if active_state == "active" {
-                StatusLine::ok(StatusSubject::Service, detail)
-            } else {
-                StatusLine::fail(StatusSubject::Service, detail)
-            }
-        }
-        Ok(output) => StatusLine::warn(
-            StatusSubject::Service,
-            format!(
-                "unknown: systemctl --user failed: {}",
-                output.stderr_or_stdout()
-            ),
-        ),
-        Err(err) => StatusLine::warn(StatusSubject::Service, format!("unknown: {err}")),
-    }
-}
-
-fn systemctl_user_show(service_name: &str) -> Result<CommandOutput, String> {
-    command_output(
-        "systemctl",
-        &[
-            "--user",
-            "show",
-            service_name,
-            "-p",
-            "LoadState",
-            "-p",
-            "ActiveState",
-            "-p",
-            "SubState",
-            "-p",
-            "MainPID",
-            "-p",
-            "StatusText",
-        ],
-    )
-}
-
-fn service_state_detail(active_state: &str, sub_state: &str, output: &str) -> String {
-    let mut detail = format!("{active_state} ({sub_state})");
-    if let Some(pid) =
-        property_value(output, "MainPID").filter(|pid| *pid != "0" && !pid.is_empty())
-    {
-        detail.push_str(&format!(", pid {pid}"));
-    }
-    if let Some(status) = property_value(output, "StatusText").filter(|status| !status.is_empty()) {
-        detail.push_str(&format!(", {status}"));
-    }
-    detail
-}
-
-fn command_output(program: &str, args: &[&str]) -> Result<CommandOutput, String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|err| format!("failed to run {program}: {err}"))?;
-
-    Ok(CommandOutput {
-        status_success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CommandOutput {
-    status_success: bool,
-    stdout: String,
-    stderr: String,
-}
-
-impl CommandOutput {
-    fn stderr_or_stdout(&self) -> String {
-        let stderr = self.stderr.trim();
-        if !stderr.is_empty() {
-            stderr.to_string()
-        } else {
-            self.stdout.trim().to_string()
-        }
-    }
-}
-
 fn status_result(lines: &[StatusLine]) -> StatusResult {
     if lines
         .iter()
@@ -496,12 +402,6 @@ fn slider_count_label(count: usize) -> String {
         1 => "1 slider".to_string(),
         _ => format!("{count} sliders"),
     }
-}
-
-fn property_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")))
 }
 
 #[cfg(test)]
@@ -593,41 +493,5 @@ mod tests {
         ];
 
         assert_eq!(status_result(&lines), StatusResult::Misconfigured);
-    }
-
-    #[test]
-    fn service_status_parses_active_systemd_unit() {
-        let output = CommandOutput {
-            status_success: true,
-            stdout: "LoadState=loaded\nActiveState=active\nSubState=running\nMainPID=1234\nStatusText=edgepad 0.2.0 ready on /dev/input/event7\n".to_string(),
-            stderr: String::new(),
-        };
-
-        assert_eq!(
-            property_value(&output.stdout, "ActiveState"),
-            Some("active")
-        );
-        assert_eq!(property_value(&output.stdout, "SubState"), Some("running"));
-        assert_eq!(
-            service_state_detail("active", "running", &output.stdout),
-            "active (running), pid 1234, edgepad 0.2.0 ready on /dev/input/event7"
-        );
-    }
-
-    #[test]
-    fn activating_notify_service_is_not_reported_as_running() {
-        let detail = service_state_detail(
-            "activating",
-            "start",
-            "MainPID=4321\nStatusText=waiting for touchpad access\n",
-        );
-        let line = StatusLine::fail(StatusSubject::Service, detail);
-
-        assert_eq!(line.severity, StatusSeverity::Fail);
-        assert_eq!(
-            line.detail,
-            "activating (start), pid 4321, waiting for touchpad access"
-        );
-        assert_eq!(status_result(&[line]), StatusResult::NotRunning);
     }
 }

@@ -6,6 +6,10 @@ The live path reads a physical touchpad, claims contacts that start inside confi
 
 ## Firmware palm rejection
 
+Palm rejection prevents accidental edge gestures and slider actions caused by
+your palm brushing the touchpad while typing. It relies on the touchpad's palm
+classification.
+
 `palm_rejection` is enabled by default. Set `palm_rejection = false` and restart
 the service to restore contact handling without palm classification.
 

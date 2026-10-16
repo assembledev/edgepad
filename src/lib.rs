@@ -14,6 +14,7 @@
 //! `tests/replay_fixtures.rs` runs recorded or handwritten event sequences.
 
 mod capture_metadata;
+mod diagnostics;
 
 pub mod actions;
 pub mod config;

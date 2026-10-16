@@ -4,7 +4,6 @@ use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use evdev::Device;
 
@@ -14,6 +13,9 @@ use crate::config::{
 };
 use crate::core::{EdgeWidths, GestureDirection, SliderDirection, Zone};
 use crate::device::{discover_device_report, format_device_line, touchpad_candidates};
+use crate::diagnostics::{command_output, property_value};
+
+mod service;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorConfig {
@@ -172,8 +174,7 @@ pub fn run_doctor(config: &DoctorConfig) -> DoctorReport {
         &mut report,
     );
     check_logind_seat(device_access_ok, &mut report);
-    let systemd_user_available = check_systemd_user(&mut report);
-    check_service_status(&config.service_name, systemd_user_available, &mut report);
+    service::check_service(&config.service_name, &mut report);
 
     report
 }
@@ -991,159 +992,9 @@ fn access_model_gap_note(device_access_ok: bool) -> &'static str {
     }
 }
 
-fn check_systemd_user(report: &mut DoctorReport) -> bool {
-    match command_output("systemctl", &["--user", "show-environment"]) {
-        Ok(output) if output.status_success => {
-            report.checks.push(DoctorCheck::new(
-                CheckStatus::Ok,
-                DoctorSection::Session,
-                "systemd",
-                "systemctl --user is available",
-            ));
-            true
-        }
-        Ok(output) => {
-            report.checks.push(DoctorCheck::new(
-                CheckStatus::Fail,
-                DoctorSection::Session,
-                "systemd",
-                format!("systemctl --user failed: {}", output.stderr_or_stdout()),
-            ));
-            false
-        }
-        Err(err) => {
-            report.checks.push(DoctorCheck::new(
-                CheckStatus::Fail,
-                DoctorSection::Session,
-                "systemd",
-                err,
-            ));
-            false
-        }
-    }
-}
-
-fn check_service_status(
-    service_name: &str,
-    systemd_user_available: bool,
-    report: &mut DoctorReport,
-) {
-    if !systemd_user_available {
-        report.checks.push(DoctorCheck::new(
-            CheckStatus::Warn,
-            DoctorSection::Service,
-            "unit",
-            "skipped because systemctl --user is not available",
-        ));
-        return;
-    }
-
-    let output = command_output(
-        "systemctl",
-        &[
-            "--user",
-            "show",
-            service_name,
-            "-p",
-            "LoadState",
-            "-p",
-            "ActiveState",
-            "-p",
-            "SubState",
-        ],
-    );
-
-    match output {
-        Ok(output) if output.status_success => {
-            let load_state = property_value(&output.stdout, "LoadState").unwrap_or("unknown");
-            let active_state = property_value(&output.stdout, "ActiveState").unwrap_or("unknown");
-            let sub_state = property_value(&output.stdout, "SubState").unwrap_or("unknown");
-            if load_state == "not-found" {
-                report.checks.push(DoctorCheck::new(
-                    CheckStatus::Warn,
-                    DoctorSection::Service,
-                    "unit",
-                    format!("{service_name} is not installed in the user manager"),
-                ));
-            } else if active_state == "active" {
-                report.checks.push(DoctorCheck::new(
-                    CheckStatus::Ok,
-                    DoctorSection::Service,
-                    "unit",
-                    format!("{service_name} is active ({sub_state})"),
-                ));
-            } else if active_state == "failed" {
-                report.checks.push(DoctorCheck::new(
-                    CheckStatus::Fail,
-                    DoctorSection::Service,
-                    "unit",
-                    format!("{service_name} is failed ({sub_state})"),
-                ));
-            } else {
-                report.checks.push(DoctorCheck::new(
-                    CheckStatus::Warn,
-                    DoctorSection::Service,
-                    "unit",
-                    format!(
-                        "{service_name} is loaded={load_state} active={active_state} sub={sub_state}"
-                    ),
-                ));
-            }
-        }
-        Ok(output) => report.checks.push(DoctorCheck::new(
-            CheckStatus::Warn,
-            DoctorSection::Service,
-            "unit",
-            format!(
-                "could not inspect {service_name}: {}",
-                output.stderr_or_stdout()
-            ),
-        )),
-        Err(err) => report.checks.push(DoctorCheck::new(
-            CheckStatus::Warn,
-            DoctorSection::Service,
-            "unit",
-            err,
-        )),
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CommandOutput {
-    status_success: bool,
-    stdout: String,
-    stderr: String,
-}
-
-impl CommandOutput {
-    fn stderr_or_stdout(&self) -> String {
-        let stderr = self.stderr.trim();
-        if !stderr.is_empty() {
-            stderr.to_string()
-        } else {
-            self.stdout.trim().to_string()
-        }
-    }
-}
-
-fn command_output(program: &str, args: &[&str]) -> Result<CommandOutput, String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|err| format!("failed to run {program}: {err}"))?;
-
-    Ok(CommandOutput {
-        status_success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
-}
-
 fn parse_udev_current_tags(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix("CURRENT_TAGS="))
-        .or_else(|| output.lines().find_map(|line| line.strip_prefix("TAGS=")))
+    property_value(output, "CURRENT_TAGS")
+        .or_else(|| property_value(output, "TAGS"))
         .map(parse_colon_tags)
         .unwrap_or_default()
 }
@@ -1167,12 +1018,6 @@ fn acl_output_grants_user(output: &str, username: &str) -> bool {
         };
         perms.as_bytes().first() == Some(&b'r') && perms.as_bytes().get(1) == Some(&b'w')
     })
-}
-
-fn property_value<'a>(output: &'a str, key: &str) -> Option<&'a str> {
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{key}=")))
 }
 
 fn zone_name(zone: Zone) -> &'static str {
@@ -1226,6 +1071,11 @@ mod tests {
         let tags = parse_udev_current_tags("DEVNAME=/dev/uinput\nTAGS=:seat:uaccess:\n");
 
         assert_eq!(tags, vec!["seat", "uaccess"]);
+    }
+
+    #[test]
+    fn empty_current_tags_do_not_restore_static_uaccess_tags() {
+        assert!(parse_udev_current_tags("TAGS=:seat:uaccess:\nCURRENT_TAGS=\n").is_empty());
     }
 
     #[test]
