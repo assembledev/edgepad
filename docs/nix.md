@@ -74,44 +74,32 @@ Import the Home Manager module in your home configuration:
 
   services.edgepad = {
     enable = true;
-    device = "auto";
-    palmRejection = true;
-    edgeWidth = 0.10;
-    # Optional; omitted edges continue to use edgeWidth.
-    edgeWidths.right = 0.12;
-    tapMinDurationMs = 40;
-    tapMaxDurationMs = 180;
-    doubleTapTimeoutMs = 300;
-    doubleTapMaxDistance = 0.04;
-    swipeMinDistance = 0.02;
-
-    gestures = [
-      {
-        zone = "top";
-        direction = "tap";
-        action = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "play-pause" ];
-      }
-      {
-        zone = "top";
-        direction = "double-tap";
-        action = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "stop" ];
-      }
-    ];
-
     sliders = [
       {
+        zone = "left";
+        up = [ "${pkgs.pamixer}/bin/pamixer" "-i" "3" ];
+        down = [ "${pkgs.pamixer}/bin/pamixer" "-d" "3" ];
+      }
+      {
         zone = "right";
-        up = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "brightness-up" ];
-        down = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "brightness-down" ];
+        up = [ "${pkgs.brightnessctl}/bin/brightnessctl" "--class=backlight" "set" "+5%" ];
+        down = [ "${pkgs.brightnessctl}/bin/brightnessctl" "--class=backlight" "set" "5%-" ];
+      }
+    ];
+    gestures = [
+      {
+        zone = "left";
+        direction = "tap";
+        action = [ "${pkgs.pamixer}/bin/pamixer" "-t" ];
       }
     ];
   };
 }
 ```
 
-These notification actions are safe examples. Replace them with the commands used by your desktop.
-Actions are argv arrays and are not run through a shell. Using package paths, as above, avoids
-depending on the service's `PATH`.
+This config enables volume on the left edge and backlight brightness on the right.
+Package paths provide the action executables without depending on the service's
+`PATH`. Adjust bindings and sensitivity using the [configuration guide](configuration.md).
 
 ### 4. Apply and verify
 

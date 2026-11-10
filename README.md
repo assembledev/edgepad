@@ -18,7 +18,7 @@ curl -fsSL https://raw.githubusercontent.com/assembledev/edgepad/main/install.sh
 
 The installer puts `edgepad` in `~/.local/bin`, creates a config, sets up device
 access, and starts a user service. It asks for `sudo` to install the udev rules.
-Make sure `~/.local/bin` is on your `PATH`.
+It reports if `~/.local/bin` is missing from your `PATH`.
 
 To preview the changes, append `-s -- --dry-run` to `sh`. Run the installer again
 to update; it keeps your config.
@@ -34,10 +34,17 @@ Check that edgepad is ready:
 edgepad status
 ```
 
-With the installer’s default config, slide a finger up or down along the left
-edge. You should see a `volume-up` or `volume-down` notification. The examples
-require `notify-send` and a desktop notification service; they don't change your
-volume or other settings yet.
+On a fresh installation, available tools determine the starter bindings:
+
+- `pamixer`: left-edge volume slider and tap to mute;
+- `brightnessctl`: right-edge backlight brightness slider;
+- neither: left-edge test notifications if `notify-send` is available.
+
+The installer prints the gestures it configured. If none of these tools is
+available, it installs the binary and reference example but leaves the service
+unstarted until you supply a configuration. Existing configurations are preserved,
+even when some action tools are missing. The full notification example is saved
+as `~/.config/edgepad/edgepad.toml.example`.
 
 If nothing happens, run `edgepad doctor` to check device access, missing commands,
 and service health.

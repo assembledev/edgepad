@@ -173,3 +173,11 @@ A reload waits for active touches and pending tap sequences to finish. Changing
 
 Home Manager applies recognition and binding changes with a reload when you
 activate the new generation. Package, device, or palm-rejection changes restart the service.
+
+## Check without starting the daemon
+
+`edgepad doctor --config-only --config /path/to/edgepad.toml` checks configuration
+and action executables using the calling process's `PATH`, without running actions
+or inspecting devices and services. Exit codes: `0` checks passed, `1` action
+executables unavailable, `2` invalid or unusable configuration. Missing action
+tools do not prevent the daemon from running other bindings.
