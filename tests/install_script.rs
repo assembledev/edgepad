@@ -164,6 +164,10 @@ while [ "$#" -gt 0 ]; do
         *) url="$1"; shift ;;
     esac
 done
+case "$url" in
+    "https://github.com/assembledev/edgepad/releases/download/$EDGEPAD_VERSION/"*) ;;
+    *) echo "unexpected release URL: $url" >&2; exit 99 ;;
+esac
 name="${url##*/}"
 cp "$EDGEPAD_TEST_ASSETS/$name" "$out"
 "##,
@@ -250,6 +254,8 @@ esac
         command
             .arg("install.sh")
             .env("HOME", &home)
+            .env("EDGEPAD_VERSION", concat!("v", env!("CARGO_PKG_VERSION")))
+            .env("EDGEPAD_REPO", "assembledev/edgepad")
             .env_remove("XDG_CONFIG_HOME")
             .env("PATH", &path)
             .env("EDGEPAD_TEST_ASSETS", &assets)
@@ -449,4 +455,105 @@ fn assert_ordered(haystack: &str, needles: &[&str]) {
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()))
+}
+
+#[test]
+fn installer_version_matches_package() {
+    assert!(include_str!("../install.sh").contains(&format!(
+        "INSTALLER_VERSION=\"v{}\"",
+        env!("CARGO_PKG_VERSION")
+    )));
+}
+
+#[test]
+fn installer_selects_one_release_before_parsing_options() {
+    for (name, version, resolve, download, child, expected) in [
+        ("explicit", "v0.3.0", 0, 0, 0, 0),
+        ("latest", "latest", 0, 0, 0, 0),
+        ("child-failure", "v0.3.0", 0, 0, 23, 23),
+        ("download-failure", "v0.3.0", 0, 22, 0, 22),
+        ("resolve-failure", "latest", 22, 0, 0, 22),
+    ] {
+        let root = unique_temp_dir(&format!("edgepad-release-{name}"));
+        let home = root.join("home");
+        let bin = root.join("bin");
+        let tmp = root.join("tmp");
+        for dir in [&home, &bin, &tmp] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let log = root.join("requests");
+        let selected = root.join("selected.sh");
+        write_executable(
+            &selected,
+            r#"#!/bin/sh
+printf 'version=%s\n' "$EDGEPAD_VERSION"
+printf 'arg=%s\n' "$@"
+exit "$EDGEPAD_TEST_CHILD"
+"#,
+        );
+        write_executable(
+            &bin.join("curl"),
+            r#"#!/bin/sh
+out=
+for arg in "$@"; do url="$arg"; done
+printf '%s\n' "$url" >> "$EDGEPAD_TEST_LOG"
+case "$url" in
+    https://github.com/assembledev/edgepad/releases/latest)
+        [ "$EDGEPAD_TEST_RESOLVE" = 0 ] || exit "$EDGEPAD_TEST_RESOLVE"
+        printf 'https://github.com/assembledev/edgepad/releases/tag/v0.3.0'
+        ;;
+    https://raw.githubusercontent.com/assembledev/edgepad/v0.3.0/install.sh)
+        [ "$EDGEPAD_TEST_DOWNLOAD" = 0 ] || exit "$EDGEPAD_TEST_DOWNLOAD"
+        while [ "$#" -gt 0 ]; do
+            case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+        done
+        cp "$EDGEPAD_TEST_SELECTED" "$out"
+        ;;
+    *) exit 99 ;;
+esac
+"#,
+        );
+        let output = Command::new("sh")
+            .arg("install.sh")
+            // An option unknown to this installer must reach the selected version.
+            .args(["--version-specific-option", "value with spaces"])
+            .env("HOME", &home)
+            .env("TMPDIR", &tmp)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("EDGEPAD_REPO", "assembledev/edgepad")
+            .env("EDGEPAD_VERSION", version)
+            .env("EDGEPAD_TEST_LOG", &log)
+            .env("EDGEPAD_TEST_SELECTED", &selected)
+            .env("EDGEPAD_TEST_RESOLVE", resolve.to_string())
+            .env("EDGEPAD_TEST_DOWNLOAD", download.to_string())
+            .env("EDGEPAD_TEST_CHILD", child.to_string())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected), "{name}: {output:?}");
+        let requests = fs::read_to_string(log).unwrap();
+        assert_eq!(
+            requests.matches("/releases/latest").count(),
+            usize::from(version == "latest")
+        );
+        assert_eq!(
+            requests.matches("/v0.3.0/install.sh").count(),
+            usize::from(resolve == 0)
+        );
+        assert!(
+            !requests.contains("/download/"),
+            "the selected installer owns asset selection"
+        );
+        if resolve == 0 && download == 0 {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains(
+                "version=v0.3.0\narg=--version-specific-option\narg=value with spaces\n"
+            ));
+        }
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

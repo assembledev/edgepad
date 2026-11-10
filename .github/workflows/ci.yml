@@ -26,14 +26,13 @@ jobs:
       - name: Check installer shell syntax
         run: sh -n install.sh
 
-      - name: Check installer dry run
-        run: ./install.sh --dry-run
-
-      - name: Check installer uninstall dry run
-        run: ./install.sh --uninstall --dry-run
-
-      - name: Check installer purge dry run
-        run: ./install.sh --uninstall --purge --dry-run
+      - name: Check installer dry runs
+        run: |
+          PACKAGE_VERSION="$(sed -n 's/^version = "\([^" ]*\)"/\1/p' Cargo.toml | head -n 1)"
+          export EDGEPAD_VERSION="v$PACKAGE_VERSION"
+          ./install.sh --dry-run
+          ./install.sh --uninstall --dry-run
+          ./install.sh --uninstall --purge --dry-run
 
       - name: Run clippy
         run: nix develop --command cargo clippy --locked --all-targets -- -D warnings

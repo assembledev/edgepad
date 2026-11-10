@@ -22,6 +22,8 @@ It reports if `~/.local/bin` is missing from your `PATH`.
 
 To preview the changes, append `-s -- --dry-run` to `sh`. Run the installer again
 to update; it keeps your config.
+The entry point resolves the latest release once and uses that tag's installer
+and assets. Set `EDGEPAD_VERSION` to select a specific release instead.
 
 **NixOS:** follow the [Nix setup](docs/nix.md). Use both the NixOS module for
 device access and the Home Manager module for configuration and the user service.

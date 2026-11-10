@@ -1,6 +1,7 @@
 #!/bin/sh
 set -eu
 
+INSTALLER_VERSION="v0.3.0"
 REPO="${EDGEPAD_REPO:-assembledev/edgepad}"
 VERSION="${EDGEPAD_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/bin"
@@ -318,6 +319,35 @@ print_uninstall_dry_run_plan() {
     info "Dry run complete; no files were changed."
 }
 
+# Select one release before parsing its installer options or changing the system.
+# Local help and uninstall remain available without a network connection.
+dispatch_release=1
+for arg in "$@"; do
+    case "$arg" in -h|--help|--uninstall) dispatch_release=0 ;; esac
+done
+if [ "$dispatch_release" -eq 1 ]; then
+    if [ "$VERSION" = latest ]; then
+        need_command curl
+        release_url=$(curl -fsSLI --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")
+        case "$release_url" in
+            "https://github.com/${REPO}/releases/tag/"*) VERSION=${release_url##*/} ;;
+            *) die "could not resolve latest release tag" ;;
+        esac
+    fi
+    case "$VERSION" in
+        ""|*[!a-zA-Z0-9._-]*) die "invalid release tag: ${VERSION}" ;;
+    esac
+    if [ "$VERSION" != "$INSTALLER_VERSION" ]; then
+        need_command curl
+        handoff_dir=$(mktemp -d)
+        trap 'rm -rf -- "$handoff_dir"' EXIT HUP INT TERM
+        download "https://raw.githubusercontent.com/${REPO}/${VERSION}/install.sh" "$handoff_dir/install.sh"
+        info "Using the installer from ${VERSION}."
+        EDGEPAD_VERSION="$VERSION" sh "$handoff_dir/install.sh" "$@"
+        exit $?
+    fi
+fi
+
 for arg in "$@"; do
     case "$arg" in
         --dry-run)
@@ -396,11 +426,7 @@ case "${kernel}-${machine}" in
 esac
 
 asset="edgepad-${target}"
-if [ "$VERSION" = "latest" ]; then
-    release_base="https://github.com/${REPO}/releases/latest/download"
-else
-    release_base="https://github.com/${REPO}/releases/download/${VERSION}"
-fi
+release_base="https://github.com/${REPO}/releases/download/${VERSION}"
 
 if [ "$DRY_RUN" -eq 0 ]; then
     need_command curl
