@@ -70,7 +70,11 @@ fn process_is_running(pid: libc::pid_t) -> bool {
                 .unwrap();
             state != 'Z'
         }
-        Err(err) if err.kind() == io::ErrorKind::NotFound => false,
+        Err(err)
+            if err.kind() == io::ErrorKind::NotFound || err.raw_os_error() == Some(libc::ESRCH) =>
+        {
+            false
+        }
         Err(err) => panic!("failed to inspect test child {pid}: {err}"),
     }
 }

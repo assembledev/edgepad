@@ -80,12 +80,27 @@ fn device_summary(path: &str, name: &str, kind: DeviceKind) -> DeviceSummary {
         vendor: 0x1234,
         product: 0x5678,
         kind,
-        slot_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen)
-            .then_some(AxisInfo { min: 0, max: 4 }),
-        x_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen)
-            .then_some(AxisInfo { min: 0, max: 1000 }),
-        y_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen)
-            .then_some(AxisInfo { min: 0, max: 700 }),
+        slot_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen).then_some(
+            AxisInfo {
+                min: 0,
+                max: 4,
+                resolution: 0,
+            },
+        ),
+        x_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen).then_some(
+            AxisInfo {
+                min: 0,
+                max: 1000,
+                resolution: 0,
+            },
+        ),
+        y_range: matches!(kind, DeviceKind::Touchpad | DeviceKind::Touchscreen).then_some(
+            AxisInfo {
+                min: 0,
+                max: 700,
+                resolution: 0,
+            },
+        ),
     }
 }
 

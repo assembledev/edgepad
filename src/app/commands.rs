@@ -57,7 +57,21 @@ pub(super) fn devices(root: &Path, show_all: bool) -> Result<(), String> {
 
 pub(super) fn doctor(config: &DoctorConfig) -> Result<i32, String> {
     let report = run_doctor(config);
-    print_doctor_report(&report);
+    print_doctor_report(&report, config.config_only);
+    // Config-only distinguishes invalid configuration from unavailable actions.
+    // Installers may continue with existing bindings whose tools are absent.
+    if config.config_only && report.has_failures() {
+        return Ok(
+            if report.checks.iter().any(|check| {
+                check.section == DoctorSection::Config
+                    && check.status == edgepad::doctor::CheckStatus::Fail
+            }) {
+                2
+            } else {
+                1
+            },
+        );
+    }
     if report.has_failures() {
         Ok(2)
     } else {
@@ -76,15 +90,43 @@ fn print_status_report(report: &StatusReport) {
     println!();
 
     for line in &report.lines {
-        println!("{:<8} {}", line.subject.label(), line.detail);
+        if line.subject == edgepad::status::StatusSubject::Zones {
+            println!("\nZones\n");
+            for row in line.detail.lines() {
+                if row.is_empty() {
+                    println!();
+                } else {
+                    println!("  {row}");
+                }
+            }
+        } else {
+            let mut rows = line.detail.lines();
+            println!(
+                "{:<8} {}",
+                line.subject.label(),
+                rows.next().unwrap_or_default()
+            );
+            for row in rows {
+                println!("         {row}");
+            }
+        }
     }
 
-    println!();
-    println!("{:<8} {}", "Result", report.result.label());
+    if report.result != edgepad::status::StatusResult::Running {
+        println!();
+        println!("{:<8} {}", "Result", report.result.label());
+    }
 }
 
-fn print_doctor_report(report: &DoctorReport) {
-    println!("edgepad doctor");
+fn print_doctor_report(report: &DoctorReport, config_only: bool) {
+    println!(
+        "edgepad doctor{}",
+        if config_only {
+            " (configuration only)"
+        } else {
+            ""
+        }
+    );
 
     for section in DoctorSection::ALL {
         let checks = report
@@ -110,7 +152,12 @@ fn print_doctor_report(report: &DoctorReport) {
         "  ok={} warn={} fail={}",
         counts.ok, counts.warn, counts.fail
     );
-    println!("  result: {}", doctor_result_label(report));
+    let result = if config_only && counts.fail == 0 && counts.warn == 0 {
+        "configuration checks passed"
+    } else {
+        doctor_result_label(report)
+    };
+    println!("  result: {result}");
 }
 
 fn print_doctor_check(check: &DoctorCheck) {

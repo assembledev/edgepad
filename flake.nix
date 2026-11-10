@@ -35,9 +35,14 @@
 
       rustPlatformFor =
         pkgs:
+        let
+          rust = pkgs.buildPackages.rust-bin.stable.latest.minimal.override {
+            targets = [ pkgs.stdenv.hostPlatform.rust.rustcTarget ];
+          };
+        in
         pkgs.makeRustPlatform {
-          cargo = pkgs.rust-bin.stable.latest.minimal;
-          rustc = pkgs.rust-bin.stable.latest.minimal;
+          cargo = rust;
+          rustc = rust;
         };
 
       nixosModule = import ./nix/nixos-module.nix self;
@@ -66,6 +71,15 @@
         {
           inherit edgepad;
           default = edgepad;
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          release = pkgs.callPackage ./nix/release.nix {
+            inherit version;
+            edgepad = pkgs.pkgsStatic.callPackage ./nix/package.nix {
+              inherit version;
+              rustPlatform = rustPlatformFor pkgs.pkgsStatic;
+            };
+          };
         }
       );
 
@@ -99,6 +113,9 @@
               ;
             inherit (pkgs) lib;
           };
+        }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") {
+          release = self.packages.${system}.release;
         }
       );
 
@@ -140,7 +157,7 @@
           runtimeInputs = [ pkgs.nixfmt ];
           text = ''
             if [ "$#" -eq 0 ]; then
-              set -- flake.nix nix/package.nix nix/nixos-module.nix nix/home-manager-module.nix nix/module-tests.nix
+              set -- flake.nix nix/package.nix nix/nixos-module.nix nix/home-manager-module.nix nix/module-tests.nix nix/release.nix
             fi
             exec nixfmt "$@"
           '';

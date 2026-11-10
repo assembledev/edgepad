@@ -116,7 +116,7 @@ fn edge_touch_that_leaves_tap_slop_and_returns_emits_no_gesture() {
         .expect("cancelled gesture releases cleanly");
 
     assert!(up.gestures.is_empty());
-    assert!(up.slider_steps.is_empty());
+    assert!(up.slider_steps().is_empty());
     assert!(up.passthrough.is_empty());
 }
 
@@ -292,15 +292,15 @@ fn slider_edge_touch_emits_steps_during_motion_without_release_swipe() {
         ])
         .expect("left slider contact is valid");
 
-    assert!(down.slider_steps.is_empty());
+    assert!(down.slider_steps().is_empty());
     assert!(down.gestures.is_empty());
 
     let move_frame = engine
         .process_frame(&[Event::slot(0), Event::y(510)])
         .expect("slider motion emits steps");
 
-    assert_eq!(move_frame.slider_steps.len(), 3);
-    for step in &move_frame.slider_steps {
+    assert_eq!(move_frame.slider_steps().len(), 3);
+    for step in &move_frame.slider_steps() {
         assert_eq!(step.zone, Zone::Left);
         assert_eq!(step.direction, SliderDirection::Down);
         assert_eq!(step.slot, 0);
@@ -313,7 +313,7 @@ fn slider_edge_touch_emits_steps_during_motion_without_release_swipe() {
         .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
         .expect("slider release is valid");
 
-    assert!(up.slider_steps.is_empty());
+    assert!(up.slider_steps().is_empty());
     assert!(up.gestures.is_empty());
     assert!(up.passthrough.is_empty());
 }
@@ -342,14 +342,14 @@ fn slider_that_emits_steps_and_returns_to_start_does_not_emit_tap() {
     let forward = engine
         .process_frame(&[Event::slot(0), Event::y(510)])
         .expect("forward slider motion emits steps");
-    assert_eq!(forward.slider_steps.len(), 3);
+    assert_eq!(forward.slider_steps().len(), 3);
 
     let returned = engine
         .process_frame(&[Event::slot(0), Event::y(300)])
         .expect("return slider motion emits reverse steps");
-    assert!(!returned.slider_steps.is_empty());
+    assert!(!returned.slider_steps().is_empty());
     assert!(returned
-        .slider_steps
+        .slider_steps()
         .iter()
         .all(|step| step.direction == SliderDirection::Up));
 
@@ -358,7 +358,7 @@ fn slider_that_emits_steps_and_returns_to_start_does_not_emit_tap() {
         .expect("returned slider contact releases cleanly");
 
     assert!(up.gestures.is_empty());
-    assert!(up.slider_steps.is_empty());
+    assert!(up.slider_steps().is_empty());
     assert!(up.passthrough.is_empty());
 }
 
@@ -386,7 +386,7 @@ fn buttonpad_press_keeps_emitted_slider_steps_but_cancels_future_steps_and_gestu
     let before_click = engine
         .process_frame(&[Event::slot(0), Event::y(510)])
         .expect("slider motion emits steps before click");
-    assert_eq!(before_click.slider_steps.len(), 3);
+    assert_eq!(before_click.slider_steps().len(), 3);
 
     assert_eq!(
         engine.update_physical_button(BTN_LEFT, true),
@@ -401,12 +401,12 @@ fn buttonpad_press_keeps_emitted_slider_steps_but_cancels_future_steps_and_gestu
         .process_frame(&[Event::slot(0), Event::y(650)])
         .expect("motion after click passes through");
     assert_eq!(after_click.passthrough, vec![Event::slot(0), Event::y(650)]);
-    assert!(after_click.slider_steps.is_empty());
+    assert!(after_click.slider_steps().is_empty());
 
     let up = engine
         .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
         .expect("promoted slider contact releases cleanly");
-    assert!(up.slider_steps.is_empty());
+    assert!(up.slider_steps().is_empty());
     assert!(up.gestures.is_empty());
 }
 
@@ -435,7 +435,7 @@ fn slider_edge_touch_still_emits_tap_on_release() {
         .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
         .expect("slider tap release is valid");
 
-    assert!(up.slider_steps.is_empty());
+    assert!(up.slider_steps().is_empty());
     assert_eq!(up.gestures.len(), 1);
     assert_eq!(up.gestures[0].zone, Zone::Left);
     assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
@@ -465,14 +465,14 @@ fn slider_step_inside_tap_slop_consumes_release_gesture() {
     let moved = engine
         .process_frame(&[Event::slot(0), Event::y(310)])
         .expect("movement inside tap slop emits a configured slider step");
-    assert_eq!(moved.slider_steps.len(), 1);
+    assert_eq!(moved.slider_steps().len(), 1);
 
     let up = engine
         .process_frame(&[Event::slot(0), Event::tracking_id(-1)])
         .expect("consumed slider contact releases cleanly");
 
     assert!(up.gestures.is_empty());
-    assert!(up.slider_steps.is_empty());
+    assert!(up.slider_steps().is_empty());
     assert!(up.passthrough.is_empty());
 }
 

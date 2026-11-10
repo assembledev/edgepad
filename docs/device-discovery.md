@@ -29,6 +29,10 @@ edgepad devices --input-root /tmp/fake-input-root --all
 
 `--root` remains available as an alias for compatibility.
 
+`edgepad status` shows approximate touchpad dimensions, zone widths and slider
+travel per step in millimetres when device metadata permits; percentages remain
+available otherwise. Values reflect the configuration file on disk.
+
 ## Permissions
 
 Without permission to open event nodes, Linux may expose `/dev/input/event*` paths while denying reads. In that case `edgepad devices` prints a permission hint instead of pretending no hardware exists.

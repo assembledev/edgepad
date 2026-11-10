@@ -198,6 +198,8 @@ pub trait GestureHandler {
 
     fn handle_slider_step(&mut self, _step: SliderStep) {}
 
+    fn handle_slider_end(&mut self, _end: crate::core::SliderEnd) {}
+
     fn take_recognition_config_reload(&mut self) -> Option<ProxyRecognitionConfig> {
         None
     }

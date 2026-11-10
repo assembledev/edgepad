@@ -4,7 +4,7 @@
 
 use std::fs;
 
-use edgepad::core::{AxisRange, Capabilities, Engine};
+use edgepad::core::{AxisRange, Capabilities, Engine, SliderEndKind, SliderEvent};
 use edgepad::raw::{
     parse_raw_dump_file, route_raw_frame, route_recognition_deadline, write_raw_output_frame,
     RawOutputComposer, RawOutputSink, RecordingRawOutputSink,
@@ -57,7 +57,12 @@ pub(super) fn replay(args: &ReplayArgs) -> Result<(), String> {
         .collect::<Vec<_>>();
     let slider_steps = outputs
         .iter()
-        .flat_map(|output| output.slider_steps.iter())
+        .flat_map(|output| output.slider_steps())
+        .collect::<Vec<_>>();
+    let slider_events = outputs
+        .iter()
+        .flat_map(|output| output.slider_events.iter())
+        .copied()
         .collect::<Vec<_>>();
     let resync_required = outputs.iter().any(|output| output.resync_required);
 
@@ -109,6 +114,7 @@ pub(super) fn replay(args: &ReplayArgs) -> Result<(), String> {
             slider_direction_name(step.direction)
         );
     }
+    print_slider_endings(&slider_events);
     println!("resync_required: {resync_required}");
     print_replay_diagnosis(&stats, passthrough_events, gesture_count, slider_step_count);
 
@@ -142,6 +148,7 @@ pub(super) fn replay_raw(args: &ReplayArgs) -> Result<(), String> {
     let mut recognizer_passthrough_events = 0;
     let mut gestures = Vec::new();
     let mut slider_steps = Vec::new();
+    let mut slider_events = Vec::new();
     let mut resync_required = false;
     let mut sink = RecordingRawOutputSink::default();
 
@@ -151,7 +158,8 @@ pub(super) fn replay_raw(args: &ReplayArgs) -> Result<(), String> {
         recognizer_passthrough_events += routed.passthrough.len();
         resync_required |= routed.resync_required;
         gestures.extend(routed.gestures.iter().copied());
-        slider_steps.extend(routed.slider_steps.iter().copied());
+        slider_steps.extend(routed.slider_steps());
+        slider_events.extend(routed.slider_events.iter().copied());
 
         write_raw_output_frame(&mut composer, &routed, &mut sink)
             .map_err(|err| format!("raw output write failed: {err:?}"))?;
@@ -207,9 +215,27 @@ pub(super) fn replay_raw(args: &ReplayArgs) -> Result<(), String> {
             slider_direction_name(step.direction)
         );
     }
+    print_slider_endings(&slider_events);
     println!("resync_required: {resync_required}");
 
     Ok(())
+}
+
+fn print_slider_endings(events: &[SliderEvent]) {
+    for event in events {
+        if let SliderEvent::End(end) = event {
+            let kind = match end.kind {
+                SliderEndKind::Release => "release",
+                SliderEndKind::Cancel => "cancel",
+            };
+            println!(
+                "slider_end slot={} tracking_id={} zone={} kind={kind}",
+                end.slot,
+                end.tracking_id,
+                zone_name(end.zone)
+            );
+        }
+    }
 }
 
 fn print_replay_diagnosis(

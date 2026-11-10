@@ -21,10 +21,10 @@ mod types;
 pub(crate) use types::SlotSnapshot;
 pub use types::{
     AxisRange, Capabilities, EdgeWidths, EngineOptions, Event, FrameOutput, Gesture,
-    GestureDirection, ResyncContact, SliderAxis, SliderDirection, SliderSpec, SliderStep,
-    SlotError, Zone, ZoneSet, DEFAULT_DOUBLE_TAP_MAX_DISTANCE, DEFAULT_DOUBLE_TAP_TIMEOUT_MS,
-    DEFAULT_PALM_REJECTION, DEFAULT_SWIPE_MIN_DISTANCE, DEFAULT_TAP_MAX_DURATION_MS,
-    DEFAULT_TAP_MIN_DURATION_MS, MT_TOOL_PALM,
+    GestureDirection, ResyncContact, SliderAxis, SliderDirection, SliderEnd, SliderEndKind,
+    SliderEvent, SliderSpec, SliderStep, SlotError, Zone, ZoneSet, DEFAULT_DOUBLE_TAP_MAX_DISTANCE,
+    DEFAULT_DOUBLE_TAP_TIMEOUT_MS, DEFAULT_PALM_REJECTION, DEFAULT_SWIPE_MIN_DISTANCE,
+    DEFAULT_TAP_MAX_DURATION_MS, DEFAULT_TAP_MIN_DURATION_MS, MT_TOOL_PALM,
 };
 
 use contact::{Contact, ContactPhase, Ownership};
@@ -48,6 +48,7 @@ pub struct Engine {
     current_slot: i32,
     slots: Vec<SlotState>,
     pending_tap: Option<PendingTap>,
+    pending_slider_events: Vec<SliderEvent>,
 }
 
 impl Engine {
@@ -69,6 +70,7 @@ impl Engine {
             pressed_physical_buttons: BTreeSet::new(),
             slots: vec![SlotState::default(); slot_count],
             pending_tap: None,
+            pending_slider_events: Vec::new(),
         }
     }
 
@@ -132,8 +134,9 @@ impl Engine {
         &mut self,
         contacts: &[ResyncContact],
     ) -> Result<FrameOutput, SlotError> {
-        self.reset_for_resync();
         let mut output = FrameOutput::empty();
+        output.slider_events = self.cancel_sliders();
+        self.reset_for_resync();
 
         for contact in contacts {
             self.ensure_slot(contact.slot)?;
@@ -165,6 +168,18 @@ impl Engine {
             });
         }
         Ok(())
+    }
+
+    fn cancel_sliders(&mut self) -> Vec<SliderEvent> {
+        let mut events = std::mem::take(&mut self.pending_slider_events);
+        for (index, slot) in self.slots.iter_mut().enumerate() {
+            if let Some(contact) = &mut slot.contact {
+                events.extend(
+                    contact.end_slider(self.caps.slot_min + index as i32, SliderEndKind::Cancel),
+                );
+            }
+        }
+        events
     }
 
     fn reset_for_resync(&mut self) {

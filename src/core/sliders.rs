@@ -92,7 +92,8 @@ fn push_slider_step(contact: &mut Contact, output: &mut FrameOutput, step: Slide
     // Even a step smaller than tap slop commits the contact to the slider.
     // Lifting or returning to the start must not also fire a tap.
     contact.consume_by_slider();
-    output.slider_steps.push(step);
+    contact.active_slider = Some(step.zone);
+    output.slider_events.push(super::SliderEvent::Step(step));
 }
 
 pub(super) fn validate_slider_specs(sliders: &[SliderSpec]) {

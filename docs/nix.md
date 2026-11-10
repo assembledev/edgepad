@@ -74,44 +74,32 @@ Import the Home Manager module in your home configuration:
 
   services.edgepad = {
     enable = true;
-    device = "auto";
-    palmRejection = true;
-    edgeWidth = 0.10;
-    # Optional; omitted edges continue to use edgeWidth.
-    edgeWidths.right = 0.12;
-    tapMinDurationMs = 40;
-    tapMaxDurationMs = 180;
-    doubleTapTimeoutMs = 300;
-    doubleTapMaxDistance = 0.04;
-    swipeMinDistance = 0.02;
-
-    gestures = [
-      {
-        zone = "top";
-        direction = "tap";
-        action = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "play-pause" ];
-      }
-      {
-        zone = "top";
-        direction = "double-tap";
-        action = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "stop" ];
-      }
-    ];
-
     sliders = [
       {
+        zone = "left";
+        up = [ "${pkgs.pamixer}/bin/pamixer" "-i" "3" ];
+        down = [ "${pkgs.pamixer}/bin/pamixer" "-d" "3" ];
+      }
+      {
         zone = "right";
-        up = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "brightness-up" ];
-        down = [ "${pkgs.libnotify}/bin/notify-send" "edgepad" "brightness-down" ];
+        up = [ "${pkgs.brightnessctl}/bin/brightnessctl" "--class=backlight" "set" "+5%" ];
+        down = [ "${pkgs.brightnessctl}/bin/brightnessctl" "--class=backlight" "set" "5%-" ];
+      }
+    ];
+    gestures = [
+      {
+        zone = "left";
+        direction = "tap";
+        action = [ "${pkgs.pamixer}/bin/pamixer" "-t" ];
       }
     ];
   };
 }
 ```
 
-These notification actions are safe examples. Replace them with the commands used by your desktop.
-Actions are argv arrays and are not run through a shell. Using package paths, as above, avoids
-depending on the service's `PATH`.
+This config enables volume on the left edge and backlight brightness on the right.
+Package paths provide the action executables without depending on the service's
+`PATH`. Adjust bindings and sensitivity using the [configuration guide](configuration.md).
 
 ### 4. Apply and verify
 
@@ -125,6 +113,10 @@ edgepad status
 edgepad doctor
 systemctl --user status edgepad.service
 ```
+
+Slider bindings accept optional `onRelease` and `onCancel` argv lists. These
+produce the `on_release` and `on_cancel` TOML fields described in
+[slider configuration](configuration.md#sliders).
 
 Home Manager reloads gesture, slider, edge-width, and timing changes when it activates a new
 generation. A reload waits for active contacts to lift and keeps the previous configuration if
@@ -200,6 +192,9 @@ Or run one command inside the shell:
 nix develop -c cargo test --locked
 ```
 
+The Rust CI job runs formatting, Clippy, and tests through this same development
+shell. Its Rust version follows the `rust-overlay` revision in `flake.lock`.
+
 The shell includes stable Rust, `rust-src`, `rust-analyzer`, `clippy`, `rustfmt`, `evtest`, and
 `libinput`.
 
@@ -267,3 +262,10 @@ Supported systems:
 x86_64-linux
 aarch64-linux
 ```
+
+## Release artifacts
+
+On x86_64 Linux, `nix build .#release` builds and checks the static binary and
+checksummed release assets in `result/`, using the locked Rust toolchain and
+`pkgsStatic`. It does not publish a release.
+Tag builds create a draft GitHub Release for reviewing notes before publication.

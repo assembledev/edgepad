@@ -335,7 +335,7 @@ fn compose_frame_releases_each_active_passthrough_slot_on_resync() {
             passthrough: vec![],
             physical_buttons: vec![],
             gestures: vec![],
-            slider_steps: vec![],
+            slider_events: vec![],
             resync_required: true,
         })
         .expect("resync should compose")

@@ -160,6 +160,16 @@ impl SliderBindingConfig {
             step,
             negative,
             positive,
+            on_release: raw
+                .on_release
+                .map(CommandActionConfig::new)
+                .transpose()
+                .map_err(|err| format!("{label}.on_release: {err}"))?,
+            on_cancel: raw
+                .on_cancel
+                .map(CommandActionConfig::new)
+                .transpose()
+                .map_err(|err| format!("{label}.on_cancel: {err}"))?,
         })
     }
 }

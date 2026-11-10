@@ -59,6 +59,8 @@ fn command_checks_group_gestures_and_both_slider_axes_by_executable() {
                 zone: Zone::Left,
                 axis: SliderAxis::Vertical,
                 step: 0.1,
+                on_release: None,
+                on_cancel: None,
                 negative: CommandActionConfig::new(["alpha"]).unwrap(),
                 positive: CommandActionConfig::new(["beta"]).unwrap(),
             },
@@ -66,6 +68,8 @@ fn command_checks_group_gestures_and_both_slider_axes_by_executable() {
                 zone: Zone::Bottom,
                 axis: SliderAxis::Horizontal,
                 step: 0.1,
+                on_release: None,
+                on_cancel: None,
                 negative: CommandActionConfig::new(["beta"]).unwrap(),
                 positive: CommandActionConfig::new(["alpha"]).unwrap(),
             },
@@ -118,4 +122,23 @@ fn explicit_executables_work_without_path_and_path_search_skips_nonexecutables()
     let missing = command_check("tool", &[], None);
     assert_eq!(missing.status, CheckStatus::Fail);
     assert!(missing.detail.contains("not found in PATH"));
+}
+
+#[test]
+fn command_checks_include_slider_lifecycle_hooks() {
+    let config = EdgepadConfig::parse(
+        r#"
+[[sliders]]
+zone = "bottom"
+left = ["step"]
+right = ["step"]
+on_release = ["finish"]
+on_cancel = ["abort"]
+"#,
+    )
+    .unwrap();
+    let usages = command_usages(&config);
+    assert_eq!(usages["finish"], ["bottom.on_release"]);
+    assert_eq!(usages["abort"], ["bottom.on_cancel"]);
+    assert_eq!(usages["step"], ["bottom.left", "bottom.right"]);
 }

@@ -8,6 +8,65 @@ fn edgepad() -> Command {
 }
 
 #[test]
+fn config_only_checks_all_action_kinds_without_devices_or_running_commands() {
+    let config = unique_temp_path("edgepad-config-only");
+    let action = unique_temp_executable("edgepad-config-only-action");
+    let marker = unique_temp_path("edgepad-config-only-executed");
+    fs::write(
+        &action,
+        format!("#!/bin/sh\nprintf executed > '{}'\n", marker.display()),
+    )
+    .unwrap();
+    fs::write(
+        &config,
+        format!(
+            r#"
+        device = "/nonexistent/touchpad"
+        [[gestures]]
+        zone = "top"
+        direction = "double-tap"
+        action = ["{}"]
+        [[sliders]]
+        zone = "left"
+        up = ["{}"]
+        down = ["{}"]
+        on_release = ["edgepad-missing-release-tool"]
+        on_cancel = ["edgepad-missing-cancel-tool"]
+    "#,
+            action.display(),
+            action.display(),
+            action.display()
+        ),
+    )
+    .unwrap();
+    let run = || {
+        edgepad()
+            .args(["doctor", "--config-only", "--config"])
+            .arg(&config)
+            .env("PATH", "")
+            .output()
+            .unwrap()
+    };
+    let missing = run();
+    assert_eq!(missing.status.code(), Some(1));
+    let output = String::from_utf8_lossy(&missing.stdout);
+    assert!(output.contains("left.on_release"));
+    assert!(output.contains("left.on_cancel"));
+    assert!(!output.contains("\nDevice\n"));
+    assert!(!output.contains("\nService\n"));
+    assert!(!marker.exists());
+    write_config(&config, "/nonexistent/touchpad", &action);
+    let valid = run();
+    assert!(valid.status.success());
+    assert!(String::from_utf8_lossy(&valid.stdout).contains("configuration checks passed"));
+    fs::write(&config, "invalid TOML !!!").unwrap();
+    assert_eq!(run().status.code(), Some(2));
+    assert!(!marker.exists());
+    fs::remove_file(config).unwrap();
+    fs::remove_file(action).unwrap();
+}
+
+#[test]
 fn doctor_cli_checks_config_and_action_executables() {
     let root = unique_temp_dir("edgepad-doctor-cli-input-root");
     let config_path = unique_temp_path("edgepad-doctor-cli-config");

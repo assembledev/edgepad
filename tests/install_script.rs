@@ -30,6 +30,107 @@ fn install_escapes_literal_config_path_for_systemd() {
 }
 
 fn check_install(prefix: &str, custom_config: Option<(&str, &str)>, upgrade: bool) {
+    check_install_case(
+        prefix,
+        custom_config,
+        upgrade,
+        InstallCase {
+            tools: &["pamixer", "brightnessctl"],
+            ..InstallCase::default()
+        },
+    );
+}
+
+#[derive(Default)]
+struct InstallCase<'a> {
+    tools: &'a [&'a str],
+    preflight: i32,
+    start_fails: bool,
+    doctor_fails: bool,
+    bin_on_path: bool,
+}
+
+#[test]
+fn starter_adapts_to_available_tools() {
+    for (name, tools) in [
+        ("all", vec!["pamixer", "brightnessctl", "notify-send"]),
+        ("volume", vec!["pamixer"]),
+        ("brightness", vec!["brightnessctl"]),
+        ("notifications", vec!["notify-send"]),
+        ("none", vec![]),
+    ] {
+        check_install_case(
+            &format!("edgepad-starter-{name}"),
+            None,
+            false,
+            InstallCase {
+                tools: &tools,
+                ..InstallCase::default()
+            },
+        );
+    }
+}
+
+#[test]
+fn install_recognizes_binary_directory_already_on_path() {
+    check_install_case(
+        "edgepad-install-on-path",
+        None,
+        false,
+        InstallCase {
+            tools: &["pamixer", "brightnessctl"],
+            bin_on_path: true,
+            ..InstallCase::default()
+        },
+    );
+}
+
+#[test]
+fn upgrade_keeps_missing_actions_and_continues() {
+    check_install_case(
+        "edgepad-missing-upgrade",
+        None,
+        true,
+        InstallCase {
+            preflight: 1,
+            doctor_fails: true,
+            ..InstallCase::default()
+        },
+    );
+}
+
+#[test]
+fn invalid_config_does_not_restart_or_change_access() {
+    check_install_case(
+        "edgepad-invalid-upgrade",
+        None,
+        true,
+        InstallCase {
+            preflight: 2,
+            ..InstallCase::default()
+        },
+    );
+}
+
+#[test]
+fn startup_failure_runs_diagnostics() {
+    check_install_case(
+        "edgepad-start-failure",
+        None,
+        true,
+        InstallCase {
+            start_fails: true,
+            ..InstallCase::default()
+        },
+    );
+}
+
+fn check_install_case(
+    prefix: &str,
+    custom_config: Option<(&str, &str)>,
+    upgrade: bool,
+    case: InstallCase<'_>,
+) {
     let root = unique_temp_dir(prefix);
     let home = root.join("home");
     let (config_dir, escaped_config_dir) = custom_config.unwrap_or((".config", ".config"));
@@ -63,6 +164,10 @@ while [ "$#" -gt 0 ]; do
         *) url="$1"; shift ;;
     esac
 done
+case "$url" in
+    "https://github.com/assembledev/edgepad/releases/download/$EDGEPAD_VERSION/"*) ;;
+    *) echo "unexpected release URL: $url" >&2; exit 99 ;;
+esac
 name="${url##*/}"
 cp "$EDGEPAD_TEST_ASSETS/$name" "$out"
 "##,
@@ -80,18 +185,43 @@ exit 1
     );
     write_executable(
         &fake_bin.join("systemctl"),
-        "#!/bin/sh\nprintf 'systemctl %s\\n' \"$*\" >> \"$EDGEPAD_TEST_LOG\"\n",
+        r#"#!/bin/sh
+printf 'systemctl %s\n' "$*" >> "$EDGEPAD_TEST_LOG"
+if [ "$2" = enable ] && [ "$3" != "$EDGEPAD_TEST_SERVICE_FILE" ]; then
+    echo 'Unit edgepad.service does not exist in manager search path' >&2
+    exit 1
+fi
+case "$*" in *restart*) exit "$EDGEPAD_TEST_START_RESULT" ;; esac
+"#,
     );
     write_executable(&fake_bin.join("udevadm"), "#!/bin/sh\nexit 0\n");
-
+    // Tools in the invoking shell must not affect service-PATH selection.
+    for tool in ["pamixer", "brightnessctl", "notify-send"] {
+        write_executable(&fake_bin.join(tool), "#!/bin/sh\nexit 99\n");
+    }
+    for tool in case.tools {
+        write_executable(
+            &home.join(".local/bin").join(tool),
+            "#!/bin/sh\necho ACTION_EXECUTED >> \"$EDGEPAD_TEST_LOG\"\nexit 99\n",
+        );
+    }
     write_executable(
         &assets.join("edgepad-x86_64-unknown-linux-musl"),
-        "#!/bin/sh\nprintf 'edgepad %s\\n' \"$*\" >> \"$EDGEPAD_TEST_LOG\"\n",
+        r#"#!/bin/sh
+printf 'edgepad %s\n' "$*" >> "$EDGEPAD_TEST_LOG"
+case "$*" in
+    *--config-only*) exit "$EDGEPAD_TEST_PREFLIGHT" ;;
+    *) exit "$EDGEPAD_TEST_DOCTOR_RESULT" ;;
+esac
+"#,
     );
     fs::write(assets.join("70-edgepad.rules"), "# test rule\n").expect("rule should be written");
     fs::write(
         assets.join("edgepad.service"),
-        include_str!("../packaging/edgepad.service"),
+        include_str!("../packaging/edgepad.service").replace(
+            "Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin",
+            "Environment=PATH=%h/.local/bin",
+        ),
     )
     .expect("service should be written");
     fs::write(assets.join("edgepad.toml.example"), "device = \"auto\"\n")
@@ -99,6 +229,11 @@ exit 1
     write_checksums(&assets);
 
     if upgrade {
+        fs::write(
+            config_home.join("edgepad/edgepad.toml.example"),
+            "# kept reference\n",
+        )
+        .unwrap();
         fs::write(home.join(".local/bin/edgepad"), "old binary\n")
             .expect("old binary should be present");
         fs::write(&config_file, "# existing user config\n")
@@ -106,20 +241,35 @@ exit 1
         fs::write(&service_file, "# old service\n").expect("old service should be present");
     }
 
-    let path = format!(
+    let mut path = format!(
         "{}:{}",
         fake_bin.display(),
         std::env::var("PATH").unwrap_or_default()
     );
+    if case.bin_on_path {
+        path.push_str(&format!(":{}", home.join(".local/bin").display()));
+    }
     let installer = || {
         let mut command = Command::new("sh");
         command
             .arg("install.sh")
             .env("HOME", &home)
+            .env("EDGEPAD_VERSION", concat!("v", env!("CARGO_PKG_VERSION")))
+            .env("EDGEPAD_REPO", "assembledev/edgepad")
             .env_remove("XDG_CONFIG_HOME")
             .env("PATH", &path)
             .env("EDGEPAD_TEST_ASSETS", &assets)
             .env("EDGEPAD_TEST_LOG", &log)
+            .env("EDGEPAD_TEST_SERVICE_FILE", &service_file)
+            .env("EDGEPAD_TEST_PREFLIGHT", case.preflight.to_string())
+            .env(
+                "EDGEPAD_TEST_START_RESULT",
+                if case.start_fails { "1" } else { "0" },
+            )
+            .env(
+                "EDGEPAD_TEST_DOCTOR_RESULT",
+                if case.doctor_fails { "2" } else { "0" },
+            )
             .env("EDGEPAD_UDEV_RULE_FILE", &udev_rule);
         if custom_config.is_some() {
             command.env("XDG_CONFIG_HOME", &config_home);
@@ -146,17 +296,60 @@ exit 1
 
     let output = installer().output().expect("installer should run");
 
-    assert!(
+    let no_starter = !upgrade && case.tools.is_empty();
+    let fails = no_starter || case.preflight > 1 || case.start_fails;
+    assert_eq!(
         output.status.success(),
-        "installer failed: {}",
+        !fails,
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let commands = fs::read_to_string(&log).expect("command log should be readable");
+    let commands = fs::read_to_string(&log).unwrap_or_default();
+    assert!(!commands.contains("ACTION_EXECUTED"));
+    assert_eq!(
+        fs::read_to_string(config_home.join("edgepad/edgepad.toml.example")).unwrap(),
+        if upgrade {
+            "# kept reference\n"
+        } else {
+            "device = \"auto\"\n"
+        }
+    );
+    if no_starter || case.preflight > 1 {
+        assert!(!commands.contains("systemctl"));
+        assert!(!commands.contains("sudo"));
+        assert!(!udev_rule.exists());
+        if upgrade {
+            assert_eq!(
+                fs::read_to_string(&config_file).unwrap(),
+                "# existing user config\n"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    if case.start_fails {
+        assert_ordered(
+            &commands,
+            &["systemctl --user restart", "edgepad doctor --config "],
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("Edgepad is running."));
+        fs::remove_dir_all(root).unwrap();
+        return;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Edgepad is running."));
+    assert_eq!(stdout.contains("is not on your PATH"), !case.bin_on_path);
+    if upgrade {
+        assert!(!stdout.contains("Left edge:"));
+    }
     assert_ordered(
         &commands,
         &[
+            "edgepad doctor --config-only",
+            "sudo install",
             "systemctl --user daemon-reload",
-            "systemctl --user enable edgepad.service",
+            &format!("systemctl --user enable {}", service_file.display()),
             "systemctl --user restart edgepad.service",
             "systemctl --user is-active --quiet edgepad.service",
             "edgepad doctor",
@@ -181,17 +374,39 @@ exit 1
     };
     assert_eq!(
         without_exec_start(&service),
-        without_exec_start(include_str!("../packaging/edgepad.service")),
+        without_exec_start(&fs::read_to_string(assets.join("edgepad.service")).unwrap()),
         "other service settings should remain intact"
     );
-    assert_eq!(
-        fs::read_to_string(&config_file).expect("installed config should be readable"),
-        if upgrade {
-            "# existing user config\n"
-        } else {
-            "device = \"auto\"\n"
-        }
-    );
+    let installed = fs::read_to_string(&config_file).unwrap();
+    if upgrade {
+        assert_eq!(installed, "# existing user config\n");
+    } else {
+        let config =
+            edgepad::config::EdgepadConfig::parse(&installed).expect("generated config parses");
+        let has_volume = case.tools.contains(&"pamixer");
+        let has_brightness = case.tools.contains(&"brightnessctl");
+        let notifications = !has_volume && !has_brightness;
+        assert_eq!(
+            config.sliders.len(),
+            if has_volume && has_brightness { 2 } else { 1 }
+        );
+        assert_eq!(installed.contains("pamixer"), has_volume);
+        assert_eq!(installed.contains("brightnessctl"), has_brightness);
+        assert_eq!(installed.contains("notify-send"), notifications);
+        assert_eq!(
+            stdout.contains("Left edge: slide up/down for volume"),
+            has_volume
+        );
+        assert_eq!(
+            stdout.contains("Right edge: slide up/down for backlight brightness"),
+            has_brightness
+        );
+        assert_eq!(
+            stdout.contains("Left edge: slide or tap to show test notifications"),
+            notifications
+        );
+        assert!(!installed.contains("tap_min_duration_ms"));
+    }
     assert!(
         commands.contains(&format!(
             "edgepad doctor --config {}",
@@ -240,4 +455,105 @@ fn assert_ordered(haystack: &str, needles: &[&str]) {
 
 fn unique_temp_dir(prefix: &str) -> PathBuf {
     std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()))
+}
+
+#[test]
+fn installer_version_matches_package() {
+    assert!(include_str!("../install.sh").contains(&format!(
+        "INSTALLER_VERSION=\"v{}\"",
+        env!("CARGO_PKG_VERSION")
+    )));
+}
+
+#[test]
+fn installer_selects_one_release_before_parsing_options() {
+    for (name, version, resolve, download, child, expected) in [
+        ("explicit", "v0.3.0", 0, 0, 0, 0),
+        ("latest", "latest", 0, 0, 0, 0),
+        ("child-failure", "v0.3.0", 0, 0, 23, 23),
+        ("download-failure", "v0.3.0", 0, 22, 0, 22),
+        ("resolve-failure", "latest", 22, 0, 0, 22),
+    ] {
+        let root = unique_temp_dir(&format!("edgepad-release-{name}"));
+        let home = root.join("home");
+        let bin = root.join("bin");
+        let tmp = root.join("tmp");
+        for dir in [&home, &bin, &tmp] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let log = root.join("requests");
+        let selected = root.join("selected.sh");
+        write_executable(
+            &selected,
+            r#"#!/bin/sh
+printf 'version=%s\n' "$EDGEPAD_VERSION"
+printf 'arg=%s\n' "$@"
+exit "$EDGEPAD_TEST_CHILD"
+"#,
+        );
+        write_executable(
+            &bin.join("curl"),
+            r#"#!/bin/sh
+out=
+for arg in "$@"; do url="$arg"; done
+printf '%s\n' "$url" >> "$EDGEPAD_TEST_LOG"
+case "$url" in
+    https://github.com/assembledev/edgepad/releases/latest)
+        [ "$EDGEPAD_TEST_RESOLVE" = 0 ] || exit "$EDGEPAD_TEST_RESOLVE"
+        printf 'https://github.com/assembledev/edgepad/releases/tag/v0.3.0'
+        ;;
+    https://raw.githubusercontent.com/assembledev/edgepad/v0.3.0/install.sh)
+        [ "$EDGEPAD_TEST_DOWNLOAD" = 0 ] || exit "$EDGEPAD_TEST_DOWNLOAD"
+        while [ "$#" -gt 0 ]; do
+            case "$1" in -o) out="$2"; shift 2 ;; *) shift ;; esac
+        done
+        cp "$EDGEPAD_TEST_SELECTED" "$out"
+        ;;
+    *) exit 99 ;;
+esac
+"#,
+        );
+        let output = Command::new("sh")
+            .arg("install.sh")
+            // An option unknown to this installer must reach the selected version.
+            .args(["--version-specific-option", "value with spaces"])
+            .env("HOME", &home)
+            .env("TMPDIR", &tmp)
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            )
+            .env("EDGEPAD_REPO", "assembledev/edgepad")
+            .env("EDGEPAD_VERSION", version)
+            .env("EDGEPAD_TEST_LOG", &log)
+            .env("EDGEPAD_TEST_SELECTED", &selected)
+            .env("EDGEPAD_TEST_RESOLVE", resolve.to_string())
+            .env("EDGEPAD_TEST_DOWNLOAD", download.to_string())
+            .env("EDGEPAD_TEST_CHILD", child.to_string())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected), "{name}: {output:?}");
+        let requests = fs::read_to_string(log).unwrap();
+        assert_eq!(
+            requests.matches("/releases/latest").count(),
+            usize::from(version == "latest")
+        );
+        assert_eq!(
+            requests.matches("/v0.3.0/install.sh").count(),
+            usize::from(resolve == 0)
+        );
+        assert!(
+            !requests.contains("/download/"),
+            "the selected installer owns asset selection"
+        );
+        if resolve == 0 && download == 0 {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(stdout.contains(
+                "version=v0.3.0\narg=--version-specific-option\narg=value with spaces\n"
+            ));
+        }
+        assert_eq!(fs::read_dir(&home).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(&tmp).unwrap().count(), 0);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

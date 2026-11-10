@@ -48,4 +48,6 @@ pub(super) struct RawSliderBindingConfig {
     pub(super) down: Option<Vec<String>>,
     pub(super) left: Option<Vec<String>>,
     pub(super) right: Option<Vec<String>>,
+    pub(super) on_release: Option<Vec<String>>,
+    pub(super) on_cancel: Option<Vec<String>>,
 }

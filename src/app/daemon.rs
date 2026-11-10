@@ -215,6 +215,10 @@ impl DaemonRuntimeHandler {
 }
 
 impl GestureHandler for DaemonRuntimeHandler {
+    fn handle_slider_end(&mut self, end: edgepad::core::SliderEnd) {
+        self.dispatcher.dispatch_slider_end(end);
+    }
+
     fn handle_gesture(&mut self, gesture: edgepad::core::Gesture) {
         self.dispatcher.dispatch_gesture(gesture);
     }

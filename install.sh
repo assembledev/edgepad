@@ -1,12 +1,18 @@
 #!/bin/sh
 set -eu
 
+INSTALLER_VERSION="v0.4.0"
 REPO="${EDGEPAD_REPO:-assembledev/edgepad}"
 VERSION="${EDGEPAD_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/bin"
 CONFIG_HOME="${XDG_CONFIG_HOME:-${HOME}/.config}"
 CONFIG_DIR="${CONFIG_HOME}/edgepad"
 CONFIG_FILE="${CONFIG_DIR}/edgepad.toml"
+REFERENCE_FILE="${CONFIG_DIR}/edgepad.toml.example"
+STARTER_VOLUME=0
+STARTER_BRIGHTNESS=0
+STARTER_NOTIFICATIONS=0
+NEW_CONFIG=0
 SYSTEMD_USER_DIR="${CONFIG_HOME}/systemd/user"
 SERVICE_FILE="${SYSTEMD_USER_DIR}/edgepad.service"
 UDEV_RULE_FILE="${EDGEPAD_UDEV_RULE_FILE:-/etc/udev/rules.d/70-edgepad.rules}"
@@ -130,6 +136,95 @@ sudo_remove_file_if_present() {
     return 1
 }
 
+action_available() {
+    (PATH="$SERVICE_PATH" command -v "$1" >/dev/null 2>&1)
+}
+
+write_starter_config() {
+    action_available pamixer && STARTER_VOLUME=1
+    action_available brightnessctl && STARTER_BRIGHTNESS=1
+    if [ "$STARTER_VOLUME" -eq 0 ] && [ "$STARTER_BRIGHTNESS" -eq 0 ]; then
+        if action_available notify-send; then
+            STARTER_NOTIFICATIONS=1
+        else
+            die "No starter tools found (pamixer, brightnessctl or notify-send). Binary and reference installed; configure an action in ${CONFIG_FILE}, then rerun the installer. Service was not started."
+        fi
+    fi
+    {
+        printf 'device = "auto"\n'
+        if [ "$STARTER_VOLUME" -eq 1 ]; then
+            cat <<'EOF'
+
+[[sliders]]
+zone = "left"
+up = ["pamixer", "-i", "3"]
+down = ["pamixer", "-d", "3"]
+
+[[gestures]]
+zone = "left"
+direction = "tap"
+action = ["pamixer", "-t"]
+EOF
+        fi
+        if [ "$STARTER_BRIGHTNESS" -eq 1 ]; then
+            cat <<'EOF'
+
+[[sliders]]
+zone = "right"
+up = ["brightnessctl", "--class=backlight", "set", "+5%"]
+down = ["brightnessctl", "--class=backlight", "set", "5%-"]
+EOF
+        fi
+        if [ "$STARTER_NOTIFICATIONS" -eq 1 ]; then
+            cat <<'EOF'
+
+[[sliders]]
+zone = "left"
+up = ["notify-send", "edgepad", "Slide up"]
+down = ["notify-send", "edgepad", "Slide down"]
+
+[[gestures]]
+zone = "left"
+direction = "tap"
+action = ["notify-send", "edgepad", "Tap"]
+EOF
+        fi
+    } > "$CONFIG_FILE"
+    NEW_CONFIG=1
+}
+
+print_install_finish() {
+    info ""
+    info "Edgepad is running."
+    if [ "$NEW_CONFIG" -eq 1 ]; then
+        info ""
+        if [ "$STARTER_VOLUME" -eq 1 ]; then
+            info "Left edge: slide up/down for volume; tap to toggle mute."
+        else
+            info "Volume starter omitted: pamixer not found."
+        fi
+        if [ "$STARTER_BRIGHTNESS" -eq 1 ]; then
+            info "Right edge: slide up/down for backlight brightness."
+        else
+            info "Brightness starter omitted: brightnessctl not found."
+        fi
+        if [ "$STARTER_NOTIFICATIONS" -eq 1 ]; then
+            info "Left edge: slide or tap to show test notifications."
+        fi
+    else
+        info "Existing configuration preserved. Inspect it with: ${BIN_DIR}/edgepad status"
+    fi
+    info ""
+    info "Config     ${CONFIG_FILE}"
+    info "Reference  ${REFERENCE_FILE}"
+    info "Reload     systemctl --user reload edgepad.service"
+    info "Stop       systemctl --user stop edgepad.service"
+    case ":${PATH:-}:" in
+        *":${BIN_DIR}:"*) ;;
+        *) info ""; info "${BIN_DIR} is not on your PATH. For now, run: ${BIN_DIR}/edgepad status" ;;
+    esac
+}
+
 print_install_dry_run_plan() {
     info "Dry run: edgepad install preview"
     info ""
@@ -152,6 +247,22 @@ print_install_dry_run_plan() {
     info "Would copy binary to:"
     info "  ${tmp_dir}/${asset} -> ${BIN_DIR}/edgepad"
     info ""
+    if [ -e "$CONFIG_FILE" ]; then
+        info "Would keep existing config:"
+        info "  ${CONFIG_FILE}"
+    else
+        info "Would generate ${CONFIG_FILE} using available service-PATH tools:"
+        info "  pamixer: left volume slider and mute tap"
+        info "  brightnessctl: right brightness slider"
+        info "  neither: left notification gestures if notify-send is available"
+        info "  none: leave service unstarted and request a custom configuration"
+    fi
+    info ""
+    info "Would install the reference example if absent: ${REFERENCE_FILE}"
+    info "Would check configuration before changing the service:"
+    info "  ${BIN_DIR}/edgepad doctor --config-only --config ${CONFIG_FILE}"
+    info "  Missing action tools warn; invalid configuration stops installation."
+    info ""
     info "Would copy udev rule with sudo:"
     info "  ${tmp_dir}/70-edgepad.rules -> ${UDEV_RULE_FILE}"
     info "Would run:"
@@ -159,21 +270,13 @@ print_install_dry_run_plan() {
     info "  sudo udevadm trigger --subsystem-match=input --action=change"
     info "  sudo udevadm trigger --subsystem-match=misc --action=change"
     info ""
-    if [ -e "$CONFIG_FILE" ]; then
-        info "Would keep existing config:"
-        info "  ${CONFIG_FILE}"
-    else
-        info "Would copy default config to:"
-        info "  ${tmp_dir}/edgepad.toml.example -> ${CONFIG_FILE}"
-    fi
-    info ""
     info "Would configure the systemd user service to read:"
     info "  ${CONFIG_FILE}"
     info "Would install systemd user service to:"
     info "  ${SERVICE_FILE}"
     info "Would run:"
     info "  systemctl --user daemon-reload"
-    info "  systemctl --user enable edgepad.service"
+    info "  systemctl --user enable ${SERVICE_FILE}"
     info "  systemctl --user restart edgepad.service"
     info "  systemctl --user is-active --quiet edgepad.service"
     info ""
@@ -215,6 +318,35 @@ print_uninstall_dry_run_plan() {
     info ""
     info "Dry run complete; no files were changed."
 }
+
+# Select one release before parsing its installer options or changing the system.
+# Local help and uninstall remain available without a network connection.
+dispatch_release=1
+for arg in "$@"; do
+    case "$arg" in -h|--help|--uninstall) dispatch_release=0 ;; esac
+done
+if [ "$dispatch_release" -eq 1 ]; then
+    if [ "$VERSION" = latest ]; then
+        need_command curl
+        release_url=$(curl -fsSLI --retry 3 -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")
+        case "$release_url" in
+            "https://github.com/${REPO}/releases/tag/"*) VERSION=${release_url##*/} ;;
+            *) die "could not resolve latest release tag" ;;
+        esac
+    fi
+    case "$VERSION" in
+        ""|*[!a-zA-Z0-9._-]*) die "invalid release tag: ${VERSION}" ;;
+    esac
+    if [ "$VERSION" != "$INSTALLER_VERSION" ]; then
+        need_command curl
+        handoff_dir=$(mktemp -d)
+        trap 'rm -rf -- "$handoff_dir"' EXIT HUP INT TERM
+        download "https://raw.githubusercontent.com/${REPO}/${VERSION}/install.sh" "$handoff_dir/install.sh"
+        info "Using the installer from ${VERSION}."
+        EDGEPAD_VERSION="$VERSION" sh "$handoff_dir/install.sh" "$@"
+        exit $?
+    fi
+fi
 
 for arg in "$@"; do
     case "$arg" in
@@ -294,11 +426,7 @@ case "${kernel}-${machine}" in
 esac
 
 asset="edgepad-${target}"
-if [ "$VERSION" = "latest" ]; then
-    release_base="https://github.com/${REPO}/releases/latest/download"
-else
-    release_base="https://github.com/${REPO}/releases/download/${VERSION}"
-fi
+release_base="https://github.com/${REPO}/releases/download/${VERSION}"
 
 if [ "$DRY_RUN" -eq 0 ]; then
     need_command curl
@@ -334,25 +462,48 @@ download "${release_base}/edgepad.toml.example" "${tmp_dir}/edgepad.toml.example
 download "${release_base}/checksums" "${tmp_dir}/checksums"
 
 (cd "$tmp_dir" && sha256sum -c checksums)
+# Check action availability in the PATH supplied by this release's service,
+# not the invoking shell's PATH. Expand the service's home specifier literally.
+SERVICE_PATH=$(EDGEPAD_INSTALL_HOME="$HOME" awk '
+    /^Environment=PATH=/ {
+        count++
+        n = split(substr($0, 18), parts, /%h/)
+        printf "%s", parts[1]
+        for (i = 2; i <= n; i++) printf "%s%s", ENVIRON["EDGEPAD_INSTALL_HOME"], parts[i]
+    }
+    END { if (count != 1) exit 1 }
+' "${tmp_dir}/edgepad.service") || die "release service must define one action PATH"
 render_user_service "${tmp_dir}/edgepad.service" > "${tmp_dir}/edgepad.service.configured"
 
 run install -Dm0755 "${tmp_dir}/${asset}" "${BIN_DIR}/edgepad"
+if [ ! -e "$REFERENCE_FILE" ]; then
+    run install -Dm0644 "${tmp_dir}/edgepad.toml.example" "$REFERENCE_FILE"
+fi
+if [ -e "$CONFIG_FILE" ]; then
+    info "Keeping existing config: ${CONFIG_FILE}"
+else
+    write_starter_config
+fi
+
+check_result=0
+PATH="$SERVICE_PATH" "${BIN_DIR}/edgepad" doctor --config-only --config "$CONFIG_FILE" || check_result=$?
+case "$check_result" in
+    0) ;;
+    1) warn "Some configured action tools are unavailable; keeping your bindings and continuing." ;;
+    *) die "Configuration check failed. Fix ${CONFIG_FILE} and rerun; service was not restarted." ;;
+esac
+
 sudo_run install -Dm0644 "${tmp_dir}/70-edgepad.rules" "$UDEV_RULE_FILE"
 sudo_run udevadm control --reload
 sudo_run_optional udevadm trigger --subsystem-match=input --action=change
 sudo_run_optional udevadm trigger --subsystem-match=misc --action=change
-
-if [ -e "$CONFIG_FILE" ]; then
-    info "Keeping existing config: ${CONFIG_FILE}"
-else
-    run install -Dm0644 "${tmp_dir}/edgepad.toml.example" "$CONFIG_FILE"
-fi
-
 run install -Dm0644 "${tmp_dir}/edgepad.service.configured" "$SERVICE_FILE"
 run systemctl --user daemon-reload
-run systemctl --user enable edgepad.service
-run systemctl --user restart edgepad.service
-run systemctl --user is-active --quiet edgepad.service
-run "${BIN_DIR}/edgepad" doctor --config "$CONFIG_FILE"
-
-info "edgepad installed"
+run systemctl --user enable "$SERVICE_FILE"
+if ! systemctl --user restart edgepad.service || ! systemctl --user is-active --quiet edgepad.service; then
+    PATH="$SERVICE_PATH" "${BIN_DIR}/edgepad" doctor --config "$CONFIG_FILE" || :
+    die "Edgepad could not start. See the diagnostics above and journalctl --user -u edgepad.service -b."
+fi
+# Missing optional action tools must not turn a running installation into a failure.
+PATH="$SERVICE_PATH" "${BIN_DIR}/edgepad" doctor --config "$CONFIG_FILE" || warn "Doctor reported issues; review the diagnostics above."
+print_install_finish

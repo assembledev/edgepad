@@ -73,6 +73,17 @@ fn command_usages(config: &EdgepadConfig) -> BTreeMap<String, Vec<String>> {
         }
     }
     for slider in &config.sliders {
+        for (name, action) in [
+            ("on_release", &slider.on_release),
+            ("on_cancel", &slider.on_cancel),
+        ] {
+            if let Some(program) = action.as_ref().and_then(|action| action.argv.first()) {
+                usages
+                    .entry(program.clone())
+                    .or_default()
+                    .push(format!("{}.{name}", zone_name(slider.zone)));
+            }
+        }
         let directions = match slider.axis {
             SliderAxis::Vertical => [SliderDirection::Up, SliderDirection::Down],
             SliderAxis::Horizontal => [SliderDirection::Left, SliderDirection::Right],

@@ -16,6 +16,7 @@ pub use report::{CheckStatus, DoctorCheck, DoctorCounts, DoctorReport, DoctorSec
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorConfig {
+    pub config_only: bool,
     pub config_path: Option<PathBuf>,
     pub device_override: Option<DeviceConfig>,
     pub input_root: PathBuf,
@@ -26,6 +27,7 @@ pub struct DoctorConfig {
 impl Default for DoctorConfig {
     fn default() -> Self {
         Self {
+            config_only: false,
             config_path: None,
             device_override: None,
             input_root: PathBuf::from("/dev/input"),
@@ -43,6 +45,10 @@ pub fn run_doctor(config: &DoctorConfig) -> DoctorReport {
     let mut checks = configuration.checks;
     if let Some(loaded) = configuration.loaded.as_ref() {
         checks.extend(commands::check(loaded));
+    }
+
+    if config.config_only {
+        return DoctorReport { checks };
     }
 
     // Device access can still be diagnosed when the config is missing or invalid.

@@ -93,6 +93,9 @@ impl From<DiagnosticArgs> for StatusConfig {
 
 #[derive(Debug, Args)]
 pub(super) struct DoctorArgs {
+    /// Check only configuration and action executables, without accessing devices or services
+    #[arg(long)]
+    config_only: bool,
     #[command(flatten)]
     common: DiagnosticArgs,
     /// Uinput device path
@@ -103,6 +106,7 @@ pub(super) struct DoctorArgs {
 impl From<DoctorArgs> for DoctorConfig {
     fn from(args: DoctorArgs) -> Self {
         Self {
+            config_only: args.config_only,
             config_path: args.common.config_path,
             device_override: args.common.device_override,
             input_root: args.common.input_root,

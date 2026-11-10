@@ -127,7 +127,7 @@ fn slider_consumption_does_not_survive_lift() {
     let motion = engine
         .process_frame_at(&[Event::y(500)], Duration::from_millis(100))
         .unwrap();
-    assert!(!motion.slider_steps.is_empty());
+    assert!(!motion.slider_steps().is_empty());
     let up = engine
         .process_frame_at(&[Event::tracking_id(-1)], Duration::from_millis(110))
         .unwrap();
@@ -142,7 +142,7 @@ fn slider_consumption_does_not_survive_lift() {
     assert_eq!(up.gestures.len(), 1);
     assert_eq!(up.gestures[0].tracking_id, 11);
     assert_eq!(up.gestures[0].direction, GestureDirection::Tap);
-    assert!(up.slider_steps.is_empty());
+    assert!(up.slider_steps().is_empty());
 }
 
 #[test]

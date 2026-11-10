@@ -27,6 +27,7 @@ pub(super) enum ContactPhase {
 #[derive(Debug, Clone)]
 pub(super) struct Contact {
     pub(super) tracking_id: i32,
+    pub(super) active_slider: Option<Zone>,
     pub(super) ownership: Ownership,
     pub(super) contact_phase: ContactPhase,
     pub(super) start_x: Option<i32>,
@@ -59,6 +60,7 @@ impl Contact {
     ) -> Self {
         Self {
             tracking_id,
+            active_slider: None,
             ownership: Ownership::Unknown,
             contact_phase: ContactPhase::TapCandidate,
             start_x: None,
@@ -88,6 +90,21 @@ impl Contact {
             contact.reject_gestures();
         }
         contact
+    }
+
+    pub(super) fn end_slider(
+        &mut self,
+        slot: i32,
+        kind: super::SliderEndKind,
+    ) -> Option<super::SliderEvent> {
+        self.active_slider.take().map(|zone| {
+            super::SliderEvent::End(super::SliderEnd {
+                zone,
+                slot,
+                tracking_id: self.tracking_id,
+                kind,
+            })
+        })
     }
 
     pub(super) fn reject_gestures(&mut self) {
@@ -152,10 +169,13 @@ impl Engine {
         output: &mut FrameOutput,
     ) -> Result<(), SlotError> {
         let slot = self.current_slot;
-        let Some(contact) = self.slot_mut(slot)?.take_contact() else {
+        let Some(mut contact) = self.slot_mut(slot)?.take_contact() else {
             self.slot_mut(slot)?.held_events.push(event);
             return Ok(());
         };
+        output
+            .slider_events
+            .extend(contact.end_slider(slot, super::SliderEndKind::Release));
         if contact.gesture_rejected {
             if contact.ownership == Ownership::Passthrough {
                 self.push_passthrough_event_for_current_slot(event, output);

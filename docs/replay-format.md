@@ -186,6 +186,10 @@ released. A fixture that still ends with an active contact is reported as incomp
 
 This is a debug/demo helper, not a replacement for `cargo test`. Fixtures without metadata use default ranges; captures produced by `edgepad dump` include real device ranges and replay uses those instead.
 
+Replay also prints `slider_end slot=… tracking_id=… zone=… kind=release|cancel`
+for completed or interrupted sliders. These events describe recognition even
+when no hook is configured. Replay leaves an unfinished captured drag active.
+
 ## Rationale
 
 Input daemons fail in ugly ways when slot lifecycle is wrong: ghost fingers, stuck touches, shifted finger counts, or compositor gestures needing one extra finger. Fixtures let us turn every such bug into a regression test before touching real `/dev/input` or `uinput`.

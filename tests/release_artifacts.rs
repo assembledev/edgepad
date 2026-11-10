@@ -90,23 +90,33 @@ fn release_workflow_publishes_required_assets_and_checksums() {
     let workflow = include_str!("../.github/workflows/release.yml");
 
     for required in [
-        "edgepad-x86_64-unknown-linux-musl",
-        "70-edgepad.rules",
-        "edgepad.service",
-        "edgepad.toml.example",
-        "checksums",
         "Verify tag matches Cargo version",
         "v$PACKAGE_VERSION",
-        "gh release create",
+        "nix build --quiet .#release",
+        "gh release create \"$TAG_NAME\" result/*",
         "--generate-notes",
-        "targets: x86_64-unknown-linux-musl",
-        "--target x86_64-unknown-linux-musl",
-        "readelf -l",
-        "INTERP",
+        "--draft",
     ] {
         assert!(
             workflow.contains(required),
             "release workflow should mention {required}"
+        );
+    }
+    let package = include_str!("../nix/release.nix");
+    for required in [
+        "edgepad-x86_64-unknown-linux-musl",
+        "70-edgepad.rules",
+        "edgepad.service",
+        "edgepad.toml.example",
+        "sha256sum",
+        "checksums",
+        "readelf -l",
+        "INTERP",
+        "--version",
+    ] {
+        assert!(
+            package.contains(required),
+            "release package should mention {required}"
         );
     }
 }
