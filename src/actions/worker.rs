@@ -72,12 +72,19 @@ impl ActionWorker {
 
     // A reserved permit keeps room for the terminal action throughout a drag.
     pub(super) fn reserve(&self) -> Option<QueuePermit> {
-        self.occupied
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |occupied| {
-                (occupied < self.capacity).then_some(occupied + 1)
-            })
-            .ok()
-            .map(|_| QueuePermit(self.occupied.clone()))
+        let mut occupied = self.occupied.load(Ordering::Acquire);
+        while occupied < self.capacity {
+            match self.occupied.compare_exchange_weak(
+                occupied,
+                occupied + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Some(QueuePermit(self.occupied.clone())),
+                Err(current) => occupied = current,
+            }
+        }
+        None
     }
 
     pub(super) fn enqueue(&self, source: ActionSource, argv: Vec<String>) -> bool {
