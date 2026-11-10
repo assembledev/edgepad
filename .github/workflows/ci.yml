@@ -15,16 +15,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
         with:
-          components: rustfmt, clippy
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: nix develop --command cargo fmt --check
 
       - name: Check installer shell syntax
         run: sh -n install.sh
@@ -39,10 +36,10 @@ jobs:
         run: ./install.sh --uninstall --purge --dry-run
 
       - name: Run clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: nix develop --command cargo clippy --locked --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked
+        run: nix develop --command cargo test --locked
 
   nix:
     name: Nix

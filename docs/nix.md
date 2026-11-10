@@ -204,6 +204,9 @@ Or run one command inside the shell:
 nix develop -c cargo test --locked
 ```
 
+The Rust CI job runs formatting, Clippy, and tests through this same development
+shell. Its Rust version follows the `rust-overlay` revision in `flake.lock`.
+
 The shell includes stable Rust, `rust-src`, `rust-analyzer`, `clippy`, `rustfmt`, `evtest`, and
 `libinput`.
 
