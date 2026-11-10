@@ -51,7 +51,7 @@ fn daemon_statistics_do_not_retain_event_history() {
             &mut stats,
             crate::raw::RoutedRawFrame {
                 gestures: vec![gesture],
-                slider_steps: vec![step],
+                slider_events: vec![crate::core::SliderEvent::Step(step)],
                 ..Default::default()
             },
             &mut handler,
@@ -104,12 +104,12 @@ fn bounded_proxy_statistics_preserve_ordered_event_history() {
                         slot: 0,
                         tracking_id,
                     }],
-                    slider_steps: vec![SliderStep {
+                    slider_events: vec![crate::core::SliderEvent::Step(SliderStep {
                         zone: Zone::Right,
                         direction: SliderDirection::Down,
                         slot: 1,
                         tracking_id,
-                    }],
+                    })],
                     ..Default::default()
                 },
                 &mut handler,

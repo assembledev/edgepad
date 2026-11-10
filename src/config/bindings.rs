@@ -17,6 +17,8 @@ pub struct SliderBindingConfig {
     pub step: f32,
     pub negative: CommandActionConfig,
     pub positive: CommandActionConfig,
+    pub on_release: Option<CommandActionConfig>,
+    pub on_cancel: Option<CommandActionConfig>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -119,17 +119,22 @@ impl Engine {
         } else {
             BTreeMap::new()
         };
+        let mut output = FrameOutput::empty();
+        output.slider_events.append(&mut self.pending_slider_events);
         for (index, slot) in self.slots.iter_mut().enumerate() {
             if let Some(contact) = &mut slot.contact {
                 if frame_tools
                     .get(&(self.caps.slot_min + index as i32, contact.tracking_id))
                     .is_some_and(|tool| tool.is_palm())
                 {
+                    output.slider_events.extend(contact.end_slider(
+                        self.caps.slot_min + index as i32,
+                        super::SliderEndKind::Cancel,
+                    ));
                     contact.reject_gestures();
                 }
             }
         }
-        let mut output = FrameOutput::empty();
         if let Some(timestamp) = timestamp {
             self.expire_pending_tap(timestamp, &mut output);
         }
@@ -137,6 +142,7 @@ impl Engine {
         for event in frame.iter().copied() {
             match event {
                 Event::SynDropped => {
+                    output.slider_events.extend(self.cancel_sliders());
                     self.reset_for_resync();
                     output.resync_required = true;
                 }

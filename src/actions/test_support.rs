@@ -62,6 +62,8 @@ pub(super) fn slider_binding(
         zone,
         axis,
         step: 0.04,
+        on_release: None,
+        on_cancel: None,
         negative: command_action(negative),
         positive: command_action(positive),
     }

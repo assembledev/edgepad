@@ -209,6 +209,35 @@ pub struct SliderStep {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliderEndKind {
+    Release,
+    Cancel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliderEnd {
+    pub zone: Zone,
+    pub slot: i32,
+    pub tracking_id: i32,
+    pub kind: SliderEndKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SliderEvent {
+    Step(SliderStep),
+    End(SliderEnd),
+}
+
+impl SliderEvent {
+    pub fn step(&self) -> Option<SliderStep> {
+        match self {
+            Self::Step(step) => Some(*step),
+            Self::End(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResyncContact {
     pub slot: i32,
     pub tracking_id: i32,
@@ -229,17 +258,26 @@ pub(crate) struct SlotSnapshot {
 pub struct FrameOutput {
     pub passthrough: Vec<Event>,
     pub gestures: Vec<Gesture>,
-    pub slider_steps: Vec<SliderStep>,
+    /// Steps and endings in recognition order, including within one frame.
+    pub slider_events: Vec<SliderEvent>,
     /// Live callers must rebuild state from a kernel snapshot before resuming input.
     pub resync_required: bool,
 }
 
 impl FrameOutput {
+    /// Collect movement steps for callers that do not consume lifecycle events.
+    pub fn slider_steps(&self) -> Vec<SliderStep> {
+        self.slider_events
+            .iter()
+            .filter_map(SliderEvent::step)
+            .collect()
+    }
+
     pub(super) fn empty() -> Self {
         Self {
             passthrough: Vec::new(),
             gestures: Vec::new(),
-            slider_steps: Vec::new(),
+            slider_events: Vec::new(),
             resync_required: false,
         }
     }

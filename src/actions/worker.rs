@@ -1,4 +1,9 @@
-use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
+};
+
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -10,14 +15,31 @@ const ACTION_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const ACTION_WORKER_SHUTDOWN_JOIN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
+pub(super) struct QueuePermit(Arc<AtomicUsize>);
+
+impl Drop for QueuePermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug)]
+struct QueuedCommand {
+    command: ActionCommand,
+    permit: QueuePermit,
+}
+
+#[derive(Debug)]
 pub(super) struct ActionWorker {
     running: Option<RunningWorker>,
     pub stats: SharedActionStats,
+    occupied: Arc<AtomicUsize>,
+    capacity: usize,
 }
 
 #[derive(Debug)]
 struct RunningWorker {
-    sender: SyncSender<ActionCommand>,
+    sender: SyncSender<QueuedCommand>,
     thread: JoinHandle<()>,
     shutdown: ActionShutdownToken,
 }
@@ -43,19 +65,71 @@ impl ActionWorker {
                 shutdown,
             }),
             stats,
+            occupied: Arc::new(AtomicUsize::new(0)),
+            capacity,
         })
     }
 
-    pub(super) fn enqueue(&self, source: ActionSource, argv: Vec<String>) {
-        let Some(running) = &self.running else {
+    // A reserved permit keeps room for the terminal action throughout a drag.
+    pub(super) fn reserve(&self) -> Option<QueuePermit> {
+        self.occupied
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |occupied| {
+                (occupied < self.capacity).then_some(occupied + 1)
+            })
+            .ok()
+            .map(|_| QueuePermit(self.occupied.clone()))
+    }
+
+    pub(super) fn enqueue(&self, source: ActionSource, argv: Vec<String>) -> bool {
+        // Preserve the existing nonblocking rendezvous behavior for capacity zero.
+        if self.capacity == 0 {
+            self.occupied.fetch_add(1, Ordering::AcqRel);
+            return self.enqueue_reserved(source, argv, QueuePermit(self.occupied.clone()));
+        }
+        let Some(permit) = self.reserve() else {
             self.stats.increment_dropped_commands();
+            return false;
+        };
+        self.enqueue_reserved(source, argv, permit)
+    }
+
+    pub(super) fn enqueue_reserved(
+        &self,
+        source: ActionSource,
+        argv: Vec<String>,
+        permit: QueuePermit,
+    ) -> bool {
+        let queued = QueuedCommand {
+            command: ActionCommand { source, argv },
+            permit,
+        };
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.sender.try_send(queued).is_ok())
+        {
+            self.stats.increment_queued_commands();
+            true
+        } else {
+            self.stats.increment_dropped_commands();
+            false
+        }
+    }
+
+    pub(super) fn drain(&mut self) {
+        let Some(running) = self.running.take() else {
             return;
         };
-        match running.sender.try_send(ActionCommand { source, argv }) {
-            Ok(()) => self.stats.increment_queued_commands(),
-            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                self.stats.increment_dropped_commands();
+        drop(running.sender);
+        if !wait_for_action_worker_shutdown(&running.thread, ACTION_WORKER_SHUTDOWN_TIMEOUT) {
+            running.shutdown.request();
+        }
+        if wait_for_action_worker_shutdown(&running.thread, ACTION_WORKER_SHUTDOWN_TIMEOUT) {
+            if running.thread.join().is_err() {
+                self.stats.increment_worker_panics();
             }
+        } else {
+            self.stats.increment_worker_shutdown_timeouts();
         }
     }
 
@@ -92,7 +166,7 @@ impl Drop for ActionWorker {
 }
 
 fn run_action_worker<R>(
-    receiver: Receiver<ActionCommand>,
+    receiver: Receiver<QueuedCommand>,
     mut runner: R,
     stats: SharedActionStats,
     shutdown: ActionShutdownToken,
@@ -100,13 +174,15 @@ fn run_action_worker<R>(
     R: ActionCommandRunner,
 {
     while !shutdown.is_requested() {
-        let Ok(command) = receiver.recv() else {
+        let Ok(queued) = receiver.recv() else {
             break;
         };
         if shutdown.is_requested() {
             break;
         }
 
+        let QueuedCommand { command, permit } = queued;
+        drop(permit);
         stats.increment_started_commands();
         match runner.run(&command.argv, &shutdown) {
             Ok(status) if status.success => stats.increment_succeeded_commands(),

@@ -126,6 +126,10 @@ edgepad doctor
 systemctl --user status edgepad.service
 ```
 
+Slider bindings accept optional `onRelease` and `onCancel` argv lists. These
+produce the `on_release` and `on_cancel` TOML fields described in
+[slider configuration](configuration.md#sliders).
+
 Home Manager reloads gesture, slider, edge-width, and timing changes when it activates a new
 generation. A reload waits for active contacts to lift and keeps the previous configuration if
 validation fails. Package, device-selection, and palm-rejection changes restart the service.

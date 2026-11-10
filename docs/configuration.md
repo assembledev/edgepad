@@ -49,6 +49,38 @@ An edge can have one slider alongside tap and double-tap bindings. It cannot
 have both a slider and a directional swipe binding. Once a slider emits a step,
 lifting the finger won't also trigger a tap.
 
+Sliders also accept optional `on_release` and `on_cancel` command arrays:
+
+```toml
+[[sliders]]
+zone = "bottom"
+step = 0.12
+left = ["desktop-shell", "alttab", "prev"]
+right = ["desktop-shell", "alttab", "next"]
+on_release = ["desktop-shell", "alttab", "commit"]
+on_cancel = ["desktop-shell", "alttab", "cancel"]
+```
+
+The first emitted step starts the interaction. Lifting that finger runs
+`on_release` once, after its final step. Palm rejection, buttonpad promotion
+to pointer input, and lost input (`SYN_DROPPED`) run `on_cancel` once.
+A touch below the step threshold remains eligible for the usual tap rules.
+Once a slider with hooks accepts a finger, overlapping fingers on that slider
+are ignored until they lift.
+
+The action worker reserves capacity for the ending command before accepting
+the first step. If capacity is unavailable, that interaction is skipped.
+Movement commands can still be dropped under load. Hook argv is captured at
+the first accepted step, so an interaction retains its original ending command
+across configuration reloads. Slider bindings without hooks use ordinary
+step dispatch.
+
+On daemon exit, active interactions receive cancellation commands. The worker
+allows up to one second for queued actions to finish, then interrupts the
+running command and allows up to one further second for cleanup. Command
+failure, an unresponsive command, or forcible process termination can prevent
+external cleanup. Hook commands should finish promptly.
+
 ## Actions
 
 An action is an array containing a program and its arguments. The program must

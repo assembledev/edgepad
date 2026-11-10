@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::core::{Engine, Event, Gesture, ResyncContact, SliderStep, SlotError};
+use crate::core::{Engine, Event, Gesture, ResyncContact, SliderEvent, SliderStep, SlotError};
 
 use super::events::*;
 
@@ -9,8 +9,19 @@ pub struct RoutedRawFrame {
     pub passthrough: Vec<RawEvent>,
     pub physical_buttons: Vec<RawEvent>,
     pub gestures: Vec<Gesture>,
-    pub slider_steps: Vec<SliderStep>,
+    /// Steps and endings in recognition order, including within one frame.
+    pub slider_events: Vec<SliderEvent>,
     pub resync_required: bool,
+}
+
+impl RoutedRawFrame {
+    /// Collect movement steps for callers that do not consume lifecycle events.
+    pub fn slider_steps(&self) -> Vec<SliderStep> {
+        self.slider_events
+            .iter()
+            .filter_map(SliderEvent::step)
+            .collect()
+    }
 }
 
 pub fn extract_core_events(frame: &RawFrame) -> Vec<Event> {
@@ -56,7 +67,7 @@ pub fn route_raw_frame(engine: &mut Engine, frame: &RawFrame) -> Result<RoutedRa
         passthrough,
         physical_buttons,
         gestures: canceled_tap_gestures,
-        slider_steps: output.slider_steps,
+        slider_events: output.slider_events,
         resync_required: output.resync_required,
     })
 }
@@ -67,7 +78,7 @@ pub fn route_recognition_deadline(engine: &mut Engine, timestamp: Duration) -> R
         passthrough: Vec::new(),
         physical_buttons: Vec::new(),
         gestures: output.gestures,
-        slider_steps: Vec::new(),
+        slider_events: Vec::new(),
         resync_required: false,
     }
 }
@@ -81,7 +92,7 @@ pub fn route_resync_contacts(
         passthrough: raw_passthrough_events(output.passthrough),
         physical_buttons: Vec::new(),
         gestures: Vec::new(),
-        slider_steps: Vec::new(),
+        slider_events: output.slider_events,
         resync_required: false,
     })
 }

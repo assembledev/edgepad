@@ -87,12 +87,12 @@ fn late_palm_suppresses_slider_steps_even_after_coordinates_in_same_frame() {
         vec![RawEvent::abs_mt_position_y(500), tool(2)],
     );
     assert!(
-        output.slider_steps.is_empty(),
+        output.slider_steps().is_empty(),
         "palm classification applies to the complete frame"
     );
     assert!(
         route(&mut engine, 1100, vec![RawEvent::abs_mt_position_y(650)])
-            .slider_steps
+            .slider_steps()
             .is_empty()
     );
     assert!(
@@ -184,9 +184,9 @@ fn palm_flag_before_contact_start_and_after_coordinates_have_same_result() {
         } else {
             events.push(tool(2));
         }
-        assert!(route(&mut engine, 1000, events).slider_steps.is_empty());
+        assert!(route(&mut engine, 1000, events).slider_steps().is_empty());
         let moved = route(&mut engine, 1050, vec![RawEvent::abs_mt_position_y(600)]);
-        assert!(moved.slider_steps.is_empty());
+        assert!(moved.slider_steps().is_empty());
         assert!(
             route(&mut engine, 1100, vec![RawEvent::abs_mt_tracking_id(-1)])
                 .gestures
@@ -330,7 +330,7 @@ fn slider_steps_before_detection_remain_valid_but_no_more_are_emitted() {
     route(&mut engine, 1000, down(34, 20, 300));
     assert!(
         !route(&mut engine, 1050, vec![RawEvent::abs_mt_position_y(400)])
-            .slider_steps
+            .slider_steps()
             .is_empty()
     );
     assert!(route(
@@ -338,14 +338,14 @@ fn slider_steps_before_detection_remain_valid_but_no_more_are_emitted() {
         1100,
         vec![RawEvent::abs_mt_position_y(600), tool(2)]
     )
-    .slider_steps
+    .slider_steps()
     .is_empty());
     assert!(route(
         &mut engine,
         1150,
         vec![tool(0), RawEvent::abs_mt_position_y(200)]
     )
-    .slider_steps
+    .slider_steps()
     .is_empty());
 }
 

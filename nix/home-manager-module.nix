@@ -101,6 +101,17 @@ let
         description = "Normalized touchpad movement required to emit one slider step.";
       };
 
+      onRelease = lib.mkOption {
+        type = lib.types.nullOr commandActionType;
+        default = null;
+        description = "Command argv to run when an active slider is lifted.";
+      };
+      onCancel = lib.mkOption {
+        type = lib.types.nullOr commandActionType;
+        default = null;
+        description = "Command argv to run when an active slider is interrupted.";
+      };
+
       up = sliderActionOption "up";
       down = sliderActionOption "down";
       left = sliderActionOption "left";
@@ -116,7 +127,9 @@ let
     // lib.optionalAttrs (slider.up != null) { inherit (slider) up; }
     // lib.optionalAttrs (slider.down != null) { inherit (slider) down; }
     // lib.optionalAttrs (slider.left != null) { inherit (slider) left; }
-    // lib.optionalAttrs (slider.right != null) { inherit (slider) right; };
+    // lib.optionalAttrs (slider.right != null) { inherit (slider) right; }
+    // lib.optionalAttrs (slider.onRelease != null) { on_release = slider.onRelease; }
+    // lib.optionalAttrs (slider.onCancel != null) { on_cancel = slider.onCancel; };
 
   configFile = toml.generate "edgepad.toml" (
     {

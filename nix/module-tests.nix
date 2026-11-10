@@ -139,6 +139,8 @@ let
           sliders = [
             {
               zone = "left";
+              onRelease = [ "commit-slider" ];
+              onCancel = [ "cancel-slider" ];
               up = [
                 "pamixer"
                 "-i"
@@ -156,6 +158,21 @@ let
     ];
   };
 
+  homeWithoutHooksEval = homeEval.extendModules {
+    modules = [
+      {
+        services.edgepad.sliders = lib.mkForce [
+          {
+            zone = "bottom";
+            left = [ "previous" ];
+            right = [ "next" ];
+          }
+        ];
+      }
+    ];
+  };
+  homeWithoutHooksFile = homeWithoutHooksEval.config.xdg.configFile."edgepad/edgepad.toml".source;
+
   homePalmDisabledEval = homeEval.extendModules {
     modules = [ { services.edgepad.palmRejection = false; } ];
   };
@@ -169,6 +186,8 @@ let
   groupUdevRulesPackage = lib.head nixosGroupEval.config.services.udev.packages;
 
   checked =
+    assert (lib.head homeWithoutHooksEval.config.services.edgepad.sliders).onRelease == null;
+    assert (lib.head homeWithoutHooksEval.config.services.edgepad.sliders).onCancel == null;
     assert lib.elem "uinput" nixosUaccessEval.config.boot.kernelModules;
     assert lib.length nixosUaccessEval.config.services.udev.packages == 1;
     assert lib.elem "uinput" nixosGroupEval.config.boot.kernelModules;
@@ -192,6 +211,8 @@ let
     assert lib.all (entry: entry.assertion) homeEval.config.assertions;
     pkgs.runCommand "edgepad-module-tests" { } ''
       set -eu
+      ! grep -F "on_release" ${homeWithoutHooksFile}
+      ! grep -F "on_cancel" ${homeWithoutHooksFile}
       grep -F 'device = "auto"' ${homeConfigFile}
       grep -F 'edge_width = 0.1' ${homeConfigFile}
       grep -F 'left_edge_width = 0.08' ${homeConfigFile}
@@ -216,6 +237,8 @@ let
       grep -F 'action = ["notify-send", "edgepad", "top-double-tap"]' ${homeConfigFile}
       grep -F '[[sliders]]' ${homeConfigFile}
       grep -F 'zone = "left"' ${homeConfigFile}
+      grep -F 'on_release = ["commit-slider"]' ${homeConfigFile}
+      grep -F 'on_cancel = ["cancel-slider"]' ${homeConfigFile}
       grep -F 'step = 0.04' ${homeConfigFile}
       grep -F 'up = ["pamixer", "-i", "3"]' ${homeConfigFile}
       grep -F 'down = ["pamixer", "-d", "3"]' ${homeConfigFile}

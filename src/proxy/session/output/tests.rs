@@ -280,3 +280,60 @@ fn proxy_handler_receives_slider_steps_live() {
         Some(&3)
     );
 }
+
+#[test]
+fn proxy_delivers_steps_and_endings_in_recognition_order() {
+    use crate::core::{Gesture, SliderEnd, SliderEndKind, SliderEvent, SliderStep};
+    #[derive(Default)]
+    struct Handler(Vec<SliderEvent>);
+    impl GestureHandler for Handler {
+        fn handle_gesture(&mut self, _: Gesture) {}
+        fn handle_slider_step(&mut self, step: SliderStep) {
+            self.0.push(SliderEvent::Step(step));
+        }
+        fn handle_slider_end(&mut self, end: SliderEnd) {
+            self.0.push(SliderEvent::End(end));
+        }
+    }
+    let caps = test_capabilities();
+    let events = vec![
+        SliderEvent::Step(SliderStep {
+            zone: Zone::Bottom,
+            direction: SliderDirection::Right,
+            slot: 0,
+            tracking_id: 1,
+        }),
+        SliderEvent::End(SliderEnd {
+            zone: Zone::Bottom,
+            slot: 0,
+            tracking_id: 1,
+            kind: SliderEndKind::Release,
+        }),
+        SliderEvent::Step(SliderStep {
+            zone: Zone::Bottom,
+            direction: SliderDirection::Left,
+            slot: 1,
+            tracking_id: 2,
+        }),
+        SliderEvent::End(SliderEnd {
+            zone: Zone::Bottom,
+            slot: 1,
+            tracking_id: 2,
+            kind: SliderEndKind::Cancel,
+        }),
+    ];
+    let mut handler = Handler::default();
+    process_proxy_routed_frame(
+        0,
+        &mut RawOutputComposer::new(caps),
+        &mut RecordingRawOutputSink::default(),
+        &mut ProxyRuntimeStats::default(),
+        crate::raw::RoutedRawFrame {
+            slider_events: events.clone(),
+            ..Default::default()
+        },
+        &mut handler,
+    )
+    .unwrap();
+    assert_eq!(handler.0, events);
+}

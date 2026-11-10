@@ -152,6 +152,8 @@ impl Engine {
             let (Some(x), Some(y)) = (contact.current_x, contact.current_y) else {
                 continue;
             };
+            self.pending_slider_events
+                .extend(contact.end_slider(slot_number, super::SliderEndKind::Cancel));
             contact.ownership = Ownership::Passthrough;
             contact.slider_anchor = None;
             let tracking_id = contact.tracking_id;

@@ -3,7 +3,9 @@ use std::sync::{
     Arc,
 };
 
-use crate::core::{Gesture, GestureDirection, SliderDirection, SliderStep, Zone};
+use crate::core::{
+    Gesture, GestureDirection, SliderDirection, SliderEnd, SliderEndKind, SliderStep, Zone,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActionCommandStatus {
@@ -55,6 +57,7 @@ pub(super) struct ActionCommand {
 pub(super) enum ActionSource {
     Gesture(Gesture),
     SliderStep(SliderStep),
+    SliderEnd(SliderEnd),
 }
 
 impl std::fmt::Display for ActionSource {
@@ -65,6 +68,15 @@ impl std::fmt::Display for ActionSource {
                 direction_name(gesture.direction),
                 gesture.slot,
                 gesture.tracking_id,
+            ),
+            Self::SliderEnd(end) => (
+                end.zone,
+                match end.kind {
+                    SliderEndKind::Release => "release",
+                    SliderEndKind::Cancel => "cancel",
+                },
+                end.slot,
+                end.tracking_id,
             ),
             Self::SliderStep(step) => (
                 step.zone,

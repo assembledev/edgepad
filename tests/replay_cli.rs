@@ -563,6 +563,8 @@ zone = "left"
 step = 0.10
 up = ["notify-send", "up"]
 down = ["notify-send", "down"]
+on_release = ["commit-slider"]
+on_cancel = ["cancel-slider"]
 "#,
     );
     fs::write(
@@ -607,6 +609,10 @@ EV_SYN SYN_REPORT 0 100000
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("sliders=1"), "stdout was: {stdout}");
+    assert!(
+        stdout.contains("slider_end slot=0 tracking_id=123 zone=left kind=release"),
+        "{stdout}"
+    );
     assert!(
         stdout.contains("zone=left direction=up"),
         "configured slider should emit upward steps: {stdout}"

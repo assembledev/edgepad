@@ -181,7 +181,7 @@ fn sink_emit_errors_are_returned_without_syncing_partial_frames() {
             ],
             physical_buttons: vec![],
             gestures: vec![],
-            slider_steps: vec![],
+            slider_events: vec![],
             resync_required: false,
         },
         &mut sink,

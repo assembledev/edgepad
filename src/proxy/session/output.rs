@@ -117,9 +117,14 @@ where
         stats.record_gesture(gesture);
         handler.handle_gesture(gesture);
     }
-    for step in routed.slider_steps.iter().copied() {
-        stats.record_slider_step(step);
-        handler.handle_slider_step(step);
+    for event in &routed.slider_events {
+        match *event {
+            crate::core::SliderEvent::Step(step) => {
+                stats.record_slider_step(step);
+                handler.handle_slider_step(step);
+            }
+            crate::core::SliderEvent::End(end) => handler.handle_slider_end(end),
+        }
     }
 
     let output_frame = composer
