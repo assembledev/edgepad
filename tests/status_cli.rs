@@ -37,22 +37,18 @@ fn status_cli_summarizes_config_zones_actions_and_device_state() {
         stdout.contains("Device   auto failed: no event devices"),
         "stdout was: {stdout}"
     );
+    let table_rows: Vec<Vec<&str>> = stdout
+        .lines()
+        .filter(|line| line.starts_with("  "))
+        .map(|line| line.split_whitespace().collect())
+        .collect();
+    assert!(table_rows.contains(&vec!["right", "active", "10.0%", "/", "unknown", "-"]));
+    assert!(table_rows.contains(&vec!["left", "passthrough", "-", "-"]));
     assert!(
-        stdout.contains("Zones    right active; left, top, bottom passthrough"),
+        stdout.contains("Size     unavailable"),
         "stdout was: {stdout}"
     );
-    assert!(
-        stdout.contains("widths: left off, right 10.0%, top off, bottom off"),
-        "stdout was: {stdout}"
-    );
-    assert!(
-        stdout.contains("Size     width unavailable; height unavailable"),
-        "stdout was: {stdout}"
-    );
-    assert!(
-        stdout.contains("Actions  1 gesture binding, 0 sliders, 1 command"),
-        "stdout was: {stdout}"
-    );
+    assert!(stdout.contains("Bindings 1 swipe"), "stdout was: {stdout}");
     assert!(
         stdout.contains("Result   misconfigured"),
         "stdout was: {stdout}"

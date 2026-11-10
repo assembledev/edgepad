@@ -76,11 +76,32 @@ fn print_status_report(report: &StatusReport) {
     println!();
 
     for line in &report.lines {
-        println!("{:<8} {}", line.subject.label(), line.detail);
+        if line.subject == edgepad::status::StatusSubject::Zones {
+            println!("\nZones\n");
+            for row in line.detail.lines() {
+                if row.is_empty() {
+                    println!();
+                } else {
+                    println!("  {row}");
+                }
+            }
+        } else {
+            let mut rows = line.detail.lines();
+            println!(
+                "{:<8} {}",
+                line.subject.label(),
+                rows.next().unwrap_or_default()
+            );
+            for row in rows {
+                println!("         {row}");
+            }
+        }
     }
 
-    println!();
-    println!("{:<8} {}", "Result", report.result.label());
+    if report.result != edgepad::status::StatusResult::Running {
+        println!();
+        println!("{:<8} {}", "Result", report.result.label());
+    }
 }
 
 fn print_doctor_report(report: &DoctorReport) {

@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,10 +6,9 @@ use evdev::Device;
 use crate::config::{
     default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
 };
-use crate::core::{EdgeWidths, SliderAxis, Zone};
+use crate::core::{GestureDirection, SliderAxis, Zone};
 use crate::device::{
-    discover_device_report, format_device_line, summary_from_device, touchpad_candidates, AxisInfo,
-    DeviceSummary,
+    discover_device_report, summary_from_device, touchpad_candidates, AxisInfo, DeviceSummary,
 };
 
 mod service;
@@ -48,8 +46,7 @@ pub enum StatusSubject {
     Device,
     Size,
     Zones,
-    Sliders,
-    Actions,
+    Bindings,
 }
 
 impl StatusSubject {
@@ -59,9 +56,8 @@ impl StatusSubject {
             Self::Config => "Config",
             Self::Device => "Device",
             Self::Size => "Size",
-            Self::Sliders => "Sliders",
             Self::Zones => "Zones",
-            Self::Actions => "Actions",
+            Self::Bindings => "Bindings",
         }
     }
 }
@@ -145,9 +141,8 @@ pub fn run_status(config: &StatusConfig) -> StatusReport {
             let size = PhysicalSize::from_device(device.as_ref());
             lines.push(device_line);
             lines.push(size.status_line());
+            lines.push(bindings_status_line(&edgepad_config));
             lines.push(zones_status_line(&edgepad_config, size));
-            lines.extend(slider_status_lines(&edgepad_config, size));
-            lines.push(actions_status_line(&edgepad_config));
         }
         Err(err) => {
             lines.push(StatusLine::fail(StatusSubject::Config, err));
@@ -203,7 +198,10 @@ fn device_status_line(
     };
     match selected {
         Ok(device) => (
-            StatusLine::ok(StatusSubject::Device, format_device_line(&device)),
+            StatusLine::ok(
+                StatusSubject::Device,
+                format!("{}\n{}", device.name, device.path.display()),
+            ),
             Some(device),
         ),
         Err(err) => (StatusLine::fail(StatusSubject::Device, err), None),
@@ -266,118 +264,104 @@ impl PhysicalSize {
     }
 
     fn status_line(self) -> StatusLine {
-        let dimension = |value: Option<f64>| match value {
-            Some(mm) => format!("approximately {mm:.1} mm"),
-            None => "unavailable".to_string(),
+        let detail = match (self.width, self.height) {
+            (Some(w), Some(h)) => format!("{w:.1} x {h:.1} mm (width x height)"),
+            (Some(w), None) => format!("width {w:.1} mm; height unavailable"),
+            (None, Some(h)) => format!("width unavailable; height {h:.1} mm"),
+            (None, None) => "unavailable (device dimensions not reported)".to_string(),
         };
-        StatusLine::ok(
-            StatusSubject::Size,
-            format!(
-                "width {}; height {} (device-reported; requires valid axis range and resolution)",
-                dimension(self.width),
-                dimension(self.height)
-            ),
-        )
+        StatusLine::ok(StatusSubject::Size, detail)
     }
 }
 
-fn slider_status_lines(config: &EdgepadConfig, size: PhysicalSize) -> Vec<StatusLine> {
-    config
-        .sliders
-        .iter()
-        .map(|slider| {
-            let (axis, length) = match slider.axis {
-                SliderAxis::Horizontal => ("width", size.width),
-                SliderAxis::Vertical => ("height", size.height),
-            };
-            let distance = match length {
-                Some(mm) => format!("approximately {:.1} mm", mm * f64::from(slider.step)),
-                None => "physical distance unavailable".to_string(),
-            };
-            StatusLine::ok(
-                StatusSubject::Sliders,
-                format!(
-                    "{}: {:.1}% of {axis} ({distance}) per step",
-                    zone_name(slider.zone),
-                    slider.step * 100.0
-                ),
-            )
-        })
-        .collect()
+fn distance_label(fraction: f32, length: Option<f64>) -> String {
+    match length {
+        Some(mm) => format!(
+            "{:.1}% / {:.1} mm",
+            fraction * 100.0,
+            mm * f64::from(fraction)
+        ),
+        None => format!("{:.1}% / unknown", fraction * 100.0),
+    }
 }
 
 fn zones_status_line(config: &EdgepadConfig, size: PhysicalSize) -> StatusLine {
-    let active_zones: Vec<Zone> = ordered_zones()
-        .iter()
-        .copied()
-        .filter(|zone| {
-            config.gestures.iter().any(|binding| binding.zone == *zone)
-                || config.sliders.iter().any(|binding| binding.zone == *zone)
-        })
-        .collect();
-    let inactive_zones: Vec<Zone> = ordered_zones()
-        .iter()
-        .copied()
-        .filter(|zone| !active_zones.contains(zone))
-        .collect();
-
-    if active_zones.is_empty() {
+    if config.gestures.is_empty() && config.sliders.is_empty() {
         return StatusLine::fail(StatusSubject::Zones, "none configured");
     }
-
-    StatusLine::ok(
-        StatusSubject::Zones,
-        format!(
-            "{} active; {} passthrough; widths: {}",
-            zone_list_label(&active_zones),
-            zone_list_label(&inactive_zones),
-            edge_widths_label(config.active_edge_widths(), size)
-        ),
-    )
+    let widths = config.active_edge_widths();
+    let mut rows = vec![format!(
+        "{:<8}{:<14}{:<22}{}",
+        "Edge", "Mode", "Zone width", "Slider step"
+    )];
+    for zone in ordered_zones() {
+        let (width, length) = match zone {
+            Zone::Left => (widths.left, size.width),
+            Zone::Right => (widths.right, size.width),
+            Zone::Top => (widths.top, size.height),
+            Zone::Bottom => (widths.bottom, size.height),
+        };
+        let active = config.gestures.iter().any(|binding| binding.zone == zone)
+            || config.sliders.iter().any(|binding| binding.zone == zone);
+        let width = if active {
+            distance_label(width, length)
+        } else {
+            "-".into()
+        };
+        let step = config
+            .sliders
+            .iter()
+            .find(|slider| slider.zone == zone)
+            .map(|slider| {
+                let length = match slider.axis {
+                    SliderAxis::Horizontal => size.width,
+                    SliderAxis::Vertical => size.height,
+                };
+                distance_label(slider.step, length)
+            })
+            .unwrap_or_else(|| "-".into());
+        rows.push(format!(
+            "{:<8}{:<14}{:<22}{}",
+            zone_name(zone),
+            if active { "active" } else { "passthrough" },
+            width,
+            step
+        ));
+    }
+    if size.width.is_none() || size.height.is_none() {
+        rows.push(String::new());
+        rows.push("unknown = physical distance unavailable".into());
+    }
+    StatusLine::ok(StatusSubject::Zones, rows.join("\n"))
 }
 
-fn actions_status_line(config: &EdgepadConfig) -> StatusLine {
+fn bindings_status_line(config: &EdgepadConfig) -> StatusLine {
     if config.gestures.is_empty() && config.sliders.is_empty() {
-        return StatusLine::fail(StatusSubject::Actions, "no bindings configured");
+        return StatusLine::fail(StatusSubject::Bindings, "none configured");
     }
-
-    let mut commands = config
-        .gestures
-        .iter()
-        .filter_map(|binding| match &binding.action {
-            crate::config::GestureActionConfig::Command { argv } => argv.first(),
-            crate::config::GestureActionConfig::Log => None,
-        })
-        .collect::<BTreeSet<_>>();
-    for slider in &config.sliders {
-        if let Some(program) = slider.negative.argv.first() {
-            commands.insert(program);
-        }
-        if let Some(program) = slider.positive.argv.first() {
-            commands.insert(program);
+    let mut taps = 0;
+    let mut double_taps = 0;
+    let mut swipes = 0;
+    for binding in &config.gestures {
+        match binding.direction {
+            GestureDirection::Tap => taps += 1,
+            GestureDirection::DoubleTap => double_taps += 1,
+            _ => swipes += 1,
         }
     }
-    let command_count = commands.len();
-
-    let detail = match command_count {
-        0 => format!(
-            "{}, {}; log actions only",
-            binding_count_label(config.gestures.len()),
-            slider_count_label(config.sliders.len())
-        ),
-        1 => format!(
-            "{}, {}, 1 command",
-            binding_count_label(config.gestures.len()),
-            slider_count_label(config.sliders.len())
-        ),
-        count => format!(
-            "{}, {}, {count} commands",
-            binding_count_label(config.gestures.len()),
-            slider_count_label(config.sliders.len())
-        ),
-    };
-
-    StatusLine::ok(StatusSubject::Actions, detail)
+    let counts = [
+        (taps, "tap"),
+        (double_taps, "double-tap"),
+        (swipes, "swipe"),
+        (config.sliders.len(), "slider"),
+    ];
+    let detail = counts
+        .into_iter()
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, name)| format!("{count} {name}{}", if count == 1 { "" } else { "s" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    StatusLine::ok(StatusSubject::Bindings, detail)
 }
 
 fn status_result(lines: &[StatusLine]) -> StatusResult {
@@ -405,63 +389,12 @@ fn ordered_zones() -> [Zone; 4] {
     [Zone::Left, Zone::Right, Zone::Top, Zone::Bottom]
 }
 
-fn zone_list_label(zones: &[Zone]) -> String {
-    if zones.is_empty() {
-        return "none".to_string();
-    }
-
-    zones
-        .iter()
-        .map(|zone| zone_name(*zone))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn zone_name(zone: Zone) -> &'static str {
     match zone {
         Zone::Left => "left",
         Zone::Right => "right",
         Zone::Top => "top",
         Zone::Bottom => "bottom",
-    }
-}
-
-fn edge_widths_label(widths: EdgeWidths, size: PhysicalSize) -> String {
-    format!(
-        "left {}, right {}, top {}, bottom {}",
-        edge_width_label(widths.left, size.width),
-        edge_width_label(widths.right, size.width),
-        edge_width_label(widths.top, size.height),
-        edge_width_label(widths.bottom, size.height)
-    )
-}
-
-fn edge_width_label(width: f32, length_mm: Option<f64>) -> String {
-    if width <= f32::EPSILON {
-        "off".to_string()
-    } else {
-        match length_mm {
-            Some(mm) => format!(
-                "{:.1}% (approximately {:.1} mm)",
-                width * 100.0,
-                mm * f64::from(width)
-            ),
-            None => format!("{:.1}%", width * 100.0),
-        }
-    }
-}
-
-fn binding_count_label(count: usize) -> String {
-    match count {
-        1 => "1 gesture binding".to_string(),
-        _ => format!("{count} gesture bindings"),
-    }
-}
-
-fn slider_count_label(count: usize) -> String {
-    match count {
-        1 => "1 slider".to_string(),
-        _ => format!("{count} sliders"),
     }
 }
 
@@ -534,18 +467,21 @@ mod tests {
         assert!(size
             .status_line()
             .detail
-            .contains("width approximately 150.0 mm; height approximately 100.0 mm"));
-        assert_eq!(zones_status_line(&config, size).detail,
-            "left, right, top, bottom active; none passthrough; widths: left 10.0% (approximately 15.0 mm), right 10.0% (approximately 15.0 mm), top 10.0% (approximately 10.0 mm), bottom 5.0% (approximately 5.0 mm)");
-        let sliders = slider_status_lines(&config, size);
-        let details: Vec<_> = sliders.iter().map(|line| line.detail.as_str()).collect();
+            .contains("150.0 x 100.0 mm (width x height)"));
+        let table = zones_status_line(&config, size).detail;
+        let rows: Vec<Vec<&str>> = table
+            .lines()
+            .skip(1)
+            .take(4)
+            .map(|row| row.split_whitespace().collect())
+            .collect();
         assert_eq!(
-            details,
+            rows,
             [
-                "left: 4.0% of height (approximately 4.0 mm) per step",
-                "right: 4.0% of height (approximately 4.0 mm) per step",
-                "top: 12.0% of width (approximately 18.0 mm) per step",
-                "bottom: 12.0% of width (approximately 18.0 mm) per step",
+                vec!["left", "active", "10.0%", "/", "15.0", "mm", "4.0%", "/", "4.0", "mm"],
+                vec!["right", "active", "10.0%", "/", "15.0", "mm", "4.0%", "/", "4.0", "mm"],
+                vec!["top", "active", "10.0%", "/", "10.0", "mm", "12.0%", "/", "18.0", "mm"],
+                vec!["bottom", "active", "5.0%", "/", "5.0", "mm", "12.0%", "/", "18.0", "mm"],
             ]
         );
     }
@@ -559,18 +495,14 @@ mod tests {
         assert_eq!(size.width, Some(150.0));
         assert_eq!(size.height, None);
         assert!(size.status_line().detail.contains("height unavailable"));
-        assert!(zones_status_line(&config, size)
-            .detail
-            .contains("top 10.0%, bottom 5.0%"));
-        let sliders = slider_status_lines(&config, size);
+        let table = zones_status_line(&config, size).detail;
+        assert!(table.contains("10.0% / unknown"));
+        assert!(table.contains("4.0% / unknown"));
+        assert!(table.contains("12.0% / 18.0 mm"));
         assert_eq!(
-            sliders[0].detail,
-            "left: 4.0% of height (physical distance unavailable) per step"
+            zones_status_line(&config, size).severity,
+            StatusSeverity::Ok
         );
-        assert!(sliders[3].detail.contains("approximately 18.0 mm"));
-        assert!(sliders
-            .iter()
-            .all(|line| line.severity == StatusSeverity::Ok));
     }
 
     #[test]
@@ -587,10 +519,9 @@ mod tests {
             assert!(size
                 .status_line()
                 .detail
-                .contains("width unavailable; height unavailable"));
-            assert_eq!(edge_width_label(0.0, size.width), "off");
+                .contains("unavailable (device dimensions not reported)"));
+            assert_eq!(distance_label(0.1, size.width), "10.0% / unknown");
         }
-        assert_eq!(edge_width_label(0.0, Some(150.0)), "off");
     }
 
     #[test]
@@ -621,14 +552,21 @@ mod tests {
 
         assert_eq!(line.severity, StatusSeverity::Ok);
         assert_eq!(line.subject, StatusSubject::Zones);
-        assert_eq!(
-            line.detail,
-            "right, top active; left, bottom passthrough; widths: left off, right 20.0%, top 20.0%, bottom off"
-        );
+        let rows: Vec<Vec<&str>> = line
+            .detail
+            .lines()
+            .skip(1)
+            .take(4)
+            .map(|row| row.split_whitespace().collect())
+            .collect();
+        assert_eq!(rows[0], ["left", "passthrough", "-", "-"]);
+        assert_eq!(rows[1], ["right", "active", "20.0%", "/", "unknown", "-"]);
+        assert_eq!(rows[2], ["top", "active", "20.0%", "/", "unknown", "-"]);
+        assert_eq!(rows[3], ["bottom", "passthrough", "-", "-"]);
     }
 
     #[test]
-    fn actions_status_counts_unique_command_programs() {
+    fn bindings_status_counts_gesture_types_instead_of_programs() {
         let config = EdgepadConfig {
             device: DeviceConfig::Auto,
             edge_width: 0.10,
@@ -655,14 +593,19 @@ mod tests {
                     direction: GestureDirection::Tap,
                     action: GestureActionConfig::Log,
                 },
+                GestureBindingConfig {
+                    zone: Zone::Right,
+                    direction: GestureDirection::DoubleTap,
+                    action: GestureActionConfig::Log,
+                },
             ],
-            sliders: Vec::new(),
+            sliders: four_slider_config().sliders,
             ..EdgepadConfig::default()
         };
 
-        let line = actions_status_line(&config);
+        let line = bindings_status_line(&config);
 
-        assert_eq!(line.detail, "3 gesture bindings, 0 sliders, 1 command");
+        assert_eq!(line.detail, "1 tap, 1 double-tap, 2 swipes, 4 sliders");
     }
 
     #[test]
