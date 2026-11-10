@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-INSTALLER_VERSION="v0.3.0"
+INSTALLER_VERSION="v0.4.0"
 REPO="${EDGEPAD_REPO:-assembledev/edgepad}"
 VERSION="${EDGEPAD_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/bin"
