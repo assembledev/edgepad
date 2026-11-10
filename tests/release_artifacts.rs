@@ -95,6 +95,7 @@ fn release_workflow_publishes_required_assets_and_checksums() {
         "nix build --quiet .#release",
         "gh release create \"$TAG_NAME\" result/*",
         "--generate-notes",
+        "--draft",
     ] {
         assert!(
             workflow.contains(required),

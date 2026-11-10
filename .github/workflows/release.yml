@@ -38,4 +38,4 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release create "$TAG_NAME" result/* --verify-tag --title "$TAG_NAME" --generate-notes
+          gh release create "$TAG_NAME" result/* --verify-tag --title "$TAG_NAME" --generate-notes --draft

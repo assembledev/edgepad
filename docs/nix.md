@@ -268,3 +268,4 @@ aarch64-linux
 On x86_64 Linux, `nix build .#release` builds and checks the static binary and
 checksummed release assets in `result/`, using the locked Rust toolchain and
 `pkgsStatic`. It does not publish a release.
+Tag builds create a draft GitHub Release for reviewing notes before publication.
