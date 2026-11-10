@@ -7,8 +7,11 @@ use evdev::Device;
 use crate::config::{
     default_edgepad_config_path, load_edgepad_config, DeviceConfig, EdgepadConfig,
 };
-use crate::core::{EdgeWidths, Zone};
-use crate::device::{discover_device_report, format_device_line, touchpad_candidates};
+use crate::core::{EdgeWidths, SliderAxis, Zone};
+use crate::device::{
+    discover_device_report, format_device_line, summary_from_device, touchpad_candidates, AxisInfo,
+    DeviceSummary,
+};
 
 mod service;
 
@@ -43,7 +46,9 @@ pub enum StatusSubject {
     Service,
     Config,
     Device,
+    Size,
     Zones,
+    Sliders,
     Actions,
 }
 
@@ -53,6 +58,8 @@ impl StatusSubject {
             Self::Service => "Service",
             Self::Config => "Config",
             Self::Device => "Device",
+            Self::Size => "Size",
+            Self::Sliders => "Sliders",
             Self::Zones => "Zones",
             Self::Actions => "Actions",
         }
@@ -133,11 +140,13 @@ pub fn run_status(config: &StatusConfig) -> StatusReport {
                 StatusSubject::Config,
                 config_path.display().to_string(),
             ));
-            lines.push(device_status_line(
-                &edgepad_config.device,
-                &config.input_root,
-            ));
-            lines.push(zones_status_line(&edgepad_config));
+            let (device_line, device) =
+                device_status_line(&edgepad_config.device, &config.input_root);
+            let size = PhysicalSize::from_device(device.as_ref());
+            lines.push(device_line);
+            lines.push(size.status_line());
+            lines.push(zones_status_line(&edgepad_config, size));
+            lines.extend(slider_status_lines(&edgepad_config, size));
             lines.push(actions_status_line(&edgepad_config));
         }
         Err(err) => {
@@ -177,82 +186,127 @@ fn load_status_config(config: &StatusConfig) -> Result<(PathBuf, EdgepadConfig),
     Ok((config_path, edgepad_config))
 }
 
-fn device_status_line(device: &DeviceConfig, input_root: &Path) -> StatusLine {
-    match device {
-        DeviceConfig::Path(path) => explicit_device_status_line(path),
-        DeviceConfig::Auto => auto_device_status_line(input_root),
-    }
-}
-
-fn explicit_device_status_line(path: &Path) -> StatusLine {
-    match Device::open(path) {
-        Ok(device) => StatusLine::ok(
-            StatusSubject::Device,
-            format!(
-                "{} {}",
-                path.display(),
-                device.name().unwrap_or("unknown touchpad")
-            ),
-        ),
-        Err(err) => StatusLine::fail(
-            StatusSubject::Device,
-            format!(
-                "configured path cannot be opened: {} ({err})",
-                path.display()
-            ),
-        ),
-    }
-}
-
-fn auto_device_status_line(input_root: &Path) -> StatusLine {
-    match discover_device_report(input_root) {
-        Ok(discovery) if discovery.event_node_count == 0 => StatusLine::fail(
-            StatusSubject::Device,
-            format!(
-                "auto failed: no event devices under {}",
-                input_root.display()
-            ),
-        ),
-        Ok(discovery) if discovery.summaries.is_empty() => StatusLine::fail(
-            StatusSubject::Device,
-            format!(
-                "auto failed: {} event device(s) found under {}, but none were readable",
-                discovery.event_node_count,
-                input_root.display()
-            ),
-        ),
-        Ok(discovery) => match touchpad_candidates(&discovery.summaries).as_slice() {
-            [] => StatusLine::fail(
-                StatusSubject::Device,
+fn device_status_line(
+    device: &DeviceConfig,
+    input_root: &Path,
+) -> (StatusLine, Option<DeviceSummary>) {
+    let selected = match device {
+        DeviceConfig::Path(path) => Device::open(path)
+            .map(|device| summary_from_device(path.clone(), &device))
+            .map_err(|err| {
                 format!(
-                    "auto failed: no touchpad candidates among {} readable event device(s)",
-                    discovery.summaries.len()
-                ),
-            ),
-            [candidate] => StatusLine::ok(StatusSubject::Device, format_device_line(candidate)),
-            candidates => {
-                let devices = candidates
-                    .iter()
-                    .map(|candidate| candidate.path.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                StatusLine::fail(
-                    StatusSubject::Device,
-                    format!("auto failed: multiple touchpad candidates: {devices}"),
+                    "configured path cannot be opened: {} ({err})",
+                    path.display()
                 )
-            }
-        },
-        Err(err) => StatusLine::fail(
-            StatusSubject::Device,
-            format!(
-                "auto failed: failed to list {}: {err}",
-                input_root.display()
-            ),
+            }),
+        DeviceConfig::Auto => auto_status_device(input_root),
+    };
+    match selected {
+        Ok(device) => (
+            StatusLine::ok(StatusSubject::Device, format_device_line(&device)),
+            Some(device),
         ),
+        Err(err) => (StatusLine::fail(StatusSubject::Device, err), None),
     }
 }
 
-fn zones_status_line(config: &EdgepadConfig) -> StatusLine {
+fn auto_status_device(input_root: &Path) -> Result<DeviceSummary, String> {
+    let discovery = discover_device_report(input_root).map_err(|err| {
+        format!(
+            "auto failed: failed to list {}: {err}",
+            input_root.display()
+        )
+    })?;
+    if discovery.event_node_count == 0 {
+        return Err(format!(
+            "auto failed: no event devices under {}",
+            input_root.display()
+        ));
+    }
+    if discovery.summaries.is_empty() {
+        return Err(format!(
+            "auto failed: {} event device(s) found under {}, but none were readable",
+            discovery.event_node_count,
+            input_root.display()
+        ));
+    }
+    match touchpad_candidates(&discovery.summaries).as_slice() {
+        [] => Err(format!(
+            "auto failed: no touchpad candidates among {} readable event device(s)",
+            discovery.summaries.len()
+        )),
+        [candidate] => Ok((*candidate).clone()),
+        candidates => Err(format!(
+            "auto failed: multiple touchpad candidates: {}",
+            candidates
+                .iter()
+                .map(|candidate| candidate.path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct PhysicalSize {
+    width: Option<f64>,
+    height: Option<f64>,
+}
+
+impl PhysicalSize {
+    fn from_device(device: Option<&DeviceSummary>) -> Self {
+        Self {
+            width: device
+                .and_then(|device| device.x_range)
+                .and_then(AxisInfo::length_mm),
+            height: device
+                .and_then(|device| device.y_range)
+                .and_then(AxisInfo::length_mm),
+        }
+    }
+
+    fn status_line(self) -> StatusLine {
+        let dimension = |value: Option<f64>| match value {
+            Some(mm) => format!("approximately {mm:.1} mm"),
+            None => "unavailable".to_string(),
+        };
+        StatusLine::ok(
+            StatusSubject::Size,
+            format!(
+                "width {}; height {} (device-reported; requires valid axis range and resolution)",
+                dimension(self.width),
+                dimension(self.height)
+            ),
+        )
+    }
+}
+
+fn slider_status_lines(config: &EdgepadConfig, size: PhysicalSize) -> Vec<StatusLine> {
+    config
+        .sliders
+        .iter()
+        .map(|slider| {
+            let (axis, length) = match slider.axis {
+                SliderAxis::Horizontal => ("width", size.width),
+                SliderAxis::Vertical => ("height", size.height),
+            };
+            let distance = match length {
+                Some(mm) => format!("approximately {:.1} mm", mm * f64::from(slider.step)),
+                None => "physical distance unavailable".to_string(),
+            };
+            StatusLine::ok(
+                StatusSubject::Sliders,
+                format!(
+                    "{}: {:.1}% of {axis} ({distance}) per step",
+                    zone_name(slider.zone),
+                    slider.step * 100.0
+                ),
+            )
+        })
+        .collect()
+}
+
+fn zones_status_line(config: &EdgepadConfig, size: PhysicalSize) -> StatusLine {
     let active_zones: Vec<Zone> = ordered_zones()
         .iter()
         .copied()
@@ -277,7 +331,7 @@ fn zones_status_line(config: &EdgepadConfig) -> StatusLine {
             "{} active; {} passthrough; widths: {}",
             zone_list_label(&active_zones),
             zone_list_label(&inactive_zones),
-            edge_widths_label(config.active_edge_widths())
+            edge_widths_label(config.active_edge_widths(), size)
         ),
     )
 }
@@ -372,21 +426,28 @@ fn zone_name(zone: Zone) -> &'static str {
     }
 }
 
-fn edge_widths_label(widths: EdgeWidths) -> String {
+fn edge_widths_label(widths: EdgeWidths, size: PhysicalSize) -> String {
     format!(
         "left {}, right {}, top {}, bottom {}",
-        edge_width_label(widths.left),
-        edge_width_label(widths.right),
-        edge_width_label(widths.top),
-        edge_width_label(widths.bottom)
+        edge_width_label(widths.left, size.width),
+        edge_width_label(widths.right, size.width),
+        edge_width_label(widths.top, size.height),
+        edge_width_label(widths.bottom, size.height)
     )
 }
 
-fn edge_width_label(width: f32) -> String {
+fn edge_width_label(width: f32, length_mm: Option<f64>) -> String {
     if width <= f32::EPSILON {
         "off".to_string()
     } else {
-        format!("{:.1}%", width * 100.0)
+        match length_mm {
+            Some(mm) => format!(
+                "{:.1}% (approximately {:.1} mm)",
+                width * 100.0,
+                mm * f64::from(width)
+            ),
+            None => format!("{:.1}%", width * 100.0),
+        }
     }
 }
 
@@ -413,6 +474,125 @@ mod tests {
     };
     use crate::core::GestureDirection;
 
+    fn measured_device() -> DeviceSummary {
+        DeviceSummary {
+            path: PathBuf::from("/dev/input/event7"),
+            name: "Test touchpad".into(),
+            vendor: 1,
+            product: 1,
+            kind: crate::device::DeviceKind::Touchpad,
+            slot_range: None,
+            x_range: Some(AxisInfo {
+                min: 100,
+                max: 4900,
+                resolution: 32,
+            }),
+            y_range: Some(AxisInfo {
+                min: -100,
+                max: 1900,
+                resolution: 20,
+            }),
+        }
+    }
+
+    fn four_slider_config() -> EdgepadConfig {
+        EdgepadConfig::parse(
+            r#"
+            edge_width = 0.10
+            bottom_edge_width = 0.05
+            [[sliders]]
+            zone = "left"
+            step = 0.04
+            up = ["example", "up"]
+            down = ["example", "down"]
+            [[sliders]]
+            zone = "right"
+            step = 0.04
+            up = ["example", "up"]
+            down = ["example", "down"]
+            [[sliders]]
+            zone = "top"
+            step = 0.12
+            left = ["example", "left"]
+            right = ["example", "right"]
+            [[sliders]]
+            zone = "bottom"
+            step = 0.12
+            left = ["example", "left"]
+            right = ["example", "right"]
+        "#,
+        )
+        .expect("valid sliders")
+    }
+
+    #[test]
+    fn measurements_use_each_axis_resolution_and_configured_overrides() {
+        let size = PhysicalSize::from_device(Some(&measured_device()));
+        let config = four_slider_config();
+        assert_eq!(size.width, Some(150.0));
+        assert_eq!(size.height, Some(100.0));
+        assert!(size
+            .status_line()
+            .detail
+            .contains("width approximately 150.0 mm; height approximately 100.0 mm"));
+        assert_eq!(zones_status_line(&config, size).detail,
+            "left, right, top, bottom active; none passthrough; widths: left 10.0% (approximately 15.0 mm), right 10.0% (approximately 15.0 mm), top 10.0% (approximately 10.0 mm), bottom 5.0% (approximately 5.0 mm)");
+        let sliders = slider_status_lines(&config, size);
+        let details: Vec<_> = sliders.iter().map(|line| line.detail.as_str()).collect();
+        assert_eq!(
+            details,
+            [
+                "left: 4.0% of height (approximately 4.0 mm) per step",
+                "right: 4.0% of height (approximately 4.0 mm) per step",
+                "top: 12.0% of width (approximately 18.0 mm) per step",
+                "bottom: 12.0% of width (approximately 18.0 mm) per step",
+            ]
+        );
+    }
+
+    #[test]
+    fn missing_resolution_keeps_percentages_and_the_other_axis_measurements() {
+        let mut device = measured_device();
+        device.y_range.as_mut().unwrap().resolution = 0;
+        let size = PhysicalSize::from_device(Some(&device));
+        let config = four_slider_config();
+        assert_eq!(size.width, Some(150.0));
+        assert_eq!(size.height, None);
+        assert!(size.status_line().detail.contains("height unavailable"));
+        assert!(zones_status_line(&config, size)
+            .detail
+            .contains("top 10.0%, bottom 5.0%"));
+        let sliders = slider_status_lines(&config, size);
+        assert_eq!(
+            sliders[0].detail,
+            "left: 4.0% of height (physical distance unavailable) per step"
+        );
+        assert!(sliders[3].detail.contains("approximately 18.0 mm"));
+        assert!(sliders
+            .iter()
+            .all(|line| line.severity == StatusSeverity::Ok));
+    }
+
+    #[test]
+    fn missing_device_or_axis_metadata_does_not_invent_measurements() {
+        let mut device = measured_device();
+        device.x_range = None;
+        device.y_range = None;
+        for size in [
+            PhysicalSize::from_device(None),
+            PhysicalSize::from_device(Some(&device)),
+        ] {
+            assert_eq!(size.width, None);
+            assert_eq!(size.height, None);
+            assert!(size
+                .status_line()
+                .detail
+                .contains("width unavailable; height unavailable"));
+            assert_eq!(edge_width_label(0.0, size.width), "off");
+        }
+        assert_eq!(edge_width_label(0.0, Some(150.0)), "off");
+    }
+
     #[test]
     fn zones_status_reports_active_and_passthrough_edges() {
         let config = EdgepadConfig {
@@ -437,7 +617,7 @@ mod tests {
             ..EdgepadConfig::default()
         };
 
-        let line = zones_status_line(&config);
+        let line = zones_status_line(&config, PhysicalSize::default());
 
         assert_eq!(line.severity, StatusSeverity::Ok);
         assert_eq!(line.subject, StatusSubject::Zones);

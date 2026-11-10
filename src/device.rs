@@ -17,6 +17,17 @@ nix::ioctl_read_buf!(eviocgmtslots, b'E', 0x0a, u8);
 pub struct AxisInfo {
     pub min: i32,
     pub max: i32,
+    /// Kernel-reported axis units per millimetre (zero means unknown).
+    pub resolution: i32,
+}
+
+impl AxisInfo {
+    pub fn length_mm(self) -> Option<f64> {
+        if self.resolution <= 0 || self.max <= self.min {
+            return None;
+        }
+        Some((f64::from(self.max) - f64::from(self.min)) / f64::from(self.resolution))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -213,7 +224,7 @@ pub fn format_device_line(summary: &DeviceSummary) -> String {
     )
 }
 
-fn summary_from_device(path: PathBuf, device: &Device) -> DeviceSummary {
+pub(crate) fn summary_from_device(path: PathBuf, device: &Device) -> DeviceSummary {
     let caps = capabilities_from_device(device);
     let input_id = device.input_id();
 
@@ -254,6 +265,7 @@ fn axis_info(device: &Device, wanted: AbsoluteAxisCode) -> Option<AxisInfo> {
         (axis == wanted).then_some(AxisInfo {
             min: info.minimum(),
             max: info.maximum(),
+            resolution: info.resolution(),
         })
     })
 }
@@ -289,6 +301,38 @@ mod tests {
     use std::os::unix::net::UnixStream;
 
     use super::*;
+
+    #[test]
+    fn physical_axis_length_uses_span_and_resolution() {
+        let axis = AxisInfo {
+            min: -100,
+            max: 4700,
+            resolution: 32,
+        };
+        assert_eq!(axis.length_mm(), Some(150.0));
+        // Convert before subtracting so even extreme driver ranges cannot overflow.
+        let axis = AxisInfo {
+            min: i32::MIN,
+            max: i32::MAX,
+            resolution: 1,
+        };
+        assert_eq!(axis.length_mm(), Some(4_294_967_295.0));
+    }
+
+    #[test]
+    fn physical_axis_length_rejects_unknown_resolution_and_invalid_ranges() {
+        for (min, max, resolution) in [(0, 100, 0), (0, 100, -1), (10, 10, 1), (20, 10, 1)] {
+            assert_eq!(
+                AxisInfo {
+                    min,
+                    max,
+                    resolution
+                }
+                .length_mm(),
+                None
+            );
+        }
+    }
 
     #[test]
     fn wait_for_fd_readable_reports_timeout_and_ready_data() {
