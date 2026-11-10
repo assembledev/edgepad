@@ -24,38 +24,13 @@ jobs:
           PACKAGE_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
           test "$TAG_NAME" = "v$PACKAGE_VERSION"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
         with:
-          targets: x86_64-unknown-linux-musl
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install musl linker
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-
-      - name: Test
-        run: cargo test --locked
-
-      - name: Build release binary
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
-
-      - name: Prepare release assets
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/edgepad dist/edgepad-x86_64-unknown-linux-musl
-          strip dist/edgepad-x86_64-unknown-linux-musl
-          if readelf -l dist/edgepad-x86_64-unknown-linux-musl | grep -q 'INTERP'; then
-            echo "release binary unexpectedly requires a dynamic loader" >&2
-            exit 1
-          fi
-          dist/edgepad-x86_64-unknown-linux-musl --version
-          cp packaging/70-edgepad.rules dist/70-edgepad.rules
-          cp packaging/edgepad.service dist/edgepad.service
-          cp examples/edgepad.toml.example dist/edgepad.toml.example
-          (cd dist && sha256sum edgepad-x86_64-unknown-linux-musl 70-edgepad.rules edgepad.service edgepad.toml.example > checksums)
+      - name: Build and test release artifacts
+        run: nix build --quiet .#release
 
       - name: Publish GitHub Release
         env:
@@ -63,4 +38,4 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          gh release create "$TAG_NAME" dist/* --verify-tag --title "$TAG_NAME" --generate-notes
+          gh release create "$TAG_NAME" result/* --verify-tag --title "$TAG_NAME" --generate-notes
